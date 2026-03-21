@@ -1,0 +1,48 @@
+{
+  "name": "supaforge",
+  "version": "0.2.0",
+  "description": "Detect and fix drift across all your Supabase environments",
+  "author": "Akal Forge",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "supaforge": "./bin/run.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "bin",
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "./bin/dev.js",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "oclif": {
+    "bin": "supaforge",
+    "dirname": "supaforge",
+    "commands": {
+      "strategy": "pattern",
+      "target": "./dist/commands"
+    },
+    "topicSeparator": " "
+  },
+  "dependencies": {
+    "@oclif/core": "^4",
+    "pg": "^8"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "@types/pg": "^8",
+    "tsup": "^8.5.1",
+    "tsx": "^4",
+    "typescript": "^5",
+    "vitest": "^3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

@@ -1,20 +1,8 @@
-# SupaForge
+# supaforge
 
 > Detect and fix drift across all your Supabase environments — the environment sync tool Supabase developers have been asking for.
 
-[![CI](https://github.com/akalforge/supaforge/actions/workflows/ci.yml/badge.svg)](https://github.com/akalforge/supaforge/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/supaforge.svg)](https://www.npmjs.com/package/supaforge)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-
----
-
-## Why SupaForge?
-
-Supabase projects running in multiple environments (dev, staging, production) silently diverge across **eight distinct layers** — schema, RLS policies, Edge Functions, storage, auth, cron jobs, reference data, and webhooks — with no first-class tooling to detect or fix it.
-
-**CVE-2025-48757** found 170+ apps with fully exposed databases due to RLS policies that were never promoted to production. SupaForge catches this on the first scan.
-
-Built by **[Akal Forge](https://github.com/akalforge)** — precision developer tools, forged to last.
+Built by [Akal Forge](https://github.com/akalforge). Powered by [oclif](https://oclif.io). Extensible via hooks inspired by [@plug/core](https://github.com/akalforge/plug).
 
 ## Quick Start
 
@@ -55,13 +43,13 @@ supaforge hukam
 
 | # | Layer | Source | Status |
 |---|-------|--------|--------|
-| 1 | Schema | `@dbdiff/cli` | ⏳ Awaiting npm release |
+| 1 | Schema | `@dbdiff/cli` | ⏳ Awaiting `@dbdiff/cli` npm release |
 | 2 | RLS Policies | `pg_policies` view | ✅ Ready |
 | 3 | Edge Functions | Management API | ✅ Ready |
 | 4 | Storage | Storage API | ✅ Ready |
 | 5 | Auth Config | Management API | ✅ Ready |
 | 6 | Cron Jobs | `cron.job` table | ✅ Ready |
-| 7 | Reference Data | `@dbdiff/cli --type=data` | ⏳ Awaiting npm release |
+| 7 | Reference Data | `@dbdiff/cli --type=data` | ⏳ Awaiting `@dbdiff/cli` npm release |
 | 8 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ Ready |
 
 ## Commands
@@ -77,7 +65,7 @@ supaforge hukam             Alias for scan 🙏
 
 ## Configuration
 
-Create `supaforge.config.json` in your project root:
+`supaforge.config.json` in your project root:
 
 ```json
 {
@@ -108,7 +96,7 @@ Supabase internal schemas (`auth`, `storage`, `realtime`, `vault`, etc.) are ign
 
 ## Extending with Hooks
 
-SupaForge uses a hook bus inspired by [@plug/core](https://github.com/akalforge/plug) for extensibility:
+SupaForge uses a hook bus (inspired by [@plug/core](https://github.com/akalforge/plug)) for extensibility:
 
 ```typescript
 import { HookBus, scan, createDefaultRegistry, loadConfig } from 'supaforge'
@@ -130,49 +118,17 @@ const registry = createDefaultRegistry()
 const result = await scan(registry, { config }, bus)
 ```
 
-## Architecture
-
-```
-packages/cli/
-├── src/
-│   ├── commands/        # oclif commands (scan, diff, hukam)
-│   ├── layers/          # 8 drift detection layers
-│   │   ├── base.ts      # Abstract Layer class
-│   │   ├── registry.ts  # LayerRegistry
-│   │   ├── rls.ts       # RLS policy diffing
-│   │   ├── cron.ts      # Cron job diffing
-│   │   └── ...          # edge-functions, storage, auth, webhooks, schema, data
-│   ├── types/           # TypeScript interfaces
-│   ├── config.ts        # Config loader + validator
-│   ├── hooks.ts         # HookBus (actions + filters)
-│   ├── scanner.ts       # Scan orchestrator
-│   ├── scoring.ts       # Health score (0–100)
-│   └── render.ts        # Terminal output
-└── test/                # 58 tests across 7 suites
-```
-
 ## Development
 
 ```bash
-git clone https://github.com/akalforge/supaforge.git
-cd supaforge/packages/cli
+cd packages/cli
 npm install
-npm test       # Run all tests
-npm run lint   # Type-check
-npm run build  # Build with tsup
+npm test
 
 # Run in dev mode
 ./bin/dev.js scan
 ```
 
-## Contributing
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and pull request guidelines.
-
-## Security
-
-To report a vulnerability, see [SECURITY.md](SECURITY.md).
-
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2026 Akal Forge
+MIT

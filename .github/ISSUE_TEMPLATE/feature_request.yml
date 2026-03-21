@@ -1,0 +1,68 @@
+name: Feature Request
+description: Suggest a new feature or improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting an improvement to SupaForge!
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What problem does this feature solve? Is it related to a frustration?
+      placeholder: I'm always frustrated when...
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Describe the feature and how it would work.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Have you considered any alternative solutions or workarounds?
+
+  - type: dropdown
+    id: layer
+    attributes:
+      label: Related Layer
+      description: Does this relate to a specific drift layer?
+      options:
+        - Schema (Layer 1)
+        - RLS Policies (Layer 2)
+        - Edge Functions (Layer 3)
+        - Storage (Layer 4)
+        - Auth Config (Layer 5)
+        - Cron Jobs (Layer 6)
+        - Reference Data (Layer 7)
+        - Webhooks (Layer 8)
+        - Scanner / CLI
+        - Configuration
+        - Hooks / Extensibility
+        - Not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional Context
+      description: Any other context, mockups, or examples.
+
+  - type: checkboxes
+    id: terms
+    attributes:
+      label: Code of Conduct
+      description: By submitting this issue, you agree to follow our Code of Conduct.
+      options:
+        - label: I agree to follow this project's Code of Conduct
+          required: true

@@ -6,12 +6,20 @@
 -- 2. RLS: Modified "users_select_own" USING expression
 -- 3. Cron: Missing "weekly_digest" job, modified "cleanup_sessions" schedule
 -- 4. Webhooks: Missing "on_payment_received", extra "on_invoice_sent"
--- 5. pg_net extension NOT installed (missing from target)
--- 6. Reference data: Missing "Enterprise" plan, different "Pro" price
+-- 5. Reference data: Missing "Enterprise" plan, different "Pro" price
 
 -- === Extensions ===
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- NOTE: pg_net intentionally NOT installed in target
+
+-- === Supabase-compatibility stubs (plain Postgres) ===
+CREATE SCHEMA IF NOT EXISTS auth;
+CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid AS $$
+  SELECT '00000000-0000-0000-0000-000000000000'::uuid;
+$$ LANGUAGE sql STABLE;
+
+DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- === Schema: same tables as source ===
 CREATE TABLE public.users (

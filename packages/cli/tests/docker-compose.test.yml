@@ -1,8 +1,8 @@
 # Docker Compose for SupaForge integration tests.
 #
-# Spins up two separate Supabase Postgres instances (source + target)
-# with deliberately different schemas, RLS policies, cron jobs, and
-# webhooks so the integration test suite can verify drift detection.
+# Spins up two plain Postgres instances (source + target) with
+# Supabase-compatibility stubs so the integration test suite can
+# verify drift detection across RLS, cron, and webhooks layers.
 #
 # Works with both Docker and Podman (podman-compose).
 #
@@ -12,7 +12,7 @@
 
 services:
   source-db:
-    image: supabase/postgres:15.6.1.146
+    image: postgres:15
     environment:
       POSTGRES_PASSWORD: source-test-pass
       POSTGRES_DB: postgres
@@ -24,12 +24,12 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-      start_period: 30s
+      start_period: 10s
     tmpfs:
       - /var/lib/postgresql/data
 
   target-db:
-    image: supabase/postgres:15.6.1.146
+    image: postgres:15
     environment:
       POSTGRES_PASSWORD: target-test-pass
       POSTGRES_DB: postgres
@@ -41,6 +41,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 20
-      start_period: 30s
+      start_period: 10s
     tmpfs:
       - /var/lib/postgresql/data

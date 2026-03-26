@@ -1,9 +1,18 @@
 -- SupaForge integration test: SOURCE database seed
--- This creates a Supabase-style schema with RLS, cron, and webhook fixtures.
+-- Creates a Supabase-style schema with RLS, cron, and webhook fixtures.
+-- Uses plain Postgres with Supabase-compatibility stubs.
 
 -- === Extensions ===
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
-CREATE EXTENSION IF NOT EXISTS "pg_net" WITH SCHEMA extensions;
+
+-- === Supabase-compatibility stubs (plain Postgres) ===
+CREATE SCHEMA IF NOT EXISTS auth;
+CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid AS $$
+  SELECT '00000000-0000-0000-0000-000000000000'::uuid;
+$$ LANGUAGE sql STABLE;
+
+DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- === Schema: tables ===
 CREATE TABLE public.users (

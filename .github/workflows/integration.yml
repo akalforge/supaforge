@@ -13,7 +13,7 @@ jobs:
 
     services:
       source-db:
-        image: supabase/postgres:15.6.1.146
+        image: postgres:15
         env:
           POSTGRES_PASSWORD: source-test-pass
           POSTGRES_DB: postgres
@@ -25,10 +25,10 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-          --health-start-period 30s
+          --health-start-period 10s
 
       target-db:
-        image: supabase/postgres:15.6.1.146
+        image: postgres:15
         env:
           POSTGRES_PASSWORD: target-test-pass
           POSTGRES_DB: postgres
@@ -40,7 +40,7 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 20
-          --health-start-period 30s
+          --health-start-period 10s
 
     steps:
       - name: Checkout code

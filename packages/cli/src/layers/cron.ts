@@ -65,7 +65,7 @@ export function diffCronJobs(source: CronJob[], target: CronJob[]): DriftIssue[]
         description: `Cron job "${key}" (schedule: ${j.schedule}) exists in source but not in target.`,
         sourceValue: j,
         sql: {
-          up: `SELECT cron.schedule('${key}', '${j.schedule}', $$ ${j.command} $$);`,
+          up: `SELECT cron.schedule('${key}', '${j.schedule}', $$${j.command}$$);`,
           down: `SELECT cron.unschedule('${key}');`,
         },
       })
@@ -99,8 +99,8 @@ export function diffCronJobs(source: CronJob[], target: CronJob[]): DriftIssue[]
         sourceValue: sj,
         targetValue: tj,
         sql: {
-          up: `SELECT cron.unschedule('${key}');\nSELECT cron.schedule('${key}', '${sj.schedule}', $$ ${sj.command} $$);`,
-          down: `SELECT cron.unschedule('${key}');\nSELECT cron.schedule('${key}', '${tj.schedule}', $$ ${tj.command} $$);`,
+          up: `SELECT cron.unschedule('${key}');\nSELECT cron.schedule('${key}', '${sj.schedule}', $$${sj.command.trim()}$$);`,
+          down: `SELECT cron.unschedule('${key}');\nSELECT cron.schedule('${key}', '${tj.schedule}', $$${tj.command.trim()}$$);`,
         },
       })
     }

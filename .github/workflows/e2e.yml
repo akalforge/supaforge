@@ -1,0 +1,120 @@
+name: E2E Tests (Supabase)
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  # Allow manual trigger for debugging
+  workflow_dispatch:
+
+jobs:
+  e2e:
+    name: E2E tests (Supabase local)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: packages/cli/package-lock.json
+
+      - name: Install Supabase CLI
+        uses: supabase/setup-cli@v1
+        with:
+          version: latest
+
+      - name: Install dependencies
+        working-directory: packages/cli
+        run: npm ci
+
+      # Start source Supabase instance
+      - name: Start source instance
+        working-directory: packages/cli/tests/e2e/supabase-source
+        run: supabase start --exclude imgproxy
+
+      # Start target Supabase instance
+      - name: Start target instance
+        working-directory: packages/cli/tests/e2e/supabase-target
+        run: supabase start --exclude imgproxy
+
+      # Extract connection info
+      - name: Get source status
+        id: source
+        working-directory: packages/cli/tests/e2e/supabase-source
+        run: |
+          echo "DB_URL=$(supabase status -o env | grep '^DB_URL=' | cut -d= -f2- | tr -d '\"')" >> "$GITHUB_OUTPUT"
+          echo "API_URL=$(supabase status -o env | grep '^API_URL=' | cut -d= -f2- | tr -d '\"')" >> "$GITHUB_OUTPUT"
+          echo "SERVICE_KEY=$(supabase status -o env | grep '^SERVICE_ROLE_KEY=' | cut -d= -f2- | tr -d '\"')" >> "$GITHUB_OUTPUT"
+
+      - name: Get target status
+        id: target
+        working-directory: packages/cli/tests/e2e/supabase-target
+        run: |
+          echo "DB_URL=$(supabase status -o env | grep '^DB_URL=' | cut -d= -f2- | tr -d '\"')" >> "$GITHUB_OUTPUT"
+          echo "API_URL=$(supabase status -o env | grep '^API_URL=' | cut -d= -f2- | tr -d '\"')" >> "$GITHUB_OUTPUT"
+          echo "SERVICE_KEY=$(supabase status -o env | grep '^SERVICE_ROLE_KEY=' | cut -d= -f2- | tr -d '\"')" >> "$GITHUB_OUTPUT"
+
+      # Seed databases
+      - name: Seed source database
+        run: |
+          psql "${{ steps.source.outputs.DB_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f packages/cli/tests/e2e/fixtures/seed-source.sql
+
+      - name: Seed target database
+        run: |
+          psql "${{ steps.target.outputs.DB_URL }}" \
+            -v ON_ERROR_STOP=1 \
+            -f packages/cli/tests/e2e/fixtures/seed-target.sql
+
+      # Create storage buckets via API
+      - name: Seed source storage buckets
+        run: |
+          API="${{ steps.source.outputs.API_URL }}"
+          KEY="${{ steps.source.outputs.SERVICE_KEY }}"
+          curl -sf -X POST "${API}/storage/v1/bucket" \
+            -H "Authorization: Bearer ${KEY}" -H "apikey: ${KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"id":"avatars","name":"avatars","public":true,"file_size_limit":10485760}'
+          curl -sf -X POST "${API}/storage/v1/bucket" \
+            -H "Authorization: Bearer ${KEY}" -H "apikey: ${KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"id":"documents","name":"documents","public":false}'
+
+      - name: Seed target storage buckets (drifted)
+        run: |
+          API="${{ steps.target.outputs.API_URL }}"
+          KEY="${{ steps.target.outputs.SERVICE_KEY }}"
+          curl -sf -X POST "${API}/storage/v1/bucket" \
+            -H "Authorization: Bearer ${KEY}" -H "apikey: ${KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"id":"avatars","name":"avatars","public":false,"file_size_limit":10485760}'
+          curl -sf -X POST "${API}/storage/v1/bucket" \
+            -H "Authorization: Bearer ${KEY}" -H "apikey: ${KEY}" \
+            -H "Content-Type: application/json" \
+            -d '{"id":"backups","name":"backups","public":false}'
+
+      # Run E2E tests
+      - name: Run E2E tests
+        working-directory: packages/cli
+        env:
+          SUPAFORGE_E2E_SOURCE_DB_URL: ${{ steps.source.outputs.DB_URL }}
+          SUPAFORGE_E2E_TARGET_DB_URL: ${{ steps.target.outputs.DB_URL }}
+          SUPAFORGE_E2E_SOURCE_API_URL: ${{ steps.source.outputs.API_URL }}
+          SUPAFORGE_E2E_TARGET_API_URL: ${{ steps.target.outputs.API_URL }}
+          SUPAFORGE_E2E_SOURCE_SERVICE_KEY: ${{ steps.source.outputs.SERVICE_KEY }}
+          SUPAFORGE_E2E_TARGET_SERVICE_KEY: ${{ steps.target.outputs.SERVICE_KEY }}
+        run: npx vitest run --config vitest.e2e.config.ts
+
+      # Cleanup (best-effort)
+      - name: Stop Supabase instances
+        if: always()
+        run: |
+          cd packages/cli/tests/e2e/supabase-source && supabase stop --no-backup || true
+          cd packages/cli/tests/e2e/supabase-target && supabase stop --no-backup || true

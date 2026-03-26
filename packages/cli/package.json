@@ -21,7 +21,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:integration": "./scripts/test-integration.sh",
-    "test:e2e": "vitest run test/e2e/"
+    "test:e2e": "vitest run test/e2e/",
+    "test:e2e:supabase": "./scripts/test-e2e.sh"
   },
   "oclif": {
     "bin": "supaforge",

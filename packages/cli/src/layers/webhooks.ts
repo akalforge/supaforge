@@ -9,6 +9,12 @@ interface WebhookEntry {
   hook_name: string
   created_at: string
   request_id: number | null
+  /** The associated trigger function body (extracted from pg_proc). */
+  function_body: string | null
+  /** The events the trigger fires on (INSERT, UPDATE, DELETE). */
+  events: string | null
+  /** The table the trigger is attached to (schema.table). */
+  trigger_table: string | null
 }
 
 export class WebhooksLayer extends Layer {
@@ -66,10 +72,39 @@ export class WebhooksLayer extends Layer {
   }
 }
 
+/**
+ * Extended query joining hooks with trigger metadata.
+ * Supabase database webhooks are backed by triggers — we extract the
+ * trigger function body and event types so we can generate sync SQL.
+ */
 const HOOKS_SQL = `
-  SELECT id, hook_table_id, hook_name, created_at, request_id
-  FROM supabase_functions.hooks
-  ORDER BY hook_name, id
+  SELECT
+    h.id,
+    h.hook_table_id,
+    h.hook_name,
+    h.created_at,
+    h.request_id,
+    pg_get_functiondef(t.tgfoid) AS function_body,
+    CASE
+      WHEN t.tgtype::int & 4 > 0 AND t.tgtype::int & 8 > 0 AND t.tgtype::int & 16 > 0
+        THEN 'INSERT OR UPDATE OR DELETE'
+      WHEN t.tgtype::int & 4 > 0 AND t.tgtype::int & 8 > 0
+        THEN 'INSERT OR UPDATE'
+      WHEN t.tgtype::int & 4 > 0 AND t.tgtype::int & 16 > 0
+        THEN 'INSERT OR DELETE'
+      WHEN t.tgtype::int & 8 > 0 AND t.tgtype::int & 16 > 0
+        THEN 'UPDATE OR DELETE'
+      WHEN t.tgtype::int & 4 > 0 THEN 'INSERT'
+      WHEN t.tgtype::int & 8 > 0 THEN 'UPDATE'
+      WHEN t.tgtype::int & 16 > 0 THEN 'DELETE'
+      ELSE NULL
+    END AS events,
+    (n.nspname || '.' || c.relname) AS trigger_table
+  FROM supabase_functions.hooks h
+  LEFT JOIN pg_trigger t ON t.tgname = h.hook_name
+  LEFT JOIN pg_class c ON c.oid = t.tgrelid
+  LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
+  ORDER BY h.hook_name, h.id
 `
 
 const PG_NET_CHECK_SQL = `
@@ -83,26 +118,57 @@ function diffHooks(source: WebhookEntry[], target: WebhookEntry[]): DriftIssue[]
 
   for (const [name, h] of sourceMap) {
     if (!targetMap.has(name)) {
+      // Build sync SQL if we have enough metadata
+      const sql = h.function_body && h.events && h.trigger_table
+        ? {
+            up: [
+              `-- Recreate trigger function`,
+              h.function_body + ';',
+              '',
+              `-- Recreate trigger`,
+              `CREATE TRIGGER "${h.hook_name}"`,
+              `  AFTER ${h.events}`,
+              `  ON ${h.trigger_table}`,
+              `  FOR EACH ROW`,
+              `  EXECUTE FUNCTION supabase_functions.http_request();`,
+            ].join('\n'),
+            down: `DROP TRIGGER IF EXISTS "${h.hook_name}" ON ${h.trigger_table};`,
+          }
+        : undefined
+
       issues.push({
         id: `webhooks-missing-${name}`,
         layer: 'webhooks',
         severity: 'warning',
         title: `Missing webhook: ${name}`,
-        description: `Webhook "${name}" exists in source but not in target.`,
+        description: h.trigger_table
+          ? `Webhook "${name}" on ${h.trigger_table} (${h.events}) exists in source but not in target.`
+          : `Webhook "${name}" exists in source but not in target.`,
         sourceValue: h,
+        sql,
       })
     }
   }
 
   for (const [name, h] of targetMap) {
     if (!sourceMap.has(name)) {
+      const sql = h.trigger_table
+        ? {
+            up: `DROP TRIGGER IF EXISTS "${h.hook_name}" ON ${h.trigger_table};`,
+            down: '', // Cannot reconstruct — info-level issue anyway
+          }
+        : undefined
+
       issues.push({
         id: `webhooks-extra-${name}`,
         layer: 'webhooks',
         severity: 'info',
         title: `Extra webhook: ${name}`,
-        description: `Webhook "${name}" exists in target but not in source.`,
+        description: h.trigger_table
+          ? `Webhook "${name}" on ${h.trigger_table} exists in target but not in source.`
+          : `Webhook "${name}" exists in target but not in source.`,
         targetValue: h,
+        sql,
       })
     }
   }

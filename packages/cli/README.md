@@ -34,37 +34,70 @@ supaforge scan
 
 # Show detailed diff with SQL fixes
 supaforge diff
-
-# The daily Hukamnama of your database 🙏
-supaforge hukam
 ```
 
 ## The 8 Drift Layers
 
-| # | Layer | Source | Status |
-|---|-------|--------|--------|
-| 1 | Schema | `@dbdiff/cli` | ✅ Integrated (activates when `@dbdiff/cli` is installed) |
-| 2 | RLS Policies | `pg_policies` view | ✅ Ready |
-| 3 | Edge Functions | Management API | ✅ Ready |
-| 4 | Storage | Storage API | ✅ Ready |
-| 5 | Auth Config | Management API | ✅ Ready |
-| 6 | Cron Jobs | `cron.job` table | ✅ Ready |
-| 7 | Reference Data | `@dbdiff/cli --type=data` | ✅ Integrated (activates when `@dbdiff/cli` is installed) |
-| 8 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ Ready |
+| # | Layer | Source | Detection | Fix |
+|---|-------|--------|-----------|-----|
+| 1 | Schema | `@dbdiff/cli` | ✅ | SQL (up/down) |
+| 2 | RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
+| 3 | Edge Functions | Management API | ✅ | DELETE extras via API; missing/outdated → manual `supabase functions deploy` |
+| 4 | Storage | Storage API + `pg_policies` | ✅ | Buckets via API (POST/PUT/DELETE); Policies via SQL |
+| 5 | Auth Config | Management API | ✅ | PATCH via API |
+| 6 | Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
+| 7 | Reference Data | `@dbdiff/cli --type=data` | ✅ | SQL (up/down) |
+| 8 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ | SQL when trigger metadata available |
 
 ## Commands
 
 ```
-supaforge scan              Scan all 8 layers for drift
-supaforge scan --layer=rls  Scan a specific layer only
-supaforge scan --json       Output as JSON
-supaforge diff              Show detailed diff with SQL fixes
-supaforge diff --layer=rls  Detailed diff for one layer
-supaforge promote           Apply SQL fixes to the target environment
-supaforge promote --dry-run Show SQL that would be applied
-supaforge promote --layer=rls  Only promote one layer
-supaforge hukam             Alias for scan 🙏
+supaforge scan                          Scan all 8 layers for drift
+supaforge scan --layer=rls              Scan a specific layer only
+supaforge scan --json                   Output as JSON
+supaforge diff                          Show detailed diff with SQL fixes
+supaforge diff --layer=rls              Detailed diff for one layer
+supaforge promote                       Apply fixes to the target environment (SQL + API)
+supaforge promote --dry-run             Show fixes that would be applied
+supaforge promote --layer=rls           Only promote one layer
+supaforge hukam                         Alias for scan 🙏
+supaforge branch create <name>          Create a database branch from source
+supaforge branch create <name> --from=prod  Branch from a specific environment
+supaforge branch create <name> --schema-only  Copy schema only (no data)
+supaforge branch list                   List all tracked branches
+supaforge branch delete <name>          Drop branch database and remove tracking
+supaforge branch diff <name>            Compare branch against source environment
+supaforge branch diff <name> --against=prod  Compare against a specific environment
 ```
+
+### Database Branching
+
+SupaForge provides lightweight database branching for self-hosted and local Supabase setups — similar to Neon or Dolt, but using `pg_dump`/`pg_restore` so it works anywhere you have a PostgreSQL connection string.
+
+```bash
+# Create a branch (copies the entire database)
+supaforge branch create feature-x
+
+# Or branch from a specific environment, schema only
+supaforge branch create feature-x --from=production --schema-only
+
+# See what changed on the branch vs the source environment
+supaforge branch diff feature-x
+
+# List all branches
+supaforge branch list
+
+# Clean up
+supaforge branch delete feature-x
+```
+
+**How it works:**
+1. `branch create` tries `CREATE DATABASE ... TEMPLATE` (instant, local/self-hosted) first.
+2. Falls back to `pg_dump | pg_restore` (works for remote connections, busy databases).
+3. Branch metadata is tracked in `.supaforge/branches.json`.
+4. `branch diff` delegates to the same 8-layer scanner, comparing the branch database against any environment.
+
+> **Note**: Supabase Cloud managed databases may not grant `CREATEDB` privileges. Branching works best with self-hosted Supabase or local development (`supabase start`).
 
 ## Configuration
 
@@ -90,6 +123,20 @@ supaforge hukam             Alias for scan 🙏
   "layers": {
     "data": {
       "tables": ["plans", "feature_flags", "pricing_tiers"]
+    }
+  }
+}
+```
+
+**Self-hosted Supabase**: Use `apiUrl` instead of `projectRef` to point at your local API gateway:
+
+```json
+{
+  "environments": {
+    "local": {
+      "dbUrl": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
+      "apiKey": "your-service-role-key",
+      "apiUrl": "http://127.0.0.1:54321"
     }
   }
 }
@@ -171,6 +218,28 @@ docker compose -f tests/docker-compose.test.yml down -v
 ```bash
 npm run test:e2e
 ```
+
+### E2E Tests (Supabase)
+
+Full end-to-end tests against two real Supabase local instances (source = dev, target = prod). Tests the
+complete scan → promote → re-scan roundtrip for RLS, Cron, Webhooks, and Storage layers.
+
+**Requirements**: Supabase CLI, Docker (or Podman with docker compat), psql, curl.
+
+```bash
+# Full flow: start instances → seed → test → teardown
+npm run test:e2e:supabase
+
+# Keep instances running for debugging
+./scripts/test-e2e.sh --no-teardown
+
+# Reuse already-running instances
+./scripts/test-e2e.sh --skip-start
+```
+
+Port allocation:
+- Source: API 54321, DB 54322
+- Target: API 55321, DB 55322
 
 ### @dbdiff/cli Integration
 

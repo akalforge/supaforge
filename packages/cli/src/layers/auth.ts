@@ -1,7 +1,10 @@
-import type { DriftIssue } from '../types/drift'
+import type { DriftIssue, SyncAction } from '../types/drift'
 import { Layer, type LayerContext } from './base'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
+
+/** Supabase Management API base URL */
+const MGMT_API = 'https://api.supabase.com/v1/projects'
 
 const CRITICAL_KEYS = [
   'EXTERNAL_EMAIL_ENABLED',
@@ -32,11 +35,11 @@ export class AuthLayer extends Layer {
       this.fetchAuthConfig(targetRef, targetKey),
     ])
 
-    return diffAuthConfig(source, target)
+    return diffAuthConfig(source, target, targetRef, targetKey)
   }
 
   private async fetchAuthConfig(projectRef: string, apiKey: string): Promise<Record<string, unknown>> {
-    const url = `https://api.supabase.com/v1/projects/${encodeURIComponent(projectRef)}/config/auth`
+    const url = `${MGMT_API}/${encodeURIComponent(projectRef)}/config/auth`
     const res = await this.fetchFn(url, {
       headers: { Authorization: `Bearer ${apiKey}` },
     })
@@ -45,7 +48,12 @@ export class AuthLayer extends Layer {
   }
 }
 
-function diffAuthConfig(source: Record<string, unknown>, target: Record<string, unknown>): DriftIssue[] {
+function diffAuthConfig(
+  source: Record<string, unknown>,
+  target: Record<string, unknown>,
+  targetRef: string,
+  targetKey: string,
+): DriftIssue[] {
   const issues: DriftIssue[] = []
   const allKeys = new Set([...Object.keys(source), ...Object.keys(target)])
 
@@ -55,6 +63,16 @@ function diffAuthConfig(source: Record<string, unknown>, target: Record<string, 
 
     if (JSON.stringify(sv) !== JSON.stringify(tv)) {
       const isCritical = CRITICAL_KEYS.includes(key)
+
+      // Build a PATCH action to sync this specific key to the target
+      const action: SyncAction = {
+        method: 'PATCH',
+        url: `${MGMT_API}/${encodeURIComponent(targetRef)}/config/auth`,
+        headers: { Authorization: `Bearer ${targetKey}` },
+        body: { [key]: sv },
+        label: `Set auth config "${key}" to ${JSON.stringify(sv)} in target`,
+      }
+
       issues.push({
         id: `auth-${key.toLowerCase()}`,
         layer: 'auth',
@@ -63,6 +81,7 @@ function diffAuthConfig(source: Record<string, unknown>, target: Record<string, 
         description: `"${key}" differs between source (${JSON.stringify(sv)}) and target (${JSON.stringify(tv)}).`,
         sourceValue: sv,
         targetValue: tv,
+        action,
       })
     }
   }

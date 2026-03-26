@@ -55,6 +55,9 @@ describe('EdgeFunctionsLayer', () => {
     expect(issues[0].id).toBe('edge-fn-missing-send-email')
     expect(issues[0].title).toContain('Missing Edge Function')
     expect(issues[0].title).toContain('send-email')
+    // Missing functions have no action (can't auto-deploy)
+    expect(issues[0].action).toBeUndefined()
+    expect(issues[0].description).toContain('supabase functions deploy send-email')
   })
 
   it('detects extra function in target', async () => {
@@ -68,6 +71,10 @@ describe('EdgeFunctionsLayer', () => {
     expect(issues[0].severity).toBe('info')
     expect(issues[0].id).toBe('edge-fn-extra-extra-fn')
     expect(issues[0].title).toContain('Extra Edge Function')
+    // Extra functions have DELETE action
+    expect(issues[0].action).toBeDefined()
+    expect(issues[0].action!.method).toBe('DELETE')
+    expect(issues[0].action!.url).toContain('/v1/projects/tgt-ref/functions/extra-fn')
   })
 
   it('detects version mismatch', async () => {
@@ -83,6 +90,9 @@ describe('EdgeFunctionsLayer', () => {
     expect(issues[0].title).toContain('Version mismatch')
     expect(issues[0].description).toContain('version 3')
     expect(issues[0].description).toContain('version 1')
+    // Version mismatch has no action (can't auto-deploy)
+    expect(issues[0].action).toBeUndefined()
+    expect(issues[0].description).toContain('supabase functions deploy send-email')
   })
 
   it('detects multiple issues at once', async () => {

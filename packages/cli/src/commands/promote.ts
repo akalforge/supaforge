@@ -75,11 +75,16 @@ export default class Promote extends Command {
     }
 
     if (flags['dry-run']) {
-      this.log('📋 Dry-run — SQL that would be applied:\n')
+      this.log('📋 Dry-run — fixes that would be applied:\n')
       for (const stmt of result.applied) {
         this.log(`  [${stmt.layer}] ${stmt.issueId}`)
-        for (const line of stmt.sql.split('\n')) {
-          this.log(`    ${line}`)
+        if (stmt.sql) {
+          for (const line of stmt.sql.split('\n')) {
+            this.log(`    ${line}`)
+          }
+        }
+        if (stmt.action) {
+          this.log(`    API: ${stmt.action}`)
         }
         this.log('')
       }

@@ -2,3 +2,6 @@ node_modules/
 dist/
 *.tsbuildinfo
 .DS_Store
+
+# Supabase E2E test runtime data
+tests/e2e/supabase-*/.supabase/

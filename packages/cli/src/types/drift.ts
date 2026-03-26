@@ -17,6 +17,20 @@ export const LAYER_META: Record<LayerName, { number: number; emoji: string; labe
   'webhooks':        { number: 8, emoji: '⚡🔗', label: 'Webhooks' },
 }
 
+/** API-based sync action for non-SQL drift fixes. */
+export interface SyncAction {
+  /** HTTP method */
+  method: 'POST' | 'PUT' | 'PATCH' | 'DELETE'
+  /** Full URL (resolved at scan time, using target projectRef). */
+  url: string
+  /** Request headers (Authorization injected by promote). */
+  headers?: Record<string, string>
+  /** JSON body to send. */
+  body?: unknown
+  /** Human-readable description of what this action does. */
+  label: string
+}
+
 export interface DriftIssue {
   id: string
   layer: LayerName
@@ -26,6 +40,8 @@ export interface DriftIssue {
   sourceValue?: unknown
   targetValue?: unknown
   sql?: { up: string; down: string }
+  /** API-based sync action (for non-SQL fixes like storage buckets, auth config, edge functions). */
+  action?: SyncAction
 }
 
 export interface LayerResult {

@@ -1,0 +1,56 @@
+# SupaForge E2E test — TARGET (prod) instance
+# Ports: API 55321, DB 55322 (offset +1000 from source to avoid conflicts)
+# See: https://supabase.com/docs/guides/local-development/cli/config
+
+project_id = "supaforge-e2e-target"
+
+[api]
+enabled = true
+port = 55321
+schemas = ["public", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 55322
+shadow_port = 55320
+major_version = 15
+
+[db.pooler]
+enabled = false
+
+[db.migrations]
+enabled = false
+
+[db.seed]
+enabled = false
+
+[realtime]
+enabled = false
+
+[studio]
+enabled = false
+
+[inbucket]
+enabled = false
+
+[storage]
+enabled = true
+file_size_limit = "50MiB"
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:3000"
+enable_signup = true
+enable_anonymous_sign_ins = false
+
+[auth.email]
+enable_signup = true
+enable_confirmations = false
+double_confirm_changes = false
+
+[edge_runtime]
+enabled = false
+
+[analytics]
+enabled = false

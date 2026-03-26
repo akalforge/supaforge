@@ -47,6 +47,11 @@ describe('AuthLayer', () => {
     expect(issues[0].title).toContain('MFA_ENABLED')
     expect(issues[0].sourceValue).toBe(true)
     expect(issues[0].targetValue).toBe(false)
+    // Auth issues have PATCH action
+    expect(issues[0].action).toBeDefined()
+    expect(issues[0].action!.method).toBe('PATCH')
+    expect(issues[0].action!.url).toContain('/v1/projects/tgt-ref/config/auth')
+    expect(issues[0].action!.body).toEqual({ MFA_ENABLED: true })
   })
 
   it('detects critical auth config mismatch (JWT_EXP)', async () => {

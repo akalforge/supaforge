@@ -2,6 +2,8 @@ export interface EnvironmentConfig {
   dbUrl: string
   projectRef?: string
   apiKey?: string
+  /** Base URL for self-hosted Supabase API gateway (e.g. http://localhost:54321). Overrides projectRef-based URL construction. */
+  apiUrl?: string
 }
 
 export interface LayersConfig {

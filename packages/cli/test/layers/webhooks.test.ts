@@ -21,6 +21,18 @@ const makeHook = (overrides: Record<string, unknown> = {}) => ({
   hook_name: 'on_user_created',
   created_at: '2026-01-01T00:00:00Z',
   request_id: null,
+  function_body: null,
+  events: null,
+  trigger_table: null,
+  ...overrides,
+})
+
+/** Hook with full trigger metadata — enables SQL generation */
+const makeHookWithTrigger = (overrides: Record<string, unknown> = {}) => ({
+  ...makeHook(),
+  function_body: 'CREATE OR REPLACE FUNCTION supabase_functions.http_request() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$',
+  events: 'INSERT',
+  trigger_table: 'public.users',
   ...overrides,
 })
 
@@ -69,6 +81,8 @@ describe('WebhooksLayer', () => {
     expect(issues[0].severity).toBe('warning')
     expect(issues[0].id).toBe('webhooks-missing-on_user_created')
     expect(issues[0].title).toContain('Missing webhook')
+    // No sync SQL without trigger metadata
+    expect(issues[0].sql).toBeUndefined()
   })
 
   it('detects extra webhook in target', async () => {
@@ -84,6 +98,8 @@ describe('WebhooksLayer', () => {
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('info')
     expect(issues[0].id).toBe('webhooks-extra-extra_hook')
+    // No sync SQL without trigger metadata
+    expect(issues[0].sql).toBeUndefined()
   })
 
   it('detects both pg_net missing and hook differences', async () => {
@@ -156,5 +172,61 @@ describe('WebhooksLayer', () => {
     const layer = new WebhooksLayer(queryFn)
     const issues = await layer.scan(mockContext())
     expect(issues).toHaveLength(0)
+  })
+
+  // ── Sync SQL generation (with trigger metadata) ─────────────────────
+
+  it('generates sync SQL for missing webhook with trigger metadata', async () => {
+    const queryFn: QueryFn = async (dbUrl, sql) => {
+      if (sql.includes('pg_extension')) return []
+      if (dbUrl.includes('source')) return [makeHookWithTrigger()]
+      return []
+    }
+
+    const layer = new WebhooksLayer(queryFn)
+    const issues = await layer.scan(mockContext())
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].sql).toBeDefined()
+    expect(issues[0].sql!.up).toContain('CREATE TRIGGER')
+    expect(issues[0].sql!.up).toContain('on_user_created')
+    expect(issues[0].sql!.up).toContain('AFTER INSERT')
+    expect(issues[0].sql!.up).toContain('public.users')
+    expect(issues[0].sql!.down).toContain('DROP TRIGGER')
+    expect(issues[0].sql!.down).toContain('on_user_created')
+  })
+
+  it('generates sync SQL for extra webhook with trigger table', async () => {
+    const queryFn: QueryFn = async (dbUrl, sql) => {
+      if (sql.includes('pg_extension')) return []
+      if (dbUrl.includes('target')) {
+        return [makeHookWithTrigger({ hook_name: 'extra_hook' })]
+      }
+      return []
+    }
+
+    const layer = new WebhooksLayer(queryFn)
+    const issues = await layer.scan(mockContext())
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].sql).toBeDefined()
+    expect(issues[0].sql!.up).toContain('DROP TRIGGER')
+    expect(issues[0].sql!.up).toContain('extra_hook')
+  })
+
+  it('includes trigger table in description when available', async () => {
+    const queryFn: QueryFn = async (dbUrl, sql) => {
+      if (sql.includes('pg_extension')) return []
+      if (dbUrl.includes('source')) {
+        return [makeHookWithTrigger({ events: 'INSERT OR UPDATE' })]
+      }
+      return []
+    }
+
+    const layer = new WebhooksLayer(queryFn)
+    const issues = await layer.scan(mockContext())
+
+    expect(issues[0].description).toContain('public.users')
+    expect(issues[0].description).toContain('INSERT OR UPDATE')
   })
 })

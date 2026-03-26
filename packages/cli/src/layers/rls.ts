@@ -65,8 +65,17 @@ function policiesEqual(a: RlsPolicy, b: RlsPolicy): boolean {
   )
 }
 
+/** Parse pg name[] which may arrive as JS array or Postgres literal {a,b} */
+function normalizeRoles(roles: string[] | string): string {
+  if (Array.isArray(roles)) return roles.join(', ')
+  if (typeof roles === 'string' && roles.startsWith('{') && roles.endsWith('}')) {
+    return roles.slice(1, -1).split(',').join(', ')
+  }
+  return String(roles)
+}
+
 function generateCreatePolicySql(p: RlsPolicy): string {
-  const roles = Array.isArray(p.roles) ? p.roles.join(', ') : p.roles
+  const roles = normalizeRoles(p.roles)
   const lines = [
     `CREATE POLICY "${p.policyname}"`,
     `  ON "${p.schemaname}"."${p.tablename}"`,

@@ -148,4 +148,19 @@ describe('RlsLayer', () => {
     expect(sql).toContain('TO authenticated')
     expect(sql).toContain('USING (')
   })
+
+  it('handles Postgres array literal roles format {role}', async () => {
+    const queryFn: QueryFn = async (dbUrl) => {
+      // pg driver may return name[] as raw string "{authenticated}"
+      if (dbUrl.includes('source')) return [makePolicy({ roles: '{authenticated}' as unknown as string[] })]
+      return []
+    }
+
+    const layer = new RlsLayer(queryFn)
+    const issues = await layer.scan(mockContext())
+
+    const sql = issues[0].sql!.up
+    expect(sql).toContain('TO authenticated')
+    expect(sql).not.toContain('{')
+  })
 })

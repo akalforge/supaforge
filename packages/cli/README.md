@@ -43,13 +43,13 @@ supaforge hukam
 
 | # | Layer | Source | Status |
 |---|-------|--------|--------|
-| 1 | Schema | `@dbdiff/cli` | ⏳ Awaiting `@dbdiff/cli` npm release |
+| 1 | Schema | `@dbdiff/cli` | ✅ Integrated (activates when `@dbdiff/cli` is installed) |
 | 2 | RLS Policies | `pg_policies` view | ✅ Ready |
 | 3 | Edge Functions | Management API | ✅ Ready |
 | 4 | Storage | Storage API | ✅ Ready |
 | 5 | Auth Config | Management API | ✅ Ready |
 | 6 | Cron Jobs | `cron.job` table | ✅ Ready |
-| 7 | Reference Data | `@dbdiff/cli --type=data` | ⏳ Awaiting `@dbdiff/cli` npm release |
+| 7 | Reference Data | `@dbdiff/cli --type=data` | ✅ Integrated (activates when `@dbdiff/cli` is installed) |
 | 8 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ Ready |
 
 ## Commands
@@ -60,6 +60,9 @@ supaforge scan --layer=rls  Scan a specific layer only
 supaforge scan --json       Output as JSON
 supaforge diff              Show detailed diff with SQL fixes
 supaforge diff --layer=rls  Detailed diff for one layer
+supaforge promote           Apply SQL fixes to the target environment
+supaforge promote --dry-run Show SQL that would be applied
+supaforge promote --layer=rls  Only promote one layer
 supaforge hukam             Alias for scan 🙏
 ```
 
@@ -128,6 +131,57 @@ npm test
 # Run in dev mode
 ./bin/dev.js scan
 ```
+
+### Integration Tests (Docker / Podman)
+
+Integration tests run against real Supabase Postgres containers. The test script auto-detects Docker or Podman:
+
+```bash
+# Full flow: start containers → seed → test → teardown
+npm run test:integration
+
+# Keep containers running for debugging
+./scripts/test-integration.sh --no-teardown
+
+# Force a specific compose command
+COMPOSE_CMD="podman-compose" npm run test:integration
+```
+
+You can also start the containers manually and run the tests separately:
+
+```bash
+# Start containers
+docker compose -f tests/docker-compose.test.yml up -d --wait  # or podman-compose
+
+# Seed
+psql postgresql://postgres:source-test-pass@localhost:15432/postgres -f tests/fixtures/seed-source.sql
+psql postgresql://postgres:target-test-pass@localhost:15433/postgres -f tests/fixtures/seed-target.sql
+
+# Run integration tests
+SUPAFORGE_TEST_SOURCE_URL=postgresql://postgres:source-test-pass@localhost:15432/postgres \
+SUPAFORGE_TEST_TARGET_URL=postgresql://postgres:target-test-pass@localhost:15433/postgres \
+npx vitest run --config vitest.integration.config.ts
+
+# Teardown
+docker compose -f tests/docker-compose.test.yml down -v
+```
+
+### CLI e2e Tests
+
+```bash
+npm run test:e2e
+```
+
+### @dbdiff/cli Integration
+
+Layers 1 (Schema) and 7 (Reference Data) shell out to `@dbdiff/cli`. When it's not installed, the layers gracefully return zero issues. Once `@dbdiff/cli` is published to npm:
+
+```bash
+npm install -g @dbdiff/cli   # or add to project devDependencies
+supaforge scan                # schema + data layers now active
+```
+
+The adapter (`src/dbdiff.ts`) parses the UP/DOWN marker output from `@dbdiff/cli` and converts SQL statements into `DriftIssue` objects.
 
 ## License
 

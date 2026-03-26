@@ -1,0 +1,75 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+
+    services:
+      source-db:
+        image: supabase/postgres:15.6.1.146
+        env:
+          POSTGRES_PASSWORD: source-test-pass
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 30s
+
+      target-db:
+        image: supabase/postgres:15.6.1.146
+        env:
+          POSTGRES_PASSWORD: target-test-pass
+          POSTGRES_DB: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 15433:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+          --health-start-period 30s
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: packages/cli/package-lock.json
+
+      - name: Install dependencies
+        working-directory: packages/cli
+        run: npm ci
+
+      - name: Seed source database
+        run: |
+          PGPASSWORD=source-test-pass psql -h localhost -p 15432 -U postgres -d postgres \
+            -f packages/cli/tests/fixtures/seed-source.sql
+
+      - name: Seed target database
+        run: |
+          PGPASSWORD=target-test-pass psql -h localhost -p 15433 -U postgres -d postgres \
+            -f packages/cli/tests/fixtures/seed-target.sql
+
+      - name: Run integration tests
+        working-directory: packages/cli
+        env:
+          SUPAFORGE_TEST_SOURCE_URL: postgresql://postgres:source-test-pass@localhost:15432/postgres
+          SUPAFORGE_TEST_TARGET_URL: postgresql://postgres:target-test-pass@localhost:15433/postgres
+        run: npx vitest run --config vitest.integration.config.ts

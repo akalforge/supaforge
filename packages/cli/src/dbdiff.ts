@@ -54,7 +54,15 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
     return parseDbDiffOutput(stdout)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
-    if (message.includes('ENOENT') || message.includes('not found') || message.includes('ERR_MODULE_NOT_FOUND')) {
+    const stderr = String((err as Record<string, unknown>)?.stderr ?? '')
+    const combined = `${message} ${stderr}`
+    if (
+      combined.includes('ENOENT') ||
+      combined.includes('not found') ||
+      combined.includes('ERR_MODULE_NOT_FOUND') ||
+      combined.includes('could not determine executable') ||
+      combined.includes('404')
+    ) {
       throw new Error(
         '@dbdiff/cli is not installed. Install it with: npm install -g @dbdiff/cli',
       )

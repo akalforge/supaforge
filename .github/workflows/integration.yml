@@ -60,12 +60,12 @@ jobs:
       - name: Seed source database
         run: |
           PGPASSWORD=source-test-pass psql -h localhost -p 15432 -U postgres -d postgres \
-            -f packages/cli/tests/fixtures/seed-source.sql
+            -v ON_ERROR_STOP=1 -f packages/cli/tests/fixtures/seed-source.sql
 
       - name: Seed target database
         run: |
           PGPASSWORD=target-test-pass psql -h localhost -p 15433 -U postgres -d postgres \
-            -f packages/cli/tests/fixtures/seed-target.sql
+            -v ON_ERROR_STOP=1 -f packages/cli/tests/fixtures/seed-target.sql
 
       - name: Run integration tests
         working-directory: packages/cli

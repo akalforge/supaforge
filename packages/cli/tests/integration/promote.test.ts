@@ -65,6 +65,7 @@ describe('integration: promote', () => {
       layers: ['rls'],
     })
 
+    expect(promoteResult.errors, `promote SQL errors: ${JSON.stringify(promoteResult.errors)}`).toHaveLength(0)
     expect(promoteResult.applied.length).toBeGreaterThanOrEqual(1)
 
     // Re-scan RLS layer — drift should be reduced

@@ -6,6 +6,8 @@
 --   Cron:     Missing "weekly_digest", modified "cleanup_sessions" schedule (0 6 vs 0 3)
 --   Webhooks: Missing "on_payment_received", extra "on_invoice_sent", pg_net NOT installed
 --   Storage:  Missing "avatars_insert" policy, bucket visibility + missing bucket via API
+--
+-- Idempotent: safe to run multiple times on an existing instance.
 
 -- === Extensions ===
 CREATE EXTENSION IF NOT EXISTS pg_cron;
@@ -39,6 +41,45 @@ CREATE TABLE IF NOT EXISTS public.payments (
     status      TEXT NOT NULL DEFAULT 'pending',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- === Idempotent teardown: drop re-created objects from any prior run =========
+DO $$
+BEGIN
+  -- RLS: drop all policies that will be recreated (including any promoted ones)
+  DROP POLICY IF EXISTS "users_select_own"       ON public.users;
+  DROP POLICY IF EXISTS "users_update_own"       ON public.users;
+  DROP POLICY IF EXISTS "posts_select_published" ON public.posts;
+  DROP POLICY IF EXISTS "posts_select_own"       ON public.posts;
+  DROP POLICY IF EXISTS "posts_insert_own"       ON public.posts;
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  DROP TRIGGER IF EXISTS on_user_created   ON public.users;
+  DROP TRIGGER IF EXISTS on_payment_received ON public.payments;
+  DROP TRIGGER IF EXISTS on_invoice_sent   ON public.payments;
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  DELETE FROM supabase_functions.hooks
+    WHERE hook_name IN ('on_user_created', 'on_payment_received', 'on_invoice_sent');
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  DROP POLICY IF EXISTS "avatars_select" ON storage.objects;
+  DROP POLICY IF EXISTS "avatars_insert" ON storage.objects;
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
+
+-- Remove any cron jobs that may have been promoted in a previous run,
+-- restoring the drifted state (weekly_digest is MISSING in target).
+SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname = 'weekly_digest';
+-- ===========================================================================
 
 -- === RLS Policies (DRIFTED) ===
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;

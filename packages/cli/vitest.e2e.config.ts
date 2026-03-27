@@ -1,29 +1,38 @@
 import { defineConfig } from 'vitest/config'
+import { BaseSequencer } from 'vitest/node'
 
 /**
- * Test files are listed explicitly in required execution order:
- *   1. 00-scan-all  — detects initial drift (must run before any promotes)
- *   2. individual layer tests — each promotes its own fixes
- *   3. zz-verify-clean — confirms all drift has been resolved
+ * Custom sequencer: sorts test files alphabetically by filename.
  *
- * Do NOT replace with a glob: fileParallelism=false does not guarantee
- * alphabetical ordering across CI environments/filesystems.
+ * The file naming convention guarantees the required execution order:
+ *   00-scan-all → cron → rls → storage → webhooks → zz-verify-clean
+ *
+ * WHY: Vitest's BaseSequencer sorts by cached run duration; on a cold cache
+ * (every fresh CI run) it falls back to filesystem inode order, which is
+ * non-deterministic across environments. fileParallelism=false only
+ * guarantees sequential execution — NOT alphabetical ordering.
  */
-const E2E_FILES = [
-  'tests/e2e/supabase/00-scan-all.test.ts',
-  'tests/e2e/supabase/cron.test.ts',
-  'tests/e2e/supabase/rls.test.ts',
-  'tests/e2e/supabase/storage.test.ts',
-  'tests/e2e/supabase/webhooks.test.ts',
-  'tests/e2e/supabase/zz-verify-clean.test.ts',
-]
+class AlphaByFilenameSequencer extends BaseSequencer {
+  override async sort(
+    files: Parameters<BaseSequencer['sort']>[0],
+  ): ReturnType<BaseSequencer['sort']> {
+    return [...files].sort((a, b) =>
+      (a.moduleId.split('/').pop() ?? '').localeCompare(
+        b.moduleId.split('/').pop() ?? '',
+      ),
+    )
+  }
+}
 
 export default defineConfig({
   test: {
     globals: true,
-    include: E2E_FILES,
+    include: ['tests/e2e/supabase/**/*.test.ts'],
     testTimeout: 60_000,
     hookTimeout: 30_000,
     fileParallelism: false,
+    sequence: {
+      sequencer: AlphaByFilenameSequencer,
+    },
   },
 })

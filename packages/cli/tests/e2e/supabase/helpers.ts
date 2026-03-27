@@ -40,6 +40,8 @@ const IGNORE_SCHEMAS = [
   'supabase_functions',
   '_analytics',
   'cron',
+  // storage schema is handled exclusively by the storage layer (not the RLS layer)
+  'storage',
 ]
 
 /** Build SupaForgeConfig from environment variables. */

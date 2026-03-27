@@ -2,6 +2,8 @@
 -- Runs against a REAL Supabase local instance (has auth.uid(), pg_cron, pg_net, storage schema).
 --
 -- Layers exercised: RLS, Cron, Webhooks, Storage policies.
+--
+-- Idempotent: safe to run multiple times on an existing instance.
 
 -- === Extensions ===
 CREATE EXTENSION IF NOT EXISTS pg_cron;
@@ -34,6 +36,39 @@ CREATE TABLE IF NOT EXISTS public.payments (
     status      TEXT NOT NULL DEFAULT 'pending',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- === Idempotent teardown: drop re-created objects from any prior run =========
+DO $$
+BEGIN
+  DROP POLICY IF EXISTS "users_select_own"      ON public.users;
+  DROP POLICY IF EXISTS "users_update_own"      ON public.users;
+  DROP POLICY IF EXISTS "posts_select_published" ON public.posts;
+  DROP POLICY IF EXISTS "posts_select_own"      ON public.posts;
+  DROP POLICY IF EXISTS "posts_insert_own"      ON public.posts;
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  DROP TRIGGER IF EXISTS on_user_created    ON public.users;
+  DROP TRIGGER IF EXISTS on_payment_received ON public.payments;
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  DELETE FROM supabase_functions.hooks
+    WHERE hook_name IN ('on_user_created', 'on_payment_received');
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  DROP POLICY IF EXISTS "avatars_select" ON storage.objects;
+  DROP POLICY IF EXISTS "avatars_insert" ON storage.objects;
+EXCEPTION WHEN undefined_table THEN NULL;
+END $$;
+-- ===========================================================================
 
 -- === RLS Policies ===
 ALTER TABLE public.users ENABLE ROW LEVEL SECURITY;

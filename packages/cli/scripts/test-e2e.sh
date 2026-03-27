@@ -21,6 +21,17 @@ SEED_TARGET="$CLI_DIR/tests/e2e/fixtures/seed-target.sql"
 # Services to exclude from Supabase start (studio, imgproxy etc. not needed for testing)
 EXCLUDE="imgproxy"
 
+# ─── Podman socket compat ────────────────────────────────────────────────────
+# If Docker is not available but Podman is, export DOCKER_HOST so the Supabase
+# CLI can find containers via the Podman socket (requires podman system service).
+if ! command -v docker &>/dev/null && command -v podman &>/dev/null; then
+  PODMAN_SOCK="unix:///run/user/$(id -u)/podman/podman.sock"
+  if [[ -S "/run/user/$(id -u)/podman/podman.sock" ]]; then
+    export DOCKER_HOST="$PODMAN_SOCK"
+    echo "ℹ️  Using Podman socket: $DOCKER_HOST"
+  fi
+fi
+
 NO_TEARDOWN=false
 SKIP_START=false
 for arg in "$@"; do
@@ -115,6 +126,26 @@ create_bucket() {
   fi
 }
 
+# Empty and delete a storage bucket — idempotent, ignores "not found" errors.
+delete_bucket() {
+  local api_url="$1"
+  local service_key="$2"
+  local bucket_id="$3"
+
+  # Empty all objects first (Storage API requires bucket to be empty before delete)
+  curl -s -o /dev/null \
+    -X DELETE "${api_url}/storage/v1/object/${bucket_id}/" \
+    -H "Authorization: Bearer ${service_key}" \
+    -H "apikey: ${service_key}" \
+    -H "Content-Type: application/json" || true
+
+  # Delete the bucket itself (ignore errors — bucket may not exist)
+  curl -s -o /dev/null \
+    -X DELETE "${api_url}/storage/v1/bucket/${bucket_id}" \
+    -H "Authorization: Bearer ${service_key}" \
+    -H "apikey: ${service_key}" || true
+}
+
 # ─── Cleanup ──────────────────────────────────────────────────────────────────
 
 cleanup() {
@@ -189,12 +220,18 @@ psql "$TARGET_DB_URL" -v ON_ERROR_STOP=1 -f "$SEED_TARGET"
 # ─── Create storage buckets (via API) ───────────────────────────────────────
 
 echo ""
-echo "🪣 Creating storage buckets in source..."
+echo "🪣 Resetting storage buckets in source..."
+for bucket in avatars documents; do
+  delete_bucket "$SOURCE_API_URL" "$SOURCE_SERVICE_KEY" "$bucket"
+done
 create_bucket "$SOURCE_API_URL" "$SOURCE_SERVICE_KEY" "avatars" "avatars" "true" "10485760"
 create_bucket "$SOURCE_API_URL" "$SOURCE_SERVICE_KEY" "documents" "documents" "false"
 
 echo ""
-echo "🪣 Creating storage buckets in target (drifted)..."
+echo "🪣 Resetting storage buckets in target (drifted)..."
+for bucket in avatars documents backups; do
+  delete_bucket "$TARGET_API_URL" "$TARGET_SERVICE_KEY" "$bucket"
+done
 # DRIFT: avatars is private (source is public)
 create_bucket "$TARGET_API_URL" "$TARGET_SERVICE_KEY" "avatars" "avatars" "false" "10485760"
 # DRIFT: documents is MISSING (not created)

@@ -1,15 +1,32 @@
 -- SupaForge integration test: TARGET database seed
 -- This intentionally DIFFERS from the source to create detectable drift.
 --
+-- IDEMPOTENT: Safe to re-run — drops and recreates all objects.
+--
 -- Differences from source:
--- 1. RLS: Missing "posts_insert_own" policy (CVE-2025-48757 pattern)
--- 2. RLS: Modified "users_select_own" USING expression
--- 3. Cron: Missing "weekly_digest" job, modified "cleanup_sessions" schedule
--- 4. Webhooks: Missing "on_payment_received", extra "on_invoice_sent"
--- 5. Reference data: Missing "Enterprise" plan, different "Pro" price
+-- 1. Schema: Missing "bio" column on users table (detected by @dbdiff/cli)
+-- 2. Schema: Missing idx_posts_published partial index (detected by @dbdiff/cli)
+-- 3. RLS: Missing "posts_insert_own" policy (CVE-2025-48757 pattern)
+-- 4. RLS: Modified "users_select_own" USING expression (auth.uid()=id → true)
+-- 5. Cron: Missing "weekly_digest" job, modified "cleanup_sessions" schedule
+-- 6. Webhooks: Missing "on_payment_received", extra "on_invoice_sent"
+-- 7. Reference data: Missing "Enterprise" plan, different "Pro" price
+-- 8. Storage: Missing "storage_objects_insert_own" policy, modified select policy
+
+BEGIN;
+
+-- === Reset (idempotent) ===
+DROP SCHEMA IF EXISTS public CASCADE;
+CREATE SCHEMA public;
+GRANT ALL ON SCHEMA public TO postgres;
+GRANT ALL ON SCHEMA public TO PUBLIC;
+
+DROP SCHEMA IF EXISTS cron CASCADE;
+DROP SCHEMA IF EXISTS supabase_functions CASCADE;
+DROP SCHEMA IF EXISTS storage CASCADE;
 
 -- === Extensions ===
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" SCHEMA public;
 -- NOTE: pg_net intentionally NOT installed in target
 
 -- === Supabase-compatibility stubs (plain Postgres) ===
@@ -21,7 +38,7 @@ $$ LANGUAGE sql STABLE;
 DO $$ BEGIN CREATE ROLE authenticated NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
--- === Schema: same tables as source ===
+-- === Schema: same tables as source (but missing bio column + index) ===
 CREATE TABLE public.users (
     id          UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
     email       TEXT UNIQUE NOT NULL,
@@ -47,6 +64,8 @@ CREATE TABLE public.plans (
     price       INTEGER NOT NULL DEFAULT 0,
     active      BOOLEAN DEFAULT true
 );
+
+-- NOTE: idx_posts_published partial index intentionally MISSING (drift #2)
 
 -- === Trigger: auto-update updated_at ===
 CREATE OR REPLACE FUNCTION public.handle_updated_at()
@@ -94,8 +113,8 @@ CREATE POLICY "posts_select_own"
 -- DRIFT: "posts_insert_own" policy is MISSING (CVE-2025-48757 pattern)
 
 -- === Cron Jobs (DRIFTED) ===
-CREATE SCHEMA IF NOT EXISTS cron;
-CREATE TABLE IF NOT EXISTS cron.job (
+CREATE SCHEMA cron;
+CREATE TABLE cron.job (
     jobid       BIGSERIAL PRIMARY KEY,
     schedule    TEXT NOT NULL,
     command     TEXT NOT NULL,
@@ -114,8 +133,8 @@ INSERT INTO cron.job (schedule, command, jobname) VALUES
     ('*/15 * * * *', 'SELECT refresh_materialized_views()', 'refresh_views');
 
 -- === Webhooks (DRIFTED) ===
-CREATE SCHEMA IF NOT EXISTS supabase_functions;
-CREATE TABLE IF NOT EXISTS supabase_functions.hooks (
+CREATE SCHEMA supabase_functions;
+CREATE TABLE supabase_functions.hooks (
     id              BIGSERIAL PRIMARY KEY,
     hook_table_id   INTEGER NOT NULL DEFAULT 0,
     hook_name       TEXT NOT NULL,
@@ -129,8 +148,39 @@ INSERT INTO supabase_functions.hooks (hook_table_id, hook_name) VALUES
     (2, 'on_post_published'),
     (4, 'on_invoice_sent');
 
+-- === Storage (DRIFTED) ===
+CREATE SCHEMA storage;
+CREATE TABLE storage.objects (
+    id          UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    bucket_id   TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    owner       UUID,
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE storage.buckets (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    public      BOOLEAN DEFAULT false,
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+
+ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
+
+-- DRIFT: Modified — uses 'true' instead of auth.uid() = owner
+CREATE POLICY "storage_objects_select_own"
+    ON storage.objects FOR SELECT
+    TO authenticated
+    USING (true);
+
+-- DRIFT: "storage_objects_insert_own" policy is MISSING
+
 -- === Reference data (DRIFTED) ===
 -- DRIFT: Missing "Enterprise" plan, "Pro" has different price
 INSERT INTO public.plans (name, price, active) VALUES
     ('Free', 0, true),
     ('Pro', 1900, true);
+
+COMMIT;

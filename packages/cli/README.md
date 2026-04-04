@@ -197,8 +197,12 @@ COMPOSE_CMD="podman-compose" npm run test:integration
 You can also start the containers manually and run the tests separately:
 
 ```bash
-# Start containers
-docker compose -f tests/docker-compose.test.yml up -d --wait  # or podman-compose
+# Start containers (works with Docker Compose v2, docker-compose, or podman-compose)
+docker compose -f tests/docker-compose.test.yml up -d
+
+# Wait for Postgres to be ready
+until psql postgresql://postgres:source-test-pass@localhost:15432/postgres -c 'SELECT 1' 2>/dev/null; do sleep 1; done
+until psql postgresql://postgres:target-test-pass@localhost:15433/postgres -c 'SELECT 1' 2>/dev/null; do sleep 1; done
 
 # Seed
 psql postgresql://postgres:source-test-pass@localhost:15432/postgres -f tests/fixtures/seed-source.sql
@@ -243,14 +247,13 @@ Port allocation:
 
 ### @dbdiff/cli Integration
 
-Layers 1 (Schema) and 7 (Reference Data) shell out to `@dbdiff/cli`. When it's not installed, the layers gracefully return zero issues. Once `@dbdiff/cli` is published to npm:
+Layers 1 (Schema) and 7 (Reference Data) are powered by [`@dbdiff/cli`](https://github.com/DBDiff/DBDiff). It is included as a dependency and installed automatically — no separate install needed. The native binary runs without PHP.
 
 ```bash
-npm install -g @dbdiff/cli   # or add to project devDependencies
-supaforge scan                # schema + data layers now active
+supaforge scan                # schema + data layers active out of the box
 ```
 
-The adapter (`src/dbdiff.ts`) parses the UP/DOWN marker output from `@dbdiff/cli` and converts SQL statements into `DriftIssue` objects.
+The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.
 
 ## License
 

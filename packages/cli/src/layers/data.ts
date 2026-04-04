@@ -7,7 +7,7 @@ export type RunDbDiffFn = (options: DbDiffOptions) => ReturnType<typeof runDbDif
 /**
  * Layer 7: Reference Data Drift — powered by @dbdiff/cli --type=data.
  *
- * Shells out to `npx @dbdiff/cli --supabase --type=data` to diff
+ * Invokes `@dbdiff/cli diff --type=data` to diff
  * configured reference/seed tables between environments.
  *
  * Falls back gracefully when @dbdiff/cli is not installed.
@@ -29,7 +29,6 @@ export class DataLayer extends Layer {
         targetUrl: ctx.target.dbUrl,
         type: 'data',
         include: 'both',
-        ignoreSchemas: ctx.config.ignoreSchemas,
         tables,
       })
       return sqlToIssues(result, 'data')

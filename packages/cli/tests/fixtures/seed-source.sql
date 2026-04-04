@@ -1,9 +1,23 @@
 -- SupaForge integration test: SOURCE database seed
--- Creates a Supabase-style schema with RLS, cron, and webhook fixtures.
+-- Creates a Supabase-style schema with RLS, cron, webhook, and storage fixtures.
 -- Uses plain Postgres with Supabase-compatibility stubs.
+--
+-- IDEMPOTENT: Safe to re-run — drops and recreates all objects.
+
+BEGIN;
+
+-- === Reset (idempotent) ===
+DROP SCHEMA IF EXISTS public CASCADE;
+CREATE SCHEMA public;
+GRANT ALL ON SCHEMA public TO postgres;
+GRANT ALL ON SCHEMA public TO PUBLIC;
+
+DROP SCHEMA IF EXISTS cron CASCADE;
+DROP SCHEMA IF EXISTS supabase_functions CASCADE;
+DROP SCHEMA IF EXISTS storage CASCADE;
 
 -- === Extensions ===
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp" SCHEMA public;
 
 -- === Supabase-compatibility stubs (plain Postgres) ===
 CREATE SCHEMA IF NOT EXISTS auth;
@@ -19,6 +33,7 @@ CREATE TABLE public.users (
     id          UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
     email       TEXT UNIQUE NOT NULL,
     full_name   TEXT,
+    bio         TEXT,
     avatar_url  TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -40,6 +55,9 @@ CREATE TABLE public.plans (
     price       INTEGER NOT NULL DEFAULT 0,
     active      BOOLEAN DEFAULT true
 );
+
+-- === Indexes (source has a partial index that target lacks) ===
+CREATE INDEX idx_posts_published ON public.posts (created_at) WHERE published = true;
 
 -- === Trigger: auto-update updated_at ===
 CREATE OR REPLACE FUNCTION public.handle_updated_at()
@@ -89,9 +107,8 @@ CREATE POLICY "posts_insert_own"
     WITH CHECK (auth.uid() = user_id);
 
 -- === Cron Jobs ===
--- pg_cron may not be available in base Postgres; we create the schema manually
-CREATE SCHEMA IF NOT EXISTS cron;
-CREATE TABLE IF NOT EXISTS cron.job (
+CREATE SCHEMA cron;
+CREATE TABLE cron.job (
     jobid       BIGSERIAL PRIMARY KEY,
     schedule    TEXT NOT NULL,
     command     TEXT NOT NULL,
@@ -109,8 +126,8 @@ INSERT INTO cron.job (schedule, command, jobname) VALUES
     ('0 0 * * 0', 'SELECT weekly_digest()', 'weekly_digest');
 
 -- === Webhooks ===
-CREATE SCHEMA IF NOT EXISTS supabase_functions;
-CREATE TABLE IF NOT EXISTS supabase_functions.hooks (
+CREATE SCHEMA supabase_functions;
+CREATE TABLE supabase_functions.hooks (
     id              BIGSERIAL PRIMARY KEY,
     hook_table_id   INTEGER NOT NULL DEFAULT 0,
     hook_name       TEXT NOT NULL,
@@ -123,8 +140,41 @@ INSERT INTO supabase_functions.hooks (hook_table_id, hook_name) VALUES
     (2, 'on_post_published'),
     (3, 'on_payment_received');
 
+-- === Storage (RLS-testable without Supabase API) ===
+CREATE SCHEMA storage;
+CREATE TABLE storage.objects (
+    id          UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    bucket_id   TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    owner       UUID,
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+
+CREATE TABLE storage.buckets (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    public      BOOLEAN DEFAULT false,
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+
+ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "storage_objects_select_own"
+    ON storage.objects FOR SELECT
+    TO authenticated
+    USING (auth.uid() = owner);
+
+CREATE POLICY "storage_objects_insert_own"
+    ON storage.objects FOR INSERT
+    TO authenticated
+    WITH CHECK (auth.uid() = owner);
+
 -- === Reference data (plans) ===
 INSERT INTO public.plans (name, price, active) VALUES
     ('Free', 0, true),
     ('Pro', 2900, true),
     ('Enterprise', 9900, true);
+
+COMMIT;

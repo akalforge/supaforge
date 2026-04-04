@@ -29,7 +29,7 @@ packages/cli/src/
 
 **Patterns**: Layer (abstract base + concrete implementations), Registry (LayerRegistry), Strategy (each layer is a strategy), Hook Bus (event-driven pipeline).
 
-**DBDiff integration**: Schema/data layers spawn `npx @dbdiff/cli diff --supabase` as subprocess via `dbdiff.ts`.
+**DBDiff integration**: Schema/data layers invoke `@dbdiff/cli diff` via local binary resolution in `dbdiff.ts`. `@dbdiff/cli` is a direct dependency. The adapter writes to a temp file (`--output`), reads it back, and parses UP/DOWN markers. When schemas are identical dbdiff doesn't create the output file — the adapter handles this gracefully.
 
 ## Build & Test
 
@@ -59,7 +59,7 @@ npm run test:e2e                       # E2E tests
 
 ## Key Gotchas
 
-- Schema and data layers depend on `@dbdiff/cli` being available via `npx`. If not installed, throws a clear error.
+- `@dbdiff/cli` is a direct dependency — `dbdiff.ts` resolves the local binary via `createRequire`, falls back to `npx` if not found.
 - `dbdiff.ts` parses UP/DOWN SQL from markers: `#---------- UP ----------` / `#---------- DOWN ----------`.
 - Integration tests are sequential (`fileParallelism: false`) with 30s timeout.
 - `defaults.ts` defines `DEFAULT_IGNORE_SCHEMAS` (auth, storage, etc.) — checked by all DB-querying layers.

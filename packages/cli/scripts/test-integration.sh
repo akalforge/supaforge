@@ -66,17 +66,18 @@ cleanup() {
 trap cleanup EXIT
 
 # Start containers
-echo "🚀 Starting Supabase Postgres containers..."
-compose up -d --wait
+echo "🚀 Starting Postgres containers..."
+compose up -d
 
 SOURCE_URL="postgresql://postgres:source-test-pass@localhost:15432/postgres"
 TARGET_URL="postgresql://postgres:target-test-pass@localhost:15433/postgres"
 
-# Wait for ready (healthcheck should handle this via --wait, but belt-and-suspenders)
+# Wait for Postgres to accept connections (healthcheck may not work on all runtimes)
 wait_for_pg() {
   local url="$1"
   local label="$2"
   local retries=30
+  echo "⏳ Waiting for $label..."
   while ! psql "$url" -c "SELECT 1" &>/dev/null 2>&1; do
     retries=$((retries - 1))
     if [[ $retries -le 0 ]]; then

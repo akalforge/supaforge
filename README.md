@@ -55,13 +55,13 @@ supaforge hukam
 
 | # | Layer | Source | Status |
 |---|-------|--------|--------|
-| 1 | Schema | `@dbdiff/cli` | ⏳ Awaiting npm release |
+| 1 | Schema | `@dbdiff/cli` | ✅ Ready |
 | 2 | RLS Policies | `pg_policies` view | ✅ Ready |
 | 3 | Edge Functions | Management API | ✅ Ready |
 | 4 | Storage | Storage API | ✅ Ready |
 | 5 | Auth Config | Management API | ✅ Ready |
 | 6 | Cron Jobs | `cron.job` table | ✅ Ready |
-| 7 | Reference Data | `@dbdiff/cli --type=data` | ⏳ Awaiting npm release |
+| 7 | Reference Data | `@dbdiff/cli --type=data` | ✅ Ready |
 | 8 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ Ready |
 
 ## Commands
@@ -157,13 +157,27 @@ packages/cli/
 git clone https://github.com/akalforge/supaforge.git
 cd supaforge/packages/cli
 npm install
-npm test       # Run all tests
+npm test       # Run all tests (168 unit + e2e)
 npm run lint   # Type-check
 npm run build  # Build with tsup
 
 # Run in dev mode
 ./bin/dev.js scan
 ```
+
+### Integration Tests (Docker / Podman)
+
+Integration tests run against real Postgres containers and verify the full stack including `@dbdiff/cli`:
+
+```bash
+# Full flow: start containers → seed → test → teardown
+npm run test:integration
+
+# Keep containers running for debugging
+./scripts/test-integration.sh --no-teardown
+```
+
+See [`packages/cli/README.md`](packages/cli/README.md#integration-tests-docker--podman) for manual setup and more options.
 
 ## Contributing
 

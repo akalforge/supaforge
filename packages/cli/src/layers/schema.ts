@@ -7,7 +7,7 @@ export type RunDbDiffFn = (options: DbDiffOptions) => ReturnType<typeof runDbDif
 /**
  * Layer 1: Schema Drift — powered by @dbdiff/cli.
  *
- * Shells out to `npx @dbdiff/cli --supabase` to diff table structure,
+ * Invokes `@dbdiff/cli diff` to diff table structure,
  * columns, indexes, constraints, and sequences between environments.
  *
  * Falls back gracefully when @dbdiff/cli is not installed.
@@ -26,7 +26,6 @@ export class SchemaLayer extends Layer {
         targetUrl: ctx.target.dbUrl,
         type: 'schema',
         include: 'both',
-        ignoreSchemas: ctx.config.ignoreSchemas,
       })
       return sqlToIssues(result, 'schema')
     } catch (err) {

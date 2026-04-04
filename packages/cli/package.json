@@ -1,6 +1,6 @@
 {
   "name": "supaforge",
-  "version": "0.2.0",
+  "version": "0.3.0-rc.1",
   "description": "Detect and fix drift across all your Supabase environments",
   "author": "Akal Forge",
   "license": "MIT",
@@ -34,6 +34,7 @@
     "topicSeparator": " "
   },
   "dependencies": {
+    "@dbdiff/cli": "^3.0.0-rc.1",
     "@oclif/core": "^4",
     "pg": "^8"
   },

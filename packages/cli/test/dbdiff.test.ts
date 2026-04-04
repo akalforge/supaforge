@@ -1,13 +1,23 @@
 import { describe, it, expect } from 'vitest'
-import { parseDbDiffOutput, sqlToIssues } from '../src/dbdiff.js'
+import { parseDbDiffOutput, sqlToIssues, resolveDbDiffBin } from '../src/dbdiff.js'
+
+describe('resolveDbDiffBin', () => {
+  it('resolves to local binary when @dbdiff/cli is installed', () => {
+    const { command, prefixArgs } = resolveDbDiffBin()
+    // When @dbdiff/cli is a dependency, it resolves to node + bin/dbdiff.js
+    expect(command).toBe(process.execPath)
+    expect(prefixArgs).toHaveLength(1)
+    expect(prefixArgs[0]).toContain('dbdiff.js')
+  })
+})
 
 describe('parseDbDiffOutput', () => {
   it('parses UP and DOWN sections', () => {
     const output = `
-#---------- UP ----------
+-- ==================== UP ====================
 ALTER TABLE "users" ADD COLUMN "bio" text;
 CREATE INDEX idx_bio ON users(bio);
-#---------- DOWN ----------
+-- ==================== DOWN ====================
 ALTER TABLE "users" DROP COLUMN "bio";
 DROP INDEX idx_bio;
 `
@@ -20,7 +30,7 @@ DROP INDEX idx_bio;
 
   it('handles UP-only output', () => {
     const output = `
-#---------- UP ----------
+-- ==================== UP ====================
 ALTER TABLE "users" ADD COLUMN "bio" text;
 `
     const result = parseDbDiffOutput(output)

@@ -56,7 +56,7 @@ describe('SchemaLayer', () => {
     expect(issues[0].severity).toBe('critical')
   })
 
-  it('passes ignoreSchemas to @dbdiff/cli', async () => {
+  it('passes options to @dbdiff/cli', async () => {
     let capturedOptions: unknown
     const runFn: RunDbDiffFn = async (opts) => {
       capturedOptions = opts
@@ -67,7 +67,8 @@ describe('SchemaLayer', () => {
 
     expect(capturedOptions).toMatchObject({
       type: 'schema',
-      ignoreSchemas: ['auth', 'storage'],
+      sourceUrl: 'postgres://source',
+      targetUrl: 'postgres://target',
     })
   })
 

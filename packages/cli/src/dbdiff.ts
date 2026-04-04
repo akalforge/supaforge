@@ -1,4 +1,8 @@
 import { execFile } from 'node:child_process'
+import { createRequire } from 'node:module'
+import { readFile, unlink, access } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { DriftIssue } from './types/drift'
 
@@ -9,8 +13,8 @@ export interface DbDiffOptions {
   targetUrl: string
   type: 'schema' | 'data' | 'all'
   include: 'up' | 'down' | 'both'
-  ignoreSchemas?: string[]
   tables?: string[]
+  ignoreTables?: string[]
 }
 
 export interface DbDiffResult {
@@ -19,39 +23,69 @@ export interface DbDiffResult {
 }
 
 /**
+ * Resolve the @dbdiff/cli binary path from node_modules.
+ *
+ * Uses createRequire to locate the installed package, then returns
+ * the path to `bin/dbdiff.js`. Falls back to 'npx' if the package
+ * is not installed locally (e.g. global install).
+ */
+export function resolveDbDiffBin(): { command: string; prefixArgs: string[] } {
+  try {
+    const require = createRequire(import.meta.url)
+    const binPath = require.resolve('@dbdiff/cli/bin/dbdiff.js')
+    return { command: process.execPath, prefixArgs: [binPath] }
+  } catch {
+    // Fallback: try npx for global installs
+    return { command: 'npx', prefixArgs: ['@dbdiff/cli'] }
+  }
+}
+
+/**
  * Run @dbdiff/cli and parse UP/DOWN SQL output.
  *
- * Returns { up, down } SQL strings extracted from the
- * `#---------- UP ----------` / `#---------- DOWN ----------` markers.
+ * Writes to a temp file via --output, reads it back, then parses
+ * the `-- ==================== UP ====================` /
+ * `-- ==================== DOWN ====================` markers.
  *
  * When @dbdiff/cli is not installed, throws with a clear message.
  */
 export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
+  const { command, prefixArgs } = resolveDbDiffBin()
+  const outputFile = join(tmpdir(), `supaforge-dbdiff-${Date.now()}-${Math.random().toString(36).slice(2)}.sql`)
+
   const args = [
-    '@dbdiff/cli',
+    ...prefixArgs,
     'diff',
-    '--supabase',
     `--server1-url=${options.sourceUrl}`,
     `--server2-url=${options.targetUrl}`,
     `--type=${options.type}`,
     '--include=both',
     '--nocomments',
+    `--output=${outputFile}`,
   ]
-
-  if (options.ignoreSchemas?.length) {
-    args.push(`--ignore-schema=${options.ignoreSchemas.join(',')}`)
-  }
 
   if (options.tables?.length) {
     args.push(`--tables=${options.tables.join(',')}`)
   }
 
+  if (options.ignoreTables?.length) {
+    args.push(`--ignore-tables=${options.ignoreTables.join(',')}`)
+  }
+
   try {
-    const { stdout } = await execFileAsync('npx', args, {
+    await execFileAsync(command, args, {
       timeout: 120_000,
       maxBuffer: 10 * 1024 * 1024,
     })
-    return parseDbDiffOutput(stdout)
+
+    // When schemas are identical, dbdiff exits 0 but doesn't write the file
+    const fileExists = await access(outputFile).then(() => true, () => false)
+    if (!fileExists) {
+      return { up: '', down: '' }
+    }
+
+    const output = await readFile(outputFile, 'utf8')
+    return parseDbDiffOutput(output)
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     const stderr = String((err as Record<string, unknown>)?.stderr ?? '')
@@ -64,15 +98,17 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
       combined.includes('404')
     ) {
       throw new Error(
-        '@dbdiff/cli is not installed. Install it with: npm install -g @dbdiff/cli',
+        '@dbdiff/cli is not installed. Install it with: npm install @dbdiff/cli',
       )
     }
     throw err
+  } finally {
+    await unlink(outputFile).catch(() => {})
   }
 }
 
-const UP_MARKER = '#---------- UP ----------'
-const DOWN_MARKER = '#---------- DOWN ----------'
+const UP_MARKER = '-- ==================== UP ===================='
+const DOWN_MARKER = '-- ==================== DOWN ===================='
 
 export function parseDbDiffOutput(output: string): DbDiffResult {
   const upIdx = output.indexOf(UP_MARKER)

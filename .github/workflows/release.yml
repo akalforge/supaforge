@@ -65,9 +65,19 @@ jobs:
         working-directory: packages/cli
         run: npm run build
 
+      - name: Determine npm dist-tag
+        id: dist-tag
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == *"-rc."* ]] || [[ "$TAG" == *"-beta."* ]] || [[ "$TAG" == *"-alpha."* ]]; then
+            echo "tag=next" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to npm
         working-directory: packages/cli
-        run: npm publish --provenance --access public
+        run: npm publish --provenance --access public --tag ${{ steps.dist-tag.outputs.tag }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -81,6 +91,16 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Detect prerelease
+        id: prerelease
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          if [[ "$TAG" == *"-rc."* ]] || [[ "$TAG" == *"-beta."* ]] || [[ "$TAG" == *"-alpha."* ]]; then
+            echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         env:
@@ -89,5 +109,5 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: Release ${{ github.ref_name }}
           draft: false
-          prerelease: false
+          prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
           generate_release_notes: true

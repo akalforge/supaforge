@@ -56,12 +56,12 @@ supaforge hukam
 | Check | Source | Status |
 |-------|--------|--------|
 | Schema | `@dbdiff/cli` | ✅ Ready |
+| Data | `@dbdiff/cli --type=data` | ✅ Ready |
 | RLS Policies | `pg_policies` view | ✅ Ready |
 | Edge Functions | Management API | ✅ Ready |
 | Storage | Storage API | ✅ Ready |
 | Auth Config | Management API | ✅ Ready |
 | Cron Jobs | `cron.job` table | ✅ Ready |
-| Reference Data | `@dbdiff/cli --type=data` | ✅ Ready |
 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ Ready |
 | Realtime Publications | `pg_publication` + `pg_publication_tables` | ✅ Ready |
 | Vault Secrets | `vault.secrets` | ✅ Ready |
@@ -74,7 +74,7 @@ How SupaForge maps to every standard Supabase module (see [Supabase Features](ht
 | Supabase Module | Feature | SupaForge Check | Notes |
 |---|---|---|---|
 | **Database** | Postgres schema | ✅ Schema | Tables, columns, indexes, constraints, views, triggers, functions, sequences |
-| | Reference / seed data | ✅ Data | Row-level diff for configured tables |
+| | Reference / seed data | ✅ Data | Row-level diff for all public tables (configurable) |
 | | Database webhooks | ✅ Webhooks | `supabase_functions.hooks` + `pg_net` extension |
 | | Postgres extensions | ✅ Extensions | Enabled/disabled detection via `pg_extension` |
 | | Vault / Secrets | ✅ Vault | Secret name/description drift; values are environment-specific |
@@ -97,12 +97,6 @@ How SupaForge maps to every standard Supabase module (see [Supabase Features](ht
 | | Read replicas | ⬜ N/A | Platform-level |
 
 ✅ = Covered &nbsp; 🔜 = Planned &nbsp; ⬜ = Not applicable / not planned
-
-### Planned Checks (Roadmap)
-
-These checks will be added in upcoming releases:
-
-1. **Database Roles** — Diff custom Postgres roles and grants via `pg_roles`. Detect roles created in one environment but missing in another.
 
 ## Commands
 
@@ -164,7 +158,7 @@ Supabase internal schemas (`auth`, `storage`, `realtime`, `vault`, etc.) are ign
 
 ## Extending with Hooks
 
-SupaForge uses a hook bus inspired by [@plug/core](https://github.com/akalforge/plug) for extensibility:
+SupaForge includes a lightweight hook bus for extensibility:
 
 ```typescript
 import { HookBus, scan, createDefaultRegistry, loadConfig } from 'supaforge'

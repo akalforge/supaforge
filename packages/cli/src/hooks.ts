@@ -1,7 +1,6 @@
 /**
- * Minimal hook bus inspired by @plug/core (https://github.com/akalforge/plug).
+ * Lightweight hook bus for SupaForge extensibility.
  * Provides actions (fire-and-forget) and filters (transform pipeline) with priority ordering.
- * When @plug/core is published to npm, this can be replaced with a direct import.
  */
 
 type Listener = (...args: any[]) => unknown | Promise<unknown>

@@ -2,7 +2,7 @@
 
 > Detect and fix drift across all your Supabase environments — the environment sync tool Supabase developers have been asking for.
 
-Built by [Akal Forge](https://github.com/akalforge). Powered by [oclif](https://oclif.io). Extensible via hooks inspired by [@plug/core](https://github.com/akalforge/plug).
+Built by [Akal Forge](https://github.com/akalforge). Powered by [oclif](https://oclif.io).
 
 ## Quick Start
 
@@ -41,12 +41,12 @@ supaforge diff
 | Check | Source | Detection | Fix |
 |-------|--------|-----------|-----|
 | Schema | `@dbdiff/cli` | ✅ Tables, views, triggers, functions, enum types | SQL (up/down) |
+| Data | `@dbdiff/cli --type=data` | ✅ Row-level diff for all public tables (configurable) | SQL (up/down) |
 | RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
 | Edge Functions | Management API | ✅ | DELETE extras via API; missing/outdated → manual `supabase functions deploy` |
 | Storage | Storage API + `pg_policies` | ✅ | Buckets via API (POST/PUT/DELETE); Policies via SQL |
 | Auth Config | Management API | ✅ | PATCH via API |
 | Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
-| Reference Data | `@dbdiff/cli --type=data` | ✅ | SQL (up/down) |
 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ | SQL when trigger metadata available |
 | Realtime Publications | `pg_publication` + `pg_publication_tables` | ✅ | SQL (CREATE/ALTER PUBLICATION) |
 | Vault Secrets | `vault.secrets` | ✅ | SQL (`vault.create_secret` / `vault.update_secret`) |
@@ -201,7 +201,7 @@ Supabase internal schemas (`auth`, `storage`, `realtime`, `vault`, etc.) are ign
 
 ## Extending with Hooks
 
-SupaForge uses a hook bus (inspired by [@plug/core](https://github.com/akalforge/plug)) for extensibility:
+SupaForge includes a lightweight hook bus for extensibility:
 
 ```typescript
 import { HookBus, scan, createDefaultRegistry, loadConfig } from 'supaforge'
@@ -302,7 +302,7 @@ Port allocation:
 
 ### @dbdiff/cli Integration
 
-The Schema and Reference Data checks are powered by [`@dbdiff/cli`](https://github.com/DBDiff/DBDiff). It is included as a dependency and installed automatically — no separate install needed. The native binary runs without PHP.
+The Schema and Data checks are powered by [`@dbdiff/cli`](https://github.com/DBDiff/DBDiff). It is included as a dependency and installed automatically — no separate install needed. The native binary runs without PHP.
 
 ```bash
 supaforge scan                # schema + data checks active out of the box

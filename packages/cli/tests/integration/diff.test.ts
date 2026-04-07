@@ -23,9 +23,9 @@ describe('integration: diff (detailed scan)', () => {
     const rls = result.checks.find(l => l.check === 'rls')!
     expect(rls.status).toBe('drifted')
 
-    // Each RLS issue should have a fix with SQL
+    // Each RLS issue should have SQL remediation
     for (const issue of rls.issues) {
-      expect(issue.fix, `${issue.id} should have a fix`).toBeDefined()
+      expect(issue.sql, `${issue.id} should have sql`).toBeDefined()
     }
   })
 
@@ -35,7 +35,7 @@ describe('integration: diff (detailed scan)', () => {
 
     const missingDigest = cron.issues.find(i => i.id.includes('weekly_digest'))
     expect(missingDigest).toBeDefined()
-    expect(missingDigest!.fix).toBeDefined()
+    expect(missingDigest!.sql).toBeDefined()
   })
 
   it.skipIf(skipIfNoContainers())('should include SQL for webhook drift', () => {
@@ -48,8 +48,8 @@ describe('integration: diff (detailed scan)', () => {
     const schema = result.checks.find(l => l.check === 'schema')!
     expect(schema.status).toBe('drifted')
     // Schema issues should contain SQL from @dbdiff/cli
-    const withFix = schema.issues.filter(i => i.fix)
-    expect(withFix.length).toBeGreaterThanOrEqual(1)
+    const withSql = schema.issues.filter(i => i.sql)
+    expect(withSql.length).toBeGreaterThanOrEqual(1)
   })
 
   it.skipIf(skipIfNoContainers())('should produce data diff', () => {

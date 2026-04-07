@@ -50,13 +50,13 @@ describe('integration: backup', () => {
 
     expect(result.migrationFile).toBeDefined()
     expect(result.migrationFile).toContain('initial-baseline')
-    expect(result.snapshotDir).toBeDefined()
+    expect(result.snapshot).toBeDefined()
     expect(result.isBaseline).toBe(true)
 
     // Migration file should exist on disk
     const migrations = await listMigrationFiles(tempDir)
     expect(migrations).toHaveLength(1)
-    expect(migrations[0].description).toBe('initial-baseline')
+    expect(migrations[0].description).toBe('baseline: initial-baseline')
   })
 
   it.skipIf(skipIfNoContainers())('second backup creates incremental migration', async () => {
@@ -88,7 +88,7 @@ describe('integration: backup', () => {
 
     const migrations = await listMigrationFiles(tempDir)
     expect(migrations).toHaveLength(2)
-    expect(migrations[0].description).toBe('baseline')
+    expect(migrations[0].description).toBe('baseline: baseline')
     expect(migrations[1].description).toBe('incremental')
   })
 
@@ -107,7 +107,7 @@ describe('integration: backup', () => {
 
     const m = migrations[0]
     expect(m.version).toMatch(/^\d{8}T\d{6}Z$/)
-    expect(m.description).toBe('check-sql')
+    expect(m.description).toBe('baseline: check-sql')
     expect(m.up).toBeDefined()
     expect(m.down).toBeDefined()
     // Baseline has SQL statements in up

@@ -51,3 +51,27 @@ export function validateConfig(config: SupaForgeConfig): string[] {
 
   return errors
 }
+
+/**
+ * Validate config for single-environment operations (snapshot, clone, backup, restore).
+ * Only requires that the specified environment exists and has a dbUrl.
+ */
+export function validateSingleEnvConfig(config: SupaForgeConfig, envName: string): string[] {
+  const errors: string[] = []
+
+  if (!config.environments || typeof config.environments !== 'object') {
+    errors.push('environments is required and must be an object')
+    return errors
+  }
+
+  if (!config.environments[envName]) {
+    errors.push(`Environment "${envName}" not found in environments`)
+    return errors
+  }
+
+  if (!config.environments[envName].dbUrl) {
+    errors.push(`Environment "${envName}" is missing dbUrl`)
+  }
+
+  return errors
+}

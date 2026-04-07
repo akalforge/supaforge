@@ -1,27 +1,27 @@
 import { describe, it, expect } from 'vitest'
 import { scan } from '../src/scanner.js'
-import { LayerRegistry } from '../src/layers/registry.js'
-import { Layer, type LayerContext } from '../src/layers/base.js'
+import { CheckRegistry } from '../src/checks/registry.js'
+import { Check, type CheckContext } from '../src/checks/base.js'
 import { HookBus } from '../src/hooks.js'
-import type { DriftIssue, LayerName } from '../src/types/drift.js'
+import type { DriftIssue, CheckName } from '../src/types/drift.js'
 import type { SupaForgeConfig } from '../src/types/config.js'
 
-class MockLayer extends Layer {
-  readonly name: LayerName
+class MockLayer extends Check {
+  readonly name: CheckName
   private issues: DriftIssue[]
 
-  constructor(name: LayerName, issues: DriftIssue[] = []) {
+  constructor(name: CheckName, issues: DriftIssue[] = []) {
     super()
     this.name = name
     this.issues = issues
   }
 
-  async scan(_ctx: LayerContext): Promise<DriftIssue[]> {
+  async scan(_ctx: CheckContext): Promise<DriftIssue[]> {
     return this.issues
   }
 }
 
-class ErrorLayer extends Layer {
+class ErrorLayer extends Check {
   readonly name = 'auth' as const
   async scan(): Promise<DriftIssue[]> {
     throw new Error('connection refused')
@@ -39,60 +39,60 @@ const config: SupaForgeConfig = {
 
 describe('scan', () => {
   it('returns clean results when no issues found', async () => {
-    const registry = new LayerRegistry()
+    const registry = new CheckRegistry()
     registry.register(new MockLayer('rls'))
 
-    const result = await scan(registry, { config, layers: ['rls'] })
+    const result = await scan(registry, { config, checks: ['rls'] })
 
-    expect(result.layers).toHaveLength(1)
-    expect(result.layers[0].status).toBe('clean')
+    expect(result.checks).toHaveLength(1)
+    expect(result.checks[0].status).toBe('clean')
     expect(result.summary.total).toBe(0)
     expect(result.score).toBe(100)
   })
 
   it('returns drifted status when issues found', async () => {
-    const registry = new LayerRegistry()
+    const registry = new CheckRegistry()
     registry.register(new MockLayer('rls', [
-      { id: '1', layer: 'rls', severity: 'critical', title: 'Missing policy', description: '' },
+      { id: '1', check: 'rls', severity: 'critical', title: 'Missing policy', description: '' },
     ]))
 
-    const result = await scan(registry, { config, layers: ['rls'] })
+    const result = await scan(registry, { config, checks: ['rls'] })
 
-    expect(result.layers[0].status).toBe('drifted')
+    expect(result.checks[0].status).toBe('drifted')
     expect(result.summary.total).toBe(1)
     expect(result.summary.critical).toBe(1)
   })
 
-  it('handles layer errors gracefully', async () => {
-    const registry = new LayerRegistry()
+  it('handles check errors gracefully', async () => {
+    const registry = new CheckRegistry()
     registry.register(new ErrorLayer())
 
-    const result = await scan(registry, { config, layers: ['auth'] })
+    const result = await scan(registry, { config, checks: ['auth'] })
 
-    expect(result.layers[0].status).toBe('error')
-    expect(result.layers[0].error).toBe('connection refused')
+    expect(result.checks[0].status).toBe('error')
+    expect(result.checks[0].error).toBe('connection refused')
   })
 
-  it('skips unregistered layers', async () => {
-    const registry = new LayerRegistry()
+  it('skips unregistered checks', async () => {
+    const registry = new CheckRegistry()
 
-    const result = await scan(registry, { config, layers: ['cron'] })
+    const result = await scan(registry, { config, checks: ['cron'] })
 
-    expect(result.layers[0].status).toBe('skipped')
+    expect(result.checks[0].status).toBe('skipped')
   })
 
-  it('scans multiple layers', async () => {
-    const registry = new LayerRegistry()
+  it('scans multiple checks', async () => {
+    const registry = new CheckRegistry()
     registry.register(new MockLayer('rls'))
     registry.register(new MockLayer('cron', [
-      { id: '1', layer: 'cron', severity: 'warning', title: 'Missing job', description: '' },
+      { id: '1', check: 'cron', severity: 'warning', title: 'Missing job', description: '' },
     ]))
 
-    const result = await scan(registry, { config, layers: ['rls', 'cron'] })
+    const result = await scan(registry, { config, checks: ['rls', 'cron'] })
 
-    expect(result.layers).toHaveLength(2)
-    expect(result.layers[0].status).toBe('clean')
-    expect(result.layers[1].status).toBe('drifted')
+    expect(result.checks).toHaveLength(2)
+    expect(result.checks[0].status).toBe('clean')
+    expect(result.checks[1].status).toBe('drifted')
   })
 
   it('fires hook bus events', async () => {
@@ -100,26 +100,26 @@ describe('scan', () => {
     const events: string[] = []
 
     bus.on('supaforge.scan.before', () => { events.push('scan.before') })
-    bus.on('supaforge.layer.before', () => { events.push('layer.before') })
-    bus.on('supaforge.layer.after', () => { events.push('layer.after') })
+    bus.on('supaforge.check.before', () => { events.push('check.before') })
+    bus.on('supaforge.check.after', () => { events.push('check.after') })
     bus.on('supaforge.scan.after', () => { events.push('scan.after') })
 
-    const registry = new LayerRegistry()
+    const registry = new CheckRegistry()
     registry.register(new MockLayer('rls'))
 
-    await scan(registry, { config, layers: ['rls'] }, bus)
+    await scan(registry, { config, checks: ['rls'] }, bus)
 
     expect(events).toEqual([
       'scan.before',
-      'layer.before',
-      'layer.after',
+      'check.before',
+      'check.after',
       'scan.after',
     ])
   })
 
   it('includes timestamp and environment names', async () => {
-    const registry = new LayerRegistry()
-    const result = await scan(registry, { config, layers: ['schema'] })
+    const registry = new CheckRegistry()
+    const result = await scan(registry, { config, checks: ['schema'] })
 
     expect(result.source).toBe('dev')
     expect(result.target).toBe('prod')

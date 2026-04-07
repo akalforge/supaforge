@@ -10,7 +10,7 @@
 
 ## Why SupaForge?
 
-Supabase projects running in multiple environments (dev, staging, production) silently diverge across **eight distinct layers** — schema, RLS policies, Edge Functions, storage, auth, cron jobs, reference data, and webhooks — with no first-class tooling to detect or fix it.
+Supabase projects running in multiple environments (dev, staging, production) silently diverge with no first-class tooling to detect or fix it.
 
 **CVE-2025-48757** found 170+ apps with fully exposed databases due to RLS policies that were never promoted to production. SupaForge catches this on the first scan.
 
@@ -51,29 +51,85 @@ supaforge diff
 supaforge hukam
 ```
 
-## The 8 Drift Layers
+## Comprehensive Checks
 
-| # | Layer | Source | Status |
-|---|-------|--------|--------|
-| 1 | Schema | `@dbdiff/cli` | ✅ Ready |
-| 2 | RLS Policies | `pg_policies` view | ✅ Ready |
-| 3 | Edge Functions | Management API | ✅ Ready |
-| 4 | Storage | Storage API | ✅ Ready |
-| 5 | Auth Config | Management API | ✅ Ready |
-| 6 | Cron Jobs | `cron.job` table | ✅ Ready |
-| 7 | Reference Data | `@dbdiff/cli --type=data` | ✅ Ready |
-| 8 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ Ready |
+| Check | Source | Status |
+|-------|--------|--------|
+| Schema | `@dbdiff/cli` | ✅ Ready |
+| RLS Policies | `pg_policies` view | ✅ Ready |
+| Edge Functions | Management API | ✅ Ready |
+| Storage | Storage API | ✅ Ready |
+| Auth Config | Management API | ✅ Ready |
+| Cron Jobs | `cron.job` table | ✅ Ready |
+| Reference Data | `@dbdiff/cli --type=data` | ✅ Ready |
+| Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ Ready |
+| Realtime Publications | `pg_publication` + `pg_publication_tables` | ✅ Ready |
+| Vault Secrets | `vault.secrets` | ✅ Ready |
+| Postgres Extensions | `pg_extension` | ✅ Ready |
+
+## Supabase Feature Coverage
+
+How SupaForge maps to every standard Supabase module (see [Supabase Features](https://supabase.com/docs/guides/getting-started/features)):
+
+| Supabase Module | Feature | SupaForge Check | Notes |
+|---|---|---|---|
+| **Database** | Postgres schema | ✅ Schema | Tables, columns, indexes, constraints, views, triggers, functions, sequences |
+| | Reference / seed data | ✅ Data | Row-level diff for configured tables |
+| | Database webhooks | ✅ Webhooks | `supabase_functions.hooks` + `pg_net` extension |
+| | Postgres extensions | ✅ Extensions | Enabled/disabled detection via `pg_extension` |
+| | Vault / Secrets | ✅ Vault | Secret name/description drift; values are environment-specific |
+| | Postgres roles | 🔜 Planned | Custom roles and grants |
+| | Realtime publications | ✅ Realtime | Which tables are published for Realtime |
+| | PostgREST config | ⬜ Not planned | Managed by Supabase platform; not user-configurable per environment |
+| | Replication | ⬜ Not planned | Private alpha; not accessible via standard APIs |
+| **Auth** | Auth config | ✅ Auth | 20+ settings via Management API (providers, JWT, MFA, CAPTCHA) |
+| | RLS policies | ✅ RLS | Full policy diffing with UP/DOWN SQL generation |
+| **Storage** | Buckets | ✅ Storage | Bucket metadata (name, public/private, size limits, MIME types) |
+| | Storage RLS policies | ✅ Storage | `storage` schema policy diffing |
+| **Edge Functions** | Function metadata | ✅ Edge Functions | Slug, version, status (source code requires manual deploy) |
+| **Cron** | `pg_cron` jobs | ✅ Cron | Schedule, command, active status with SQL generation |
+| **Realtime** | Publications | ✅ Realtime | `pg_publication` + `pg_publication_tables` |
+| | Broadcast / Presence | ⬜ N/A | Runtime features, not environment config |
+| **Platform** | Network restrictions | ⬜ N/A | Platform-level (not diffable via SQL or Management API) |
+| | SSL enforcement | ⬜ N/A | Platform-level |
+| | Custom domains | ⬜ N/A | Platform-level |
+| | Branching | ⬜ N/A | SupaForge provides its own branching via `supaforge branch` |
+| | Read replicas | ⬜ N/A | Platform-level |
+
+✅ = Covered &nbsp; 🔜 = Planned &nbsp; ⬜ = Not applicable / not planned
+
+### Planned Checks (Roadmap)
+
+These checks will be added in upcoming releases:
+
+1. **Database Roles** — Diff custom Postgres roles and grants via `pg_roles`. Detect roles created in one environment but missing in another.
 
 ## Commands
 
 ```
-supaforge scan              Scan all 8 layers for drift
-supaforge scan --layer=rls  Scan a specific layer only
+supaforge scan              Scan everything
+supaforge scan --check=rls  Scan a specific check only
 supaforge scan --json       Output as JSON
 supaforge diff              Show detailed diff with SQL fixes
-supaforge diff --layer=rls  Detailed diff for one layer
+supaforge diff --check=rls  Detailed diff for one check
+supaforge promote           Preview fixes (dry-run by default)
+supaforge promote --apply   Actually execute fixes
 supaforge hukam             Alias for scan 🙏
+
+# Single-environment (backup & restore)
+supaforge snapshot --env=prod --apply   Capture full 9-layer snapshot
+supaforge clone --env=prod --apply      Clone remote to local
+supaforge backup --env=prod --apply     Incremental backup (snapshot + diff)
+supaforge restore --env=local --apply   Restore from snapshot or migrations
+
+# Branching
+supaforge branch create feature-x --apply
+supaforge branch list
+supaforge branch diff feature-x
+supaforge branch delete feature-x --apply
 ```
+
+> All commands that modify state preview by default. Add `--apply` to execute.
 
 ## Configuration
 
@@ -96,7 +152,7 @@ Create `supaforge.config.json` in your project root:
   "source": "dev",
   "target": "prod",
   "ignoreSchemas": ["auth", "storage", "realtime", "vault"],
-  "layers": {
+  "checks": {
     "data": {
       "tables": ["plans", "feature_flags", "pricing_tiers"]
     }
@@ -119,9 +175,9 @@ bus.on('supaforge.scan.before', (ctx) => {
   console.log(`Scanning ${ctx.config.source} → ${ctx.config.target}`)
 })
 
-bus.on('supaforge.layer.after', ({ layer, result }) => {
+bus.on('supaforge.check.after', ({ check, result }) => {
   if (result.status === 'drifted') {
-    console.log(`⚠ Drift detected in ${layer}`)
+    console.log(`⚠ Drift detected in ${check}`)
   }
 })
 
@@ -136,9 +192,9 @@ const result = await scan(registry, { config }, bus)
 packages/cli/
 ├── src/
 │   ├── commands/        # oclif commands (scan, diff, hukam)
-│   ├── layers/          # 8 drift detection layers
-│   │   ├── base.ts      # Abstract Layer class
-│   │   ├── registry.ts  # LayerRegistry
+│   ├── checks/          # Drift detection checks
+│   │   ├── base.ts      # Abstract Check class
+│   │   ├── registry.ts  # CheckRegistry
 │   │   ├── rls.ts       # RLS policy diffing
 │   │   ├── cron.ts      # Cron job diffing
 │   │   └── ...          # edge-functions, storage, auth, webhooks, schema, data
@@ -157,7 +213,7 @@ packages/cli/
 git clone https://github.com/akalforge/supaforge.git
 cd supaforge/packages/cli
 npm install
-npm test       # Run all tests (168 unit + e2e)
+npm test       # Run all tests (220 unit + e2e)
 npm run lint   # Type-check
 npm run build  # Build with tsup
 

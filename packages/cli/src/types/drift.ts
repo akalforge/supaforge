@@ -1,12 +1,13 @@
-export const LAYER_NAMES = [
+export const CHECK_NAMES = [
   'schema', 'rls', 'edge-functions', 'storage', 'auth', 'cron', 'data', 'webhooks',
+  'realtime', 'vault', 'extensions',
 ] as const
 
-export type LayerName = (typeof LAYER_NAMES)[number]
+export type CheckName = (typeof CHECK_NAMES)[number]
 
 export type Severity = 'critical' | 'warning' | 'info'
 
-export const LAYER_META: Record<LayerName, { number: number; emoji: string; label: string }> = {
+export const CHECK_META: Record<CheckName, { number: number; emoji: string; label: string }> = {
   'schema':          { number: 1, emoji: '🗄️',   label: 'Schema' },
   'rls':             { number: 2, emoji: '🔒',   label: 'RLS Policies' },
   'edge-functions':  { number: 3, emoji: '⚡',    label: 'Edge Functions' },
@@ -15,6 +16,9 @@ export const LAYER_META: Record<LayerName, { number: number; emoji: string; labe
   'cron':            { number: 6, emoji: '⏰',   label: 'Cron Jobs' },
   'data':            { number: 7, emoji: '🗃️',   label: 'Reference Data' },
   'webhooks':        { number: 8, emoji: '⚡🔗', label: 'Webhooks' },
+  'realtime':        { number: 9, emoji: '📡',   label: 'Realtime Publications' },
+  'vault':           { number: 10, emoji: '🔐',  label: 'Vault Secrets' },
+  'extensions':      { number: 11, emoji: '🧩',  label: 'Postgres Extensions' },
 }
 
 /** API-based sync action for non-SQL drift fixes. */
@@ -33,7 +37,7 @@ export interface SyncAction {
 
 export interface DriftIssue {
   id: string
-  layer: LayerName
+  check: CheckName
   severity: Severity
   title: string
   description: string
@@ -44,8 +48,8 @@ export interface DriftIssue {
   action?: SyncAction
 }
 
-export interface LayerResult {
-  layer: LayerName
+export interface CheckResult {
+  check: CheckName
   status: 'clean' | 'drifted' | 'error' | 'skipped'
   issues: DriftIssue[]
   error?: string
@@ -56,7 +60,7 @@ export interface ScanResult {
   timestamp: string
   source: string
   target: string
-  layers: LayerResult[]
+  checks: CheckResult[]
   score: number
   summary: { total: number; critical: number; warning: number; info: number }
 }

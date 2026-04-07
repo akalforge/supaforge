@@ -1,5 +1,5 @@
 import type { DriftIssue, SyncAction } from '../types/drift'
-import { Layer, type LayerContext } from './base'
+import { Check, type CheckContext } from './base'
 
 interface EdgeFunction {
   slug: string
@@ -15,14 +15,14 @@ export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 /** Supabase Management API base URL */
 const MGMT_API = 'https://api.supabase.com/v1/projects'
 
-export class EdgeFunctionsLayer extends Layer {
+export class EdgeFunctionsCheck extends Check {
   readonly name = 'edge-functions' as const
 
   constructor(private fetchFn: FetchFn = globalThis.fetch.bind(globalThis)) {
     super()
   }
 
-  async scan(ctx: LayerContext): Promise<DriftIssue[]> {
+  async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     const { projectRef: sourceRef, apiKey: sourceKey } = ctx.source
     const { projectRef: targetRef, apiKey: targetKey } = ctx.target
 
@@ -71,7 +71,7 @@ function diffFunctions(
     if (!targetMap.has(slug)) {
       issues.push({
         id: `edge-fn-missing-${slug}`,
-        layer: 'edge-functions',
+        check: 'edge-functions',
         severity: 'warning',
         title: `Missing Edge Function: ${slug}`,
         description: `Function "${f.name}" (${slug}) exists in source but not in target. Deploy it via "supabase functions deploy ${slug}" against the target project.`,
@@ -86,7 +86,7 @@ function diffFunctions(
     if (!sourceMap.has(slug)) {
       issues.push({
         id: `edge-fn-extra-${slug}`,
-        layer: 'edge-functions',
+        check: 'edge-functions',
         severity: 'info',
         title: `Extra Edge Function: ${slug}`,
         description: `Function "${f.name}" (${slug}) exists in target but not in source.`,
@@ -101,7 +101,7 @@ function diffFunctions(
     if (tf && sf.version !== tf.version) {
       issues.push({
         id: `edge-fn-version-${slug}`,
-        layer: 'edge-functions',
+        check: 'edge-functions',
         severity: 'warning',
         title: `Version mismatch: ${slug}`,
         description: `Function "${slug}" is at version ${sf.version} in source but version ${tf.version} in target. Redeploy via "supabase functions deploy ${slug}" against the target project.`,

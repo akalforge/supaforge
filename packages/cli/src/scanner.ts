@@ -1,22 +1,22 @@
 import type { HookBus } from './hooks'
-import type { LayerRegistry } from './layers/registry'
+import type { CheckRegistry } from './checks/registry'
 import type { SupaForgeConfig } from './types/config'
-import type { LayerName, LayerResult, ScanResult } from './types/drift'
-import { LAYER_NAMES } from './types/drift'
+import type { CheckName, CheckResult, ScanResult } from './types/drift'
+import { CHECK_NAMES } from './types/drift'
 import { computeScore, summarize } from './scoring'
 
 export interface ScanOptions {
   config: SupaForgeConfig
-  layers?: LayerName[]
+  checks?: CheckName[]
 }
 
 export async function scan(
-  registry: LayerRegistry,
+  registry: CheckRegistry,
   options: ScanOptions,
   bus?: HookBus,
 ): Promise<ScanResult> {
   const { config } = options
-  const layersToScan = options.layers ?? [...LAYER_NAMES]
+  const checksToScan = options.checks ?? [...CHECK_NAMES]
 
   const source = config.environments[config.source]
   const target = config.environments[config.target]
@@ -24,27 +24,27 @@ export async function scan(
 
   await bus?.emit('supaforge.scan.before', ctx)
 
-  const results: LayerResult[] = []
+  const results: CheckResult[] = []
 
-  for (const name of layersToScan) {
-    const layer = registry.get(name)
-    if (!layer) {
-      results.push({ layer: name, status: 'skipped', issues: [], durationMs: 0 })
+  for (const name of checksToScan) {
+    const check = registry.get(name)
+    if (!check) {
+      results.push({ check: name, status: 'skipped', issues: [], durationMs: 0 })
       continue
     }
 
-    await bus?.emit('supaforge.layer.before', { layer: name })
+    await bus?.emit('supaforge.check.before', { check: name })
     const start = performance.now()
 
     try {
-      const issues = await layer.scan(ctx)
+      const issues = await check.scan(ctx)
       const durationMs = Math.round(performance.now() - start)
       const status = issues.length > 0 ? 'drifted' : 'clean'
-      results.push({ layer: name, status, issues, durationMs })
+      results.push({ check: name, status, issues, durationMs })
     } catch (err) {
       const durationMs = Math.round(performance.now() - start)
       results.push({
-        layer: name,
+        check: name,
         status: 'error',
         issues: [],
         error: err instanceof Error ? err.message : String(err),
@@ -52,7 +52,7 @@ export async function scan(
       })
     }
 
-    await bus?.emit('supaforge.layer.after', { layer: name, result: results.at(-1) })
+    await bus?.emit('supaforge.check.after', { check: name, result: results.at(-1) })
   }
 
   const summary = summarize(results)
@@ -62,7 +62,7 @@ export async function scan(
     timestamp: new Date().toISOString(),
     source: config.source,
     target: config.target,
-    layers: results,
+    checks: results,
     score,
     summary,
   }

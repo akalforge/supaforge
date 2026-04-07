@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { CronLayer } from '../../src/layers/cron.js'
-import type { LayerContext } from '../../src/layers/base.js'
+import { CronCheck } from '../../src/checks/cron.js'
+import type { CheckContext } from '../../src/checks/base.js'
 import type { QueryFn } from '../../src/db.js'
 
-function mockContext(): LayerContext {
+function mockContext(): CheckContext {
   return {
     source: { dbUrl: 'postgres://source' },
     target: { dbUrl: 'postgres://target' },
@@ -28,15 +28,15 @@ const makeJob = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 })
 
-describe('CronLayer', () => {
+describe('CronCheck', () => {
   it('detects missing cron jobs in target', async () => {
     const queryFn: QueryFn = async (dbUrl) => {
       if (dbUrl.includes('source')) return [makeJob()]
       return []
     }
 
-    const layer = new CronLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('warning')
@@ -51,8 +51,8 @@ describe('CronLayer', () => {
       return []
     }
 
-    const layer = new CronLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('info')
@@ -65,8 +65,8 @@ describe('CronLayer', () => {
       return [makeJob({ schedule: '0 6 * * *' })]
     }
 
-    const layer = new CronLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('warning')
@@ -80,8 +80,8 @@ describe('CronLayer', () => {
       return [makeJob({ command: 'SELECT other_cleanup()' })]
     }
 
-    const layer = new CronLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].title).toContain('Modified cron job')
@@ -91,8 +91,8 @@ describe('CronLayer', () => {
     const job = makeJob()
     const queryFn: QueryFn = async () => [job]
 
-    const layer = new CronLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(0)
   })
@@ -102,8 +102,8 @@ describe('CronLayer', () => {
       throw new Error('relation "cron.job" does not exist')
     }
 
-    const layer = new CronLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(0)
   })
@@ -114,8 +114,8 @@ describe('CronLayer', () => {
       return []
     }
 
-    const layer = new CronLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues[0].id).toBe('cron-missing-my_job')
   })
@@ -126,8 +126,8 @@ describe('CronLayer', () => {
       return []
     }
 
-    const layer = new CronLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues[0].id).toBe('cron-missing-job-42')
   })

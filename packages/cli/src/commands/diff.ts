@@ -1,24 +1,24 @@
 import { Command, Flags } from '@oclif/core'
 import { loadConfig, validateConfig } from '../config'
-import { createDefaultRegistry } from '../layers/index'
+import { createDefaultRegistry } from '../checks/index'
 import { scan } from '../scanner'
 import { renderDetailed } from '../render'
-import type { LayerName } from '../types/drift'
-import { LAYER_NAMES } from '../types/drift'
+import type { CheckName } from '../types/drift'
+import { CHECK_NAMES } from '../types/drift'
 
 export default class Diff extends Command {
   static override description = 'Show detailed drift diff between Supabase environments'
 
   static override examples = [
     '<%= config.bin %> diff',
-    '<%= config.bin %> diff --layer=rls',
+    '<%= config.bin %> diff --check=rls',
   ]
 
   static override flags = {
-    layer: Flags.string({
+    check: Flags.string({
       char: 'l',
-      description: 'Diff a specific layer only',
-      options: [...LAYER_NAMES],
+      description: 'Diff a specific check only',
+      options: [...CHECK_NAMES],
     }),
     json: Flags.boolean({ description: 'Output results as JSON' }),
     source: Flags.string({ char: 's', description: 'Source environment name' }),
@@ -46,9 +46,9 @@ export default class Diff extends Command {
     }
 
     const registry = createDefaultRegistry()
-    const layers = flags.layer ? [flags.layer as LayerName] : undefined
+    const checks = flags.check ? [flags.check as CheckName] : undefined
 
-    const result = await scan(registry, { config, layers })
+    const result = await scan(registry, { config, checks })
 
     if (flags.json) {
       this.log(JSON.stringify(result, null, 2))

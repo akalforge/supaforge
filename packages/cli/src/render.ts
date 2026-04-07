@@ -1,23 +1,23 @@
-import type { ScanResult, LayerResult, DriftIssue } from './types/drift'
-import { LAYER_META } from './types/drift'
+import type { ScanResult, CheckResult, DriftIssue } from './types/drift'
+import { CHECK_META } from './types/drift'
 
 export function renderSummary(result: ScanResult): string {
   const lines: string[] = ['']
 
   const noun = result.summary.total === 1 ? 'issue' : 'issues'
-  const driftedCount = result.layers.filter(l => l.status === 'drifted').length
-  const layerNoun = driftedCount === 1 ? 'layer' : 'layers'
+  const driftedCount = result.checks.filter(l => l.status === 'drifted').length
+  const checkNoun = driftedCount === 1 ? 'check' : 'checks'
 
   lines.push(
     result.summary.total > 0
-      ? `SupaForge scan complete: ${result.summary.total} drift ${noun} found across ${driftedCount} ${layerNoun}.`
+      ? `SupaForge scan complete: ${result.summary.total} drift ${noun} found across ${driftedCount} ${checkNoun}.`
       : 'SupaForge scan complete: no drift detected. ✓',
   )
   lines.push(`Source: ${result.source} → Target: ${result.target}`)
   lines.push('')
 
-  for (const lr of result.layers) {
-    lines.push(formatLayerLine(lr))
+  for (const lr of result.checks) {
+    lines.push(formatCheckLine(lr))
   }
 
   lines.push('')
@@ -30,9 +30,9 @@ export function renderSummary(result: ScanResult): string {
 export function renderDetailed(result: ScanResult): string {
   const lines = [renderSummary(result)]
 
-  for (const lr of result.layers) {
+  for (const lr of result.checks) {
     if (lr.issues.length === 0) continue
-    const meta = LAYER_META[lr.layer]
+    const meta = CHECK_META[lr.check]
     lines.push(`${'─'.repeat(2)} Layer ${meta.number}: ${meta.label} ${'─'.repeat(40)}`)
     lines.push('')
 
@@ -44,8 +44,8 @@ export function renderDetailed(result: ScanResult): string {
   return lines.join('\n')
 }
 
-function formatLayerLine(lr: LayerResult): string {
-  const meta = LAYER_META[lr.layer]
+function formatCheckLine(lr: CheckResult): string {
+  const meta = CHECK_META[lr.check]
   const icon = statusIcon(lr.status)
   const count = lr.issues.length
   const noun = count === 1 ? 'issue' : 'issues'
@@ -74,7 +74,7 @@ function formatIssue(issue: DriftIssue): string {
   return lines.join('\n')
 }
 
-function statusIcon(status: LayerResult['status']): string {
+function statusIcon(status: CheckResult['status']): string {
   switch (status) {
     case 'clean': return '✓'
     case 'drifted': return '●'
@@ -83,7 +83,7 @@ function statusIcon(status: LayerResult['status']): string {
   }
 }
 
-function highestSeverity(lr: LayerResult): string | null {
+function highestSeverity(lr: CheckResult): string | null {
   if (lr.issues.some(i => i.severity === 'critical')) return 'critical'
   if (lr.issues.some(i => i.severity === 'warning')) return 'warning'
   if (lr.issues.some(i => i.severity === 'info')) return 'info'

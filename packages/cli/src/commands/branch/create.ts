@@ -1,14 +1,14 @@
 import { Command, Args, Flags } from '@oclif/core'
-import { loadConfig, validateConfig } from '../../config'
+import { loadConfig, validateSingleEnvConfig } from '../../config'
 import { createBranch } from '../../branch'
 
 export default class BranchCreate extends Command {
-  static override description = 'Create a database branch by copying an environment'
+  static override description = 'Create a database branch by copying an environment (with full-layer snapshot)'
 
   static override examples = [
-    '<%= config.bin %> branch create feature-x',
-    '<%= config.bin %> branch create feature-x --from=production',
-    '<%= config.bin %> branch create feature-x --schema-only',
+    '<%= config.bin %> branch create feature-x --apply',
+    '<%= config.bin %> branch create feature-x --from=production --apply',
+    '<%= config.bin %> branch create feature-x --schema-only --apply',
   ]
 
   static override args = {
@@ -22,6 +22,10 @@ export default class BranchCreate extends Command {
     }),
     'schema-only': Flags.boolean({
       description: 'Copy schema only, no data',
+      default: false,
+    }),
+    apply: Flags.boolean({
+      description: 'Actually create the branch (default: dry-run preview)',
       default: false,
     }),
   }
@@ -38,15 +42,26 @@ export default class BranchCreate extends Command {
       )
     }
 
-    const errors = validateConfig(config)
+    const envName = flags.from ?? config.source
+    const errors = validateSingleEnvConfig(config, envName)
     if (errors.length > 0) {
       this.error(`Invalid configuration:\n  ${errors.join('\n  ')}`)
     }
 
-    const envName = flags.from ?? config.source
     const env = config.environments[envName]
-    if (!env) {
-      this.error(`Environment "${envName}" not found in config.`)
+
+    if (!flags.apply) {
+      this.log(`\n🌿 Branch preview (dry-run)\n`)
+      this.log(`  Branch name:  ${args.name}`)
+      this.log(`  Source:       ${envName}`)
+      this.log(`  Schema only:  ${flags['schema-only']}`)
+      this.log('')
+      this.log('  Steps that would be performed:')
+      this.log('    1. Create database via pg_dump | pg_restore')
+      this.log('    2. Capture all-layer snapshot of source environment')
+      this.log('    3. Store branch metadata in .supaforge/branches.json')
+      this.log('\n  → Add --apply to create the branch.\n')
+      return
     }
 
     this.log(`\n🌿 Creating branch "${args.name}" from ${envName}...\n`)
@@ -57,11 +72,17 @@ export default class BranchCreate extends Command {
         sourceUrl: env.dbUrl,
         sourceLabel: envName,
         schemaOnly: flags['schema-only'],
+        env,
+        config,
       })
       this.log(`✅ Branch created: ${meta.name}`)
       this.log(`   Database: ${meta.dbName}`)
       this.log(`   From: ${meta.createdFrom}`)
-      this.log(`   Schema only: ${meta.schemaOnly}\n`)
+      this.log(`   Schema only: ${meta.schemaOnly}`)
+      if (meta.snapshotDir) {
+        this.log(`   Snapshot: ${meta.snapshotDir}`)
+      }
+      this.log('')
     } catch (err) {
       this.error((err as Error).message)
     }

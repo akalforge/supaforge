@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { DataLayer } from '../../src/layers/data.js'
-import type { LayerContext } from '../../src/layers/base.js'
-import type { RunDbDiffFn } from '../../src/layers/data.js'
+import { DataCheck } from '../../src/checks/data.js'
+import type { CheckContext } from '../../src/checks/base.js'
+import type { RunDbDiffFn } from '../../src/checks/data.js'
 
-function mockContext(tables?: string[]): LayerContext {
+function mockContext(tables?: string[]): CheckContext {
   return {
     source: { dbUrl: 'postgres://source' },
     target: { dbUrl: 'postgres://target' },
@@ -11,19 +11,19 @@ function mockContext(tables?: string[]): LayerContext {
       environments: { dev: { dbUrl: '' }, prod: { dbUrl: '' } },
       source: 'dev',
       target: 'prod',
-      layers: { data: { tables: tables ?? ['plans', 'feature_flags'] } },
+      checks: { data: { tables: tables ?? ['plans', 'feature_flags'] } },
     },
   }
 }
 
-describe('DataLayer', () => {
+describe('DataCheck', () => {
   it('has name "data"', () => {
-    const layer = new DataLayer(async () => ({ up: '', down: '' }))
-    expect(layer.name).toBe('data')
+    const check = new DataCheck(async () => ({ up: '', down: '' }))
+    expect(check.name).toBe('data')
   })
 
   it('returns empty when no tables configured', async () => {
-    const ctx: LayerContext = {
+    const ctx: CheckContext = {
       source: { dbUrl: 'postgres://source' },
       target: { dbUrl: 'postgres://target' },
       config: {
@@ -32,15 +32,15 @@ describe('DataLayer', () => {
         target: 'prod',
       },
     }
-    const layer = new DataLayer(async () => ({ up: 'INSERT ...;', down: 'DELETE ...;' }))
-    const issues = await layer.scan(ctx)
+    const check = new DataCheck(async () => ({ up: 'INSERT ...;', down: 'DELETE ...;' }))
+    const issues = await check.scan(ctx)
     expect(issues).toEqual([])
   })
 
   it('returns empty when no diff found', async () => {
     const runFn: RunDbDiffFn = async () => ({ up: '', down: '' })
-    const layer = new DataLayer(runFn)
-    const issues = await layer.scan(mockContext())
+    const check = new DataCheck(runFn)
+    const issues = await check.scan(mockContext())
     expect(issues).toEqual([])
   })
 
@@ -49,11 +49,11 @@ describe('DataLayer', () => {
       up: `INSERT INTO "plans" VALUES('3','premium','Premium Plan');`,
       down: `DELETE FROM "plans" WHERE "id" = '3';`,
     })
-    const layer = new DataLayer(runFn)
-    const issues = await layer.scan(mockContext())
+    const check = new DataCheck(runFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
-    expect(issues[0].layer).toBe('data')
+    expect(issues[0].check).toBe('data')
     expect(issues[0].severity).toBe('warning')
     expect(issues[0].title).toContain('plans')
     expect(issues[0].sql?.up).toContain('INSERT INTO')
@@ -65,8 +65,8 @@ describe('DataLayer', () => {
       capturedOptions = opts
       return { up: '', down: '' }
     }
-    const layer = new DataLayer(runFn)
-    await layer.scan(mockContext(['plans', 'feature_flags']))
+    const check = new DataCheck(runFn)
+    await check.scan(mockContext(['plans', 'feature_flags']))
 
     expect(capturedOptions).toMatchObject({
       type: 'data',
@@ -78,8 +78,8 @@ describe('DataLayer', () => {
     const runFn: RunDbDiffFn = async () => {
       throw new Error('@dbdiff/cli is not installed. Install it with: npm install -g @dbdiff/cli')
     }
-    const layer = new DataLayer(runFn)
-    const issues = await layer.scan(mockContext())
+    const check = new DataCheck(runFn)
+    const issues = await check.scan(mockContext())
     expect(issues).toEqual([])
   })
 
@@ -87,7 +87,7 @@ describe('DataLayer', () => {
     const runFn: RunDbDiffFn = async () => {
       throw new Error('Connection refused')
     }
-    const layer = new DataLayer(runFn)
-    await expect(layer.scan(mockContext())).rejects.toThrow('Connection refused')
+    const check = new DataCheck(runFn)
+    await expect(check.scan(mockContext())).rejects.toThrow('Connection refused')
   })
 })

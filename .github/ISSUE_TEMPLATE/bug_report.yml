@@ -46,19 +46,22 @@ body:
       required: true
 
   - type: dropdown
-    id: layer
+    id: check
     attributes:
-      label: Affected Layer
-      description: Which drift layer is affected (if applicable)?
+      label: Affected Check
+      description: Which drift check is affected (if applicable)?
       options:
-        - Schema (Layer 1)
-        - RLS Policies (Layer 2)
-        - Edge Functions (Layer 3)
-        - Storage (Layer 4)
-        - Auth Config (Layer 5)
-        - Cron Jobs (Layer 6)
-        - Reference Data (Layer 7)
-        - Webhooks (Layer 8)
+        - Schema
+        - RLS Policies
+        - Edge Functions
+        - Storage
+        - Auth Config
+        - Cron Jobs
+        - Reference Data
+        - Webhooks
+        - Realtime Publications
+        - Vault Secrets
+        - Postgres Extensions
         - Scanner / CLI
         - Configuration
         - Not sure

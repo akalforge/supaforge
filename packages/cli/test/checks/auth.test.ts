@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { AuthLayer } from '../../src/layers/auth.js'
-import type { LayerContext } from '../../src/layers/base.js'
-import type { FetchFn } from '../../src/layers/auth.js'
+import { AuthCheck } from '../../src/checks/auth.js'
+import type { CheckContext } from '../../src/checks/base.js'
+import type { FetchFn } from '../../src/checks/auth.js'
 
-function mockContext(overrides: Partial<LayerContext> = {}): LayerContext {
+function mockContext(overrides: Partial<CheckContext> = {}): CheckContext {
   return {
     source: { dbUrl: 'postgres://source', projectRef: 'src-ref', apiKey: 'src-key' },
     target: { dbUrl: 'postgres://target', projectRef: 'tgt-ref', apiKey: 'tgt-key' },
@@ -26,20 +26,20 @@ function makeFetchFn(sourceConfig: Record<string, unknown>, targetConfig: Record
   }
 }
 
-describe('AuthLayer', () => {
+describe('AuthCheck', () => {
   it('returns no issues when configs match', async () => {
     const config = { JWT_EXP: 3600, MFA_ENABLED: true, SITE_URL: 'https://example.com' }
-    const layer = new AuthLayer(makeFetchFn(config, config))
-    const issues = await layer.scan(mockContext())
+    const check = new AuthCheck(makeFetchFn(config, config))
+    const issues = await check.scan(mockContext())
     expect(issues).toHaveLength(0)
   })
 
   it('detects critical auth config mismatch (MFA_ENABLED)', async () => {
-    const layer = new AuthLayer(makeFetchFn(
+    const check = new AuthCheck(makeFetchFn(
       { MFA_ENABLED: true },
       { MFA_ENABLED: false },
     ))
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('critical')
@@ -55,11 +55,11 @@ describe('AuthLayer', () => {
   })
 
   it('detects critical auth config mismatch (JWT_EXP)', async () => {
-    const layer = new AuthLayer(makeFetchFn(
+    const check = new AuthCheck(makeFetchFn(
       { JWT_EXP: 3600 },
       { JWT_EXP: 86400 },
     ))
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('critical')
@@ -67,22 +67,22 @@ describe('AuthLayer', () => {
   })
 
   it('detects critical mismatch for SECURITY_CAPTCHA_ENABLED', async () => {
-    const layer = new AuthLayer(makeFetchFn(
+    const check = new AuthCheck(makeFetchFn(
       { SECURITY_CAPTCHA_ENABLED: true },
       { SECURITY_CAPTCHA_ENABLED: false },
     ))
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('critical')
   })
 
   it('detects info-level mismatch for non-critical keys', async () => {
-    const layer = new AuthLayer(makeFetchFn(
+    const check = new AuthCheck(makeFetchFn(
       { SITE_URL: 'https://dev.example.com' },
       { SITE_URL: 'https://prod.example.com' },
     ))
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('info')
@@ -90,11 +90,11 @@ describe('AuthLayer', () => {
   })
 
   it('detects multiple mismatches at once', async () => {
-    const layer = new AuthLayer(makeFetchFn(
+    const check = new AuthCheck(makeFetchFn(
       { JWT_EXP: 3600, SITE_URL: 'https://dev.example.com', EXTERNAL_EMAIL_ENABLED: true },
       { JWT_EXP: 7200, SITE_URL: 'https://prod.example.com', EXTERNAL_EMAIL_ENABLED: false },
     ))
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(3)
     const severities = issues.map(i => i.severity)
@@ -103,22 +103,22 @@ describe('AuthLayer', () => {
   })
 
   it('detects keys present in source but missing in target', async () => {
-    const layer = new AuthLayer(makeFetchFn(
+    const check = new AuthCheck(makeFetchFn(
       { MFA_ENABLED: true, CUSTOM_KEY: 'value' },
       { MFA_ENABLED: true },
     ))
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].title).toContain('CUSTOM_KEY')
   })
 
   it('detects keys present in target but missing in source', async () => {
-    const layer = new AuthLayer(makeFetchFn(
+    const check = new AuthCheck(makeFetchFn(
       {},
       { NEW_FEATURE: 'enabled' },
     ))
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].title).toContain('NEW_FEATURE')
@@ -129,8 +129,8 @@ describe('AuthLayer', () => {
       source: { dbUrl: 'postgres://source' },
       target: { dbUrl: 'postgres://target' },
     })
-    const layer = new AuthLayer(makeFetchFn({}, {}))
-    const issues = await layer.scan(ctx)
+    const check = new AuthCheck(makeFetchFn({}, {}))
+    const issues = await check.scan(ctx)
     expect(issues).toHaveLength(0)
   })
 
@@ -141,8 +141,8 @@ describe('AuthLayer', () => {
       return { ok: true, json: async () => ({}) } as Response
     }
 
-    const layer = new AuthLayer(fetchFn)
-    await layer.scan(mockContext())
+    const check = new AuthCheck(fetchFn)
+    await check.scan(mockContext())
 
     expect(calls).toHaveLength(2)
     expect(calls[0].url).toContain('/v1/projects/src-ref/config/auth')
@@ -156,7 +156,7 @@ describe('AuthLayer', () => {
       return { ok: false, statusText: 'Forbidden' } as Response
     }
 
-    const layer = new AuthLayer(fetchFn)
-    await expect(layer.scan(mockContext())).rejects.toThrow('Forbidden')
+    const check = new AuthCheck(fetchFn)
+    await expect(check.scan(mockContext())).rejects.toThrow('Forbidden')
   })
 })

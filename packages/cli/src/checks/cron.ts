@@ -1,7 +1,7 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
-import { Layer, type LayerContext } from './base'
+import { Check, type CheckContext } from './base'
 
 interface CronJob {
   jobid: number
@@ -15,14 +15,14 @@ interface CronJob {
   jobname: string | null
 }
 
-export class CronLayer extends Layer {
+export class CronCheck extends Check {
   readonly name = 'cron' as const
 
   constructor(private queryFn: QueryFn = pgQuery) {
     super()
   }
 
-  async scan(ctx: LayerContext): Promise<DriftIssue[]> {
+  async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     const [source, target] = await Promise.all([
       this.fetchCronJobs(ctx.source.dbUrl),
       this.fetchCronJobs(ctx.target.dbUrl),
@@ -59,7 +59,7 @@ export function diffCronJobs(source: CronJob[], target: CronJob[]): DriftIssue[]
     if (!targetMap.has(key)) {
       issues.push({
         id: `cron-missing-${key}`,
-        layer: 'cron',
+        check: 'cron',
         severity: 'warning',
         title: `Missing cron job: ${key}`,
         description: `Cron job "${key}" (schedule: ${j.schedule}) exists in source but not in target.`,
@@ -76,7 +76,7 @@ export function diffCronJobs(source: CronJob[], target: CronJob[]): DriftIssue[]
     if (!sourceMap.has(key)) {
       issues.push({
         id: `cron-extra-${key}`,
-        layer: 'cron',
+        check: 'cron',
         severity: 'info',
         title: `Extra cron job: ${key}`,
         description: `Cron job "${key}" exists in target but not in source.`,
@@ -92,7 +92,7 @@ export function diffCronJobs(source: CronJob[], target: CronJob[]): DriftIssue[]
     if (sj.schedule !== tj.schedule || sj.command !== tj.command) {
       issues.push({
         id: `cron-modified-${key}`,
-        layer: 'cron',
+        check: 'cron',
         severity: 'warning',
         title: `Modified cron job: ${key}`,
         description: `Cron job "${key}" has different schedule or command between environments.`,

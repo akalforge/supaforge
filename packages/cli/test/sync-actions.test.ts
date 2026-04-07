@@ -8,7 +8,7 @@ function makeScanResult(overrides: Partial<ScanResult> = {}): ScanResult {
     timestamp: new Date().toISOString(),
     source: 'dev',
     target: 'prod',
-    layers: [],
+    checks: [],
     score: 100,
     summary: { total: 0, critical: 0, warning: 0, info: 0 },
     ...overrides,
@@ -26,12 +26,12 @@ const mockAction: SyncAction = {
 describe('promote: SyncAction support', () => {
   it('collects API actions in dry-run mode', async () => {
     const scanResult = makeScanResult({
-      layers: [{
-        layer: 'storage',
+      checks: [{
+        check: 'storage',
         status: 'drifted',
         issues: [{
           id: 'storage-missing-avatars',
-          layer: 'storage',
+          check: 'storage',
           severity: 'warning',
           title: 'Missing bucket: avatars',
           description: 'Bucket "avatars" exists in source but not in target.',
@@ -56,12 +56,12 @@ describe('promote: SyncAction support', () => {
 
   it('prefers sql over action when both are present', async () => {
     const scanResult = makeScanResult({
-      layers: [{
-        layer: 'storage',
+      checks: [{
+        check: 'storage',
         status: 'drifted',
         issues: [{
           id: 'storage-policy-missing-objects.allow_read',
-          layer: 'storage',
+          check: 'storage',
           severity: 'critical',
           title: 'Missing storage policy',
           description: 'Storage RLS policy missing.',
@@ -89,12 +89,12 @@ describe('promote: SyncAction support', () => {
 
   it('skips issues with neither sql nor action', async () => {
     const scanResult = makeScanResult({
-      layers: [{
-        layer: 'edge-functions',
+      checks: [{
+        check: 'edge-functions',
         status: 'drifted',
         issues: [{
           id: 'edge-fn-missing-send-email',
-          layer: 'edge-functions',
+          check: 'edge-functions',
           severity: 'warning',
           title: 'Missing Edge Function: send-email',
           description: 'Function not in target. Deploy manually.',
@@ -123,12 +123,12 @@ describe('promote: SyncAction support', () => {
     }
 
     const scanResult = makeScanResult({
-      layers: [{
-        layer: 'storage',
+      checks: [{
+        check: 'storage',
         status: 'drifted',
         issues: [{
           id: 'storage-missing-avatars',
-          layer: 'storage',
+          check: 'storage',
           severity: 'warning',
           title: 'Missing bucket',
           description: 'desc',
@@ -166,12 +166,12 @@ describe('promote: SyncAction support', () => {
     }
 
     const scanResult = makeScanResult({
-      layers: [{
-        layer: 'auth',
+      checks: [{
+        check: 'auth',
         status: 'drifted',
         issues: [{
           id: 'auth-jwt_exp',
-          layer: 'auth',
+          check: 'auth',
           severity: 'critical',
           title: 'Auth config mismatch: JWT_EXP',
           description: 'JWT_EXP differs',
@@ -207,13 +207,13 @@ describe('promote: SyncAction support', () => {
     }
 
     const scanResult = makeScanResult({
-      layers: [
+      checks: [
         {
-          layer: 'rls',
+          check: 'rls',
           status: 'drifted',
           issues: [{
             id: 'rls-missing-public.users.read',
-            layer: 'rls',
+            check: 'rls',
             severity: 'critical',
             title: 'Missing RLS',
             description: 'desc',
@@ -222,11 +222,11 @@ describe('promote: SyncAction support', () => {
           durationMs: 10,
         },
         {
-          layer: 'storage',
+          check: 'storage',
           status: 'drifted',
           issues: [{
             id: 'storage-missing-avatars',
-            layer: 'storage',
+            check: 'storage',
             severity: 'warning',
             title: 'Missing bucket',
             description: 'desc',
@@ -235,11 +235,11 @@ describe('promote: SyncAction support', () => {
           durationMs: 10,
         },
         {
-          layer: 'edge-functions',
+          check: 'edge-functions',
           status: 'drifted',
           issues: [{
             id: 'edge-fn-missing-deploy-me',
-            layer: 'edge-functions',
+            check: 'edge-functions',
             severity: 'warning',
             title: 'Missing Edge Function',
             description: 'Deploy manually',
@@ -282,12 +282,12 @@ describe('promote: SyncAction support', () => {
     }
 
     const scanResult = makeScanResult({
-      layers: [{
-        layer: 'edge-functions',
+      checks: [{
+        check: 'edge-functions',
         status: 'drifted',
         issues: [{
           id: 'edge-fn-extra-old-fn',
-          layer: 'edge-functions',
+          check: 'edge-functions',
           severity: 'info',
           title: 'Extra Edge Function: old-fn',
           description: 'desc',
@@ -311,19 +311,19 @@ describe('promote: SyncAction support', () => {
     expect(calls[0].init.body).toBeUndefined()
   })
 
-  it('filters API actions by layer', async () => {
+  it('filters API actions by check', async () => {
     const fetchFn: FetchFn = async () => {
       return { ok: true, text: async () => '{}' } as Response
     }
 
     const scanResult = makeScanResult({
-      layers: [
+      checks: [
         {
-          layer: 'storage',
+          check: 'storage',
           status: 'drifted',
           issues: [{
             id: 'storage-missing-avatars',
-            layer: 'storage',
+            check: 'storage',
             severity: 'warning',
             title: 'Missing bucket',
             description: 'desc',
@@ -332,11 +332,11 @@ describe('promote: SyncAction support', () => {
           durationMs: 10,
         },
         {
-          layer: 'auth',
+          check: 'auth',
           status: 'drifted',
           issues: [{
             id: 'auth-jwt_exp',
-            layer: 'auth',
+            check: 'auth',
             severity: 'critical',
             title: 'Auth config mismatch',
             description: 'desc',
@@ -357,12 +357,12 @@ describe('promote: SyncAction support', () => {
     const result = await promote({
       dbUrl: 'postgres://unused',
       scanResult,
-      layers: ['auth'],
+      checks: ['auth'],
       dryRun: true,
       fetchFn,
     })
 
     expect(result.applied).toHaveLength(1)
-    expect(result.applied[0].layer).toBe('auth')
+    expect(result.applied[0].check).toBe('auth')
   })
 })

@@ -8,8 +8,8 @@ export interface PromoteOptions {
   dbUrl: string
   /** The scan result with SQL fixes to apply */
   scanResult: ScanResult
-  /** Only promote specific layers */
-  layers?: string[]
+  /** Only promote specific checks */
+  checks?: string[]
   /** Dry-run mode — print SQL without executing */
   dryRun?: boolean
   /** Fetch function for API-based sync actions (defaults to globalThis.fetch) */
@@ -17,31 +17,31 @@ export interface PromoteOptions {
 }
 
 export interface PromoteResult {
-  applied: { layer: string; issueId: string; sql?: string; action?: string }[]
-  skipped: { layer: string; issueId: string; reason: string }[]
-  errors: { layer: string; issueId: string; error: string }[]
+  applied: { check: string; issueId: string; sql?: string; action?: string }[]
+  skipped: { check: string; issueId: string; reason: string }[]
+  errors: { check: string; issueId: string; error: string }[]
 }
 
 export async function promote(options: PromoteOptions): Promise<PromoteResult> {
-  const { dbUrl, scanResult, layers, dryRun = false, fetchFn = globalThis.fetch.bind(globalThis) } = options
+  const { dbUrl, scanResult, checks, dryRun = false, fetchFn = globalThis.fetch.bind(globalThis) } = options
 
   const result: PromoteResult = { applied: [], skipped: [], errors: [] }
 
-  const sqlStatements: { layer: string; issueId: string; sql: string }[] = []
-  const apiActions: { layer: string; issueId: string; action: SyncAction }[] = []
+  const sqlStatements: { check: string; issueId: string; sql: string }[] = []
+  const apiActions: { check: string; issueId: string; action: SyncAction }[] = []
 
-  for (const layerResult of scanResult.layers) {
-    if (layerResult.status !== 'drifted') continue
-    if (layers && !layers.includes(layerResult.layer)) continue
+  for (const checkResult of scanResult.checks) {
+    if (checkResult.status !== 'drifted') continue
+    if (checks && !checks.includes(checkResult.check)) continue
 
-    for (const issue of layerResult.issues) {
+    for (const issue of checkResult.issues) {
       if (issue.sql?.up) {
-        sqlStatements.push({ layer: layerResult.layer, issueId: issue.id, sql: issue.sql.up })
+        sqlStatements.push({ check: checkResult.check, issueId: issue.id, sql: issue.sql.up })
       } else if (issue.action) {
-        apiActions.push({ layer: layerResult.layer, issueId: issue.id, action: issue.action })
+        apiActions.push({ check: checkResult.check, issueId: issue.id, action: issue.action })
       } else {
         result.skipped.push({
-          layer: layerResult.layer,
+          check: checkResult.check,
           issueId: issue.id,
           reason: 'No SQL fix or API action available',
         })
@@ -51,10 +51,10 @@ export async function promote(options: PromoteOptions): Promise<PromoteResult> {
 
   if (dryRun) {
     for (const stmt of sqlStatements) {
-      result.applied.push({ layer: stmt.layer, issueId: stmt.issueId, sql: stmt.sql })
+      result.applied.push({ check: stmt.check, issueId: stmt.issueId, sql: stmt.sql })
     }
     for (const act of apiActions) {
-      result.applied.push({ layer: act.layer, issueId: act.issueId, action: act.action.label })
+      result.applied.push({ check: act.check, issueId: act.issueId, action: act.action.label })
     }
     return result
   }
@@ -67,10 +67,10 @@ export async function promote(options: PromoteOptions): Promise<PromoteResult> {
       for (const stmt of sqlStatements) {
         try {
           await client.query(stmt.sql)
-          result.applied.push({ layer: stmt.layer, issueId: stmt.issueId, sql: stmt.sql })
+          result.applied.push({ check: stmt.check, issueId: stmt.issueId, sql: stmt.sql })
         } catch (err) {
           result.errors.push({
-            layer: stmt.layer,
+            check: stmt.check,
             issueId: stmt.issueId,
             error: err instanceof Error ? err.message : String(err),
           })
@@ -101,10 +101,10 @@ export async function promote(options: PromoteOptions): Promise<PromoteResult> {
         throw new Error(`${act.action.method} ${act.action.url} → ${res.status}: ${text}`)
       }
 
-      result.applied.push({ layer: act.layer, issueId: act.issueId, action: act.action.label })
+      result.applied.push({ check: act.check, issueId: act.issueId, action: act.action.label })
     } catch (err) {
       result.errors.push({
-        layer: act.layer,
+        check: act.check,
         issueId: act.issueId,
         error: err instanceof Error ? err.message : String(err),
       })

@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { EdgeFunctionsLayer } from '../../src/layers/edge-functions.js'
-import type { LayerContext } from '../../src/layers/base.js'
-import type { FetchFn } from '../../src/layers/edge-functions.js'
+import { EdgeFunctionsCheck } from '../../src/checks/edge-functions.js'
+import type { CheckContext } from '../../src/checks/base.js'
+import type { FetchFn } from '../../src/checks/edge-functions.js'
 
-function mockContext(): LayerContext {
+function mockContext(): CheckContext {
   return {
     source: { dbUrl: 'postgres://source', projectRef: 'src-ref', apiKey: 'src-key' },
     target: { dbUrl: 'postgres://target', projectRef: 'tgt-ref', apiKey: 'tgt-key' },
@@ -35,20 +35,20 @@ function makeFetchFn(sourceFns: unknown[], targetFns: unknown[]): FetchFn {
   }
 }
 
-describe('EdgeFunctionsLayer', () => {
+describe('EdgeFunctionsCheck', () => {
   it('returns no issues when functions match', async () => {
     const fn = makeFunction()
-    const layer = new EdgeFunctionsLayer(makeFetchFn([fn], [fn]))
-    const issues = await layer.scan(mockContext())
+    const check = new EdgeFunctionsCheck(makeFetchFn([fn], [fn]))
+    const issues = await check.scan(mockContext())
     expect(issues).toHaveLength(0)
   })
 
   it('detects missing function in target', async () => {
-    const layer = new EdgeFunctionsLayer(makeFetchFn(
+    const check = new EdgeFunctionsCheck(makeFetchFn(
       [makeFunction()],
       [],
     ))
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('warning')
@@ -61,11 +61,11 @@ describe('EdgeFunctionsLayer', () => {
   })
 
   it('detects extra function in target', async () => {
-    const layer = new EdgeFunctionsLayer(makeFetchFn(
+    const check = new EdgeFunctionsCheck(makeFetchFn(
       [],
       [makeFunction({ slug: 'extra-fn', name: 'extra-fn' })],
     ))
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('info')
@@ -78,11 +78,11 @@ describe('EdgeFunctionsLayer', () => {
   })
 
   it('detects version mismatch', async () => {
-    const layer = new EdgeFunctionsLayer(makeFetchFn(
+    const check = new EdgeFunctionsCheck(makeFetchFn(
       [makeFunction({ version: 3 })],
       [makeFunction({ version: 1 })],
     ))
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('warning')
@@ -96,11 +96,11 @@ describe('EdgeFunctionsLayer', () => {
   })
 
   it('detects multiple issues at once', async () => {
-    const layer = new EdgeFunctionsLayer(makeFetchFn(
+    const check = new EdgeFunctionsCheck(makeFetchFn(
       [makeFunction(), makeFunction({ slug: 'process-payments', name: 'process-payments' })],
       [makeFunction({ version: 1 }), makeFunction({ slug: 'old-fn', name: 'old-fn' })],
     ))
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues.length).toBeGreaterThanOrEqual(3) // missing, extra, version
     const ids = issues.map(i => i.id)
@@ -110,7 +110,7 @@ describe('EdgeFunctionsLayer', () => {
   })
 
   it('returns empty when projectRef or apiKey is missing', async () => {
-    const ctx: LayerContext = {
+    const ctx: CheckContext = {
       source: { dbUrl: 'postgres://source' },
       target: { dbUrl: 'postgres://target' },
       config: {
@@ -119,8 +119,8 @@ describe('EdgeFunctionsLayer', () => {
         target: 'prod',
       },
     }
-    const layer = new EdgeFunctionsLayer(makeFetchFn([], []))
-    const issues = await layer.scan(ctx)
+    const check = new EdgeFunctionsCheck(makeFetchFn([], []))
+    const issues = await check.scan(ctx)
     expect(issues).toHaveLength(0)
   })
 
@@ -131,8 +131,8 @@ describe('EdgeFunctionsLayer', () => {
       return { ok: true, json: async () => [] } as Response
     }
 
-    const layer = new EdgeFunctionsLayer(fetchFn)
-    await layer.scan(mockContext())
+    const check = new EdgeFunctionsCheck(fetchFn)
+    await check.scan(mockContext())
 
     expect(calls).toHaveLength(2)
     expect(calls[0].url).toContain('/v1/projects/src-ref/functions')
@@ -144,7 +144,7 @@ describe('EdgeFunctionsLayer', () => {
       return { ok: false, statusText: 'Unauthorized' } as Response
     }
 
-    const layer = new EdgeFunctionsLayer(fetchFn)
-    await expect(layer.scan(mockContext())).rejects.toThrow('Unauthorized')
+    const check = new EdgeFunctionsCheck(fetchFn)
+    await expect(check.scan(mockContext())).rejects.toThrow('Unauthorized')
   })
 })

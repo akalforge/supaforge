@@ -36,36 +36,50 @@ supaforge scan
 supaforge diff
 ```
 
-## The 8 Drift Layers
+## Comprehensive Checks
 
-| # | Layer | Source | Detection | Fix |
-|---|-------|--------|-----------|-----|
-| 1 | Schema | `@dbdiff/cli` | ✅ | SQL (up/down) |
-| 2 | RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
-| 3 | Edge Functions | Management API | ✅ | DELETE extras via API; missing/outdated → manual `supabase functions deploy` |
-| 4 | Storage | Storage API + `pg_policies` | ✅ | Buckets via API (POST/PUT/DELETE); Policies via SQL |
-| 5 | Auth Config | Management API | ✅ | PATCH via API |
-| 6 | Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
-| 7 | Reference Data | `@dbdiff/cli --type=data` | ✅ | SQL (up/down) |
-| 8 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ | SQL when trigger metadata available |
+| Check | Source | Detection | Fix |
+|-------|--------|-----------|-----|
+| Schema | `@dbdiff/cli` | ✅ Tables, views, triggers, functions, enum types | SQL (up/down) |
+| RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
+| Edge Functions | Management API | ✅ | DELETE extras via API; missing/outdated → manual `supabase functions deploy` |
+| Storage | Storage API + `pg_policies` | ✅ | Buckets via API (POST/PUT/DELETE); Policies via SQL |
+| Auth Config | Management API | ✅ | PATCH via API |
+| Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
+| Reference Data | `@dbdiff/cli --type=data` | ✅ | SQL (up/down) |
+| Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ | SQL when trigger metadata available |
+| Realtime Publications | `pg_publication` + `pg_publication_tables` | ✅ | SQL (CREATE/ALTER PUBLICATION) |
+| Vault Secrets | `vault.secrets` | ✅ | SQL (`vault.create_secret` / `vault.update_secret`) |
+| Postgres Extensions | `pg_extension` | ✅ | SQL (CREATE/DROP EXTENSION) |
 
 ## Commands
 
 ```
-supaforge scan                          Scan all 8 layers for drift
-supaforge scan --layer=rls              Scan a specific layer only
+supaforge scan                          Scan everything
+supaforge scan --check=rls              Scan a specific check only
 supaforge scan --json                   Output as JSON
 supaforge diff                          Show detailed diff with SQL fixes
-supaforge diff --layer=rls              Detailed diff for one layer
-supaforge promote                       Apply fixes to the target environment (SQL + API)
-supaforge promote --dry-run             Show fixes that would be applied
-supaforge promote --layer=rls           Only promote one layer
+supaforge diff --check=rls              Detailed diff for one check
+supaforge promote                       Preview fixes for the target environment
+supaforge promote --apply               Actually execute the fixes (SQL + API)
+supaforge promote --check=rls --apply   Only promote one check
 supaforge hukam                         Alias for scan 🙏
-supaforge branch create <name>          Create a database branch from source
-supaforge branch create <name> --from=prod  Branch from a specific environment
-supaforge branch create <name> --schema-only  Copy schema only (no data)
+supaforge snapshot --env=prod           Preview what a snapshot would capture
+supaforge snapshot --env=prod --apply   Capture a full environment snapshot (9 layers)
+supaforge snapshot --list               List all snapshots
+supaforge clone --env=prod              Preview a clone operation
+supaforge clone --env=prod --apply      Clone remote env to local (snapshot + branch + baseline)
+supaforge backup --env=prod             Preview a backup operation
+supaforge backup --env=prod --apply     Capture snapshot + generate incremental migration
+supaforge backup --list                 List all migration files
+supaforge restore --env=local --from-snapshot  Preview snapshot restore
+supaforge restore --env=local --apply   Apply restore to target database
+supaforge branch create <name>          Preview branch creation
+supaforge branch create <name> --apply  Create a database branch from source
+supaforge branch create <name> --from=prod --apply  Branch from a specific environment
 supaforge branch list                   List all tracked branches
-supaforge branch delete <name>          Drop branch database and remove tracking
+supaforge branch delete <name>          Preview branch deletion
+supaforge branch delete <name> --apply  Drop branch database and remove tracking
 supaforge branch diff <name>            Compare branch against source environment
 supaforge branch diff <name> --against=prod  Compare against a specific environment
 ```
@@ -95,9 +109,50 @@ supaforge branch delete feature-x
 1. `branch create` tries `CREATE DATABASE ... TEMPLATE` (instant, local/self-hosted) first.
 2. Falls back to `pg_dump | pg_restore` (works for remote connections, busy databases).
 3. Branch metadata is tracked in `.supaforge/branches.json`.
-4. `branch diff` delegates to the same 8-layer scanner, comparing the branch database against any environment.
+4. `branch diff` delegates to the same check scanner, comparing the branch database against any environment.
 
 > **Note**: Supabase Cloud managed databases may not grant `CREATEDB` privileges. Branching works best with self-hosted Supabase or local development (`supabase start`).
+
+### Snapshot, Clone & Backup
+
+Single-environment commands for solo developers or production backup workflows:
+
+```bash
+# Capture a full snapshot of your remote Supabase (9 layers)
+supaforge snapshot --env=prod --apply
+
+# Clone remote to local for development
+supaforge clone --env=prod --apply
+
+# Incremental backup (snapshot + diff migration)
+supaforge backup --env=prod --apply --description="before-deploy"
+
+# Restore into a local database
+supaforge restore --env=local --from-snapshot --apply
+
+# Replay migration history
+supaforge restore --env=local --from-migrations --apply
+```
+
+**Snapshots capture 9 layers**: schema, RLS policies, cron jobs, webhooks, extensions, storage (buckets + policies), auth config, edge functions, and reference data.
+
+**Backups are incremental**: each backup diffs against the previous snapshot and generates a migration file with UP/DOWN SQL. Migration files are stored in `.supaforge/migrations/`.
+
+### Safe by Default
+
+All commands that modify databases or external state preview what they would do by default. Add `--apply` to execute:
+
+```bash
+# Preview only (default)
+supaforge promote
+supaforge branch create feature-x
+supaforge snapshot --env=prod
+
+# Actually execute
+supaforge promote --apply
+supaforge branch create feature-x --apply
+supaforge snapshot --env=prod --apply
+```
 
 ## Configuration
 
@@ -120,7 +175,7 @@ supaforge branch delete feature-x
   "source": "dev",
   "target": "prod",
   "ignoreSchemas": ["auth", "storage", "realtime", "vault"],
-  "layers": {
+  "checks": {
     "data": {
       "tables": ["plans", "feature_flags", "pricing_tiers"]
     }
@@ -157,9 +212,9 @@ bus.on('supaforge.scan.before', (ctx) => {
   console.log(`Scanning ${ctx.config.source} → ${ctx.config.target}`)
 })
 
-bus.on('supaforge.layer.after', ({ layer, result }) => {
+bus.on('supaforge.check.after', ({ check, result }) => {
   if (result.status === 'drifted') {
-    console.log(`⚠ Drift detected in ${layer}`)
+    console.log(`⚠ Drift detected in ${check}`)
   }
 })
 
@@ -226,7 +281,7 @@ npm run test:e2e
 ### E2E Tests (Supabase)
 
 Full end-to-end tests against two real Supabase local instances (source = dev, target = prod). Tests the
-complete scan → promote → re-scan roundtrip for RLS, Cron, Webhooks, and Storage layers.
+complete scan → promote → re-scan roundtrip for RLS, Cron, Webhooks, and Storage checks.
 
 **Requirements**: Supabase CLI, Docker (or Podman with docker compat), psql, curl.
 
@@ -247,10 +302,10 @@ Port allocation:
 
 ### @dbdiff/cli Integration
 
-Layers 1 (Schema) and 7 (Reference Data) are powered by [`@dbdiff/cli`](https://github.com/DBDiff/DBDiff). It is included as a dependency and installed automatically — no separate install needed. The native binary runs without PHP.
+The Schema and Reference Data checks are powered by [`@dbdiff/cli`](https://github.com/DBDiff/DBDiff). It is included as a dependency and installed automatically — no separate install needed. The native binary runs without PHP.
 
 ```bash
-supaforge scan                # schema + data layers active out of the box
+supaforge scan                # schema + data checks active out of the box
 ```
 
 The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.

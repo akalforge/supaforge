@@ -110,6 +110,8 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
 const UP_MARKER = '-- ==================== UP ===================='
 const DOWN_MARKER = '-- ==================== DOWN ===================='
 
+const DROP_TYPES = ['drop', 'drop-view', 'drop-function', 'drop-trigger', 'drop-type', 'drop-sequence']
+
 export function parseDbDiffOutput(output: string): DbDiffResult {
   const upIdx = output.indexOf(UP_MARKER)
   const downIdx = output.indexOf(DOWN_MARKER)
@@ -144,7 +146,7 @@ export function parseDbDiffOutput(output: string): DbDiffResult {
  */
 export function sqlToIssues(
   result: DbDiffResult,
-  layer: 'schema' | 'data',
+  check: 'schema' | 'data',
 ): DriftIssue[] {
   if (!result.up && !result.down) return []
 
@@ -159,11 +161,11 @@ export function sqlToIssues(
     const type = classifyStatement(upSql)
 
     return {
-      id: `${layer}-${type}-${i + 1}`,
-      layer,
-      severity: type === 'drop' ? 'critical' : 'warning',
-      title: summariseStatement(upSql, layer),
-      description: `${layer === 'schema' ? 'Schema' : 'Data'} difference detected by @dbdiff/cli.`,
+      id: `${check}-${type}-${i + 1}`,
+      check,
+      severity: DROP_TYPES.includes(type) ? 'critical' : 'warning',
+      title: summariseStatement(upSql, check),
+      description: `${check === 'schema' ? 'Schema' : 'Data'} difference detected by @dbdiff/cli.`,
       sql: { up: upSql, down: downSql },
     }
   })
@@ -178,36 +180,111 @@ function splitStatements(sql: string): string[] {
     .map(s => (s.endsWith(';') ? s : `${s};`))
 }
 
-function classifyStatement(sql: string): string {
+export function classifyStatement(sql: string): string {
   const upper = sql.toUpperCase().trimStart()
+  // Views
+  if (upper.startsWith('CREATE VIEW') || upper.startsWith('CREATE OR REPLACE VIEW')) return 'create-view'
+  if (upper.startsWith('ALTER VIEW')) return 'alter-view'
+  if (upper.startsWith('DROP VIEW')) return 'drop-view'
+  // Functions / procedures
+  if (upper.startsWith('CREATE FUNCTION') || upper.startsWith('CREATE OR REPLACE FUNCTION')) return 'create-function'
+  if (upper.startsWith('ALTER FUNCTION')) return 'alter-function'
+  if (upper.startsWith('DROP FUNCTION')) return 'drop-function'
+  if (upper.startsWith('CREATE PROCEDURE') || upper.startsWith('CREATE OR REPLACE PROCEDURE')) return 'create-function'
+  if (upper.startsWith('DROP PROCEDURE')) return 'drop-function'
+  // Triggers
+  if (upper.startsWith('CREATE TRIGGER') || upper.startsWith('CREATE OR REPLACE TRIGGER')) return 'create-trigger'
+  if (upper.startsWith('ALTER TRIGGER')) return 'alter-trigger'
+  if (upper.startsWith('DROP TRIGGER')) return 'drop-trigger'
+  // Types / enums / domains
+  if (upper.startsWith('CREATE TYPE')) return 'create-type'
+  if (upper.startsWith('ALTER TYPE')) return 'alter-type'
+  if (upper.startsWith('DROP TYPE')) return 'drop-type'
+  if (upper.startsWith('CREATE DOMAIN')) return 'create-type'
+  if (upper.startsWith('ALTER DOMAIN')) return 'alter-type'
+  if (upper.startsWith('DROP DOMAIN')) return 'drop-type'
+  // Tables
   if (upper.startsWith('ALTER TABLE')) return 'alter'
   if (upper.startsWith('CREATE TABLE')) return 'create-table'
-  if (upper.startsWith('CREATE INDEX') || upper.startsWith('CREATE UNIQUE INDEX')) return 'create-index'
   if (upper.startsWith('DROP TABLE')) return 'drop'
+  // Indexes
+  if (upper.startsWith('CREATE INDEX') || upper.startsWith('CREATE UNIQUE INDEX')) return 'create-index'
   if (upper.startsWith('DROP INDEX')) return 'drop'
+  // Sequences
+  if (upper.startsWith('CREATE SEQUENCE')) return 'create-sequence'
+  if (upper.startsWith('ALTER SEQUENCE')) return 'alter-sequence'
+  if (upper.startsWith('DROP SEQUENCE')) return 'drop-sequence'
+  // Data
   if (upper.startsWith('INSERT')) return 'insert'
   if (upper.startsWith('UPDATE')) return 'update'
   if (upper.startsWith('DELETE')) return 'delete'
   return 'change'
 }
 
-function summariseStatement(sql: string, layer: 'schema' | 'data'): string {
+export function summariseStatement(sql: string, check: 'schema' | 'data'): string {
   const upper = sql.toUpperCase().trimStart()
-  // Extract table name from common patterns
-  const tableMatch = sql.match(/(?:TABLE|INTO|FROM|UPDATE)\s+["'`]?(\w+)["'`]?/i)
-  const table = tableMatch?.[1] ?? 'unknown'
 
-  if (layer === 'data') {
+  if (check === 'data') {
+    const table = extractName(sql, /(?:INTO|FROM|UPDATE)\s+["'`]?(\w+)["'`]?/i)
     if (upper.startsWith('INSERT')) return `Missing row in ${table}`
     if (upper.startsWith('DELETE')) return `Extra row in ${table}`
     if (upper.startsWith('UPDATE')) return `Modified row in ${table}`
     return `Data change in ${table}`
   }
 
+  // Views
+  if (upper.startsWith('CREATE VIEW') || upper.startsWith('CREATE OR REPLACE VIEW')) {
+    return `View missing: ${extractName(sql, /VIEW\s+["'`]?(\w+)["'`]?/i)}`
+  }
+  if (upper.startsWith('ALTER VIEW')) return `View altered: ${extractName(sql, /VIEW\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('DROP VIEW')) return `Extra view: ${extractName(sql, /VIEW\s+["'`]?(\w+)["'`]?/i)}`
+
+  // Functions / procedures
+  if (upper.startsWith('CREATE FUNCTION') || upper.startsWith('CREATE OR REPLACE FUNCTION')) {
+    return `Function missing: ${extractName(sql, /FUNCTION\s+["'`]?(\w+)["'`]?/i)}`
+  }
+  if (upper.startsWith('ALTER FUNCTION')) return `Function altered: ${extractName(sql, /FUNCTION\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('DROP FUNCTION')) return `Extra function: ${extractName(sql, /FUNCTION\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('CREATE PROCEDURE') || upper.startsWith('CREATE OR REPLACE PROCEDURE')) {
+    return `Procedure missing: ${extractName(sql, /PROCEDURE\s+["'`]?(\w+)["'`]?/i)}`
+  }
+  if (upper.startsWith('DROP PROCEDURE')) return `Extra procedure: ${extractName(sql, /PROCEDURE\s+["'`]?(\w+)["'`]?/i)}`
+
+  // Triggers
+  if (upper.startsWith('CREATE TRIGGER') || upper.startsWith('CREATE OR REPLACE TRIGGER')) {
+    return `Trigger missing: ${extractName(sql, /TRIGGER\s+["'`]?(\w+)["'`]?/i)}`
+  }
+  if (upper.startsWith('ALTER TRIGGER')) return `Trigger altered: ${extractName(sql, /TRIGGER\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('DROP TRIGGER')) return `Extra trigger: ${extractName(sql, /TRIGGER\s+["'`]?(\w+)["'`]?/i)}`
+
+  // Types / enums / domains
+  if (upper.startsWith('CREATE TYPE')) return `Type missing: ${extractName(sql, /TYPE\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('ALTER TYPE')) return `Type altered: ${extractName(sql, /TYPE\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('DROP TYPE')) return `Extra type: ${extractName(sql, /TYPE\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('CREATE DOMAIN')) return `Domain missing: ${extractName(sql, /DOMAIN\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('ALTER DOMAIN')) return `Domain altered: ${extractName(sql, /DOMAIN\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('DROP DOMAIN')) return `Extra domain: ${extractName(sql, /DOMAIN\s+["'`]?(\w+)["'`]?/i)}`
+
+  // Tables
+  const table = extractName(sql, /TABLE\s+["'`]?(\w+)["'`]?/i)
   if (upper.startsWith('ALTER TABLE')) return `Table altered: ${table}`
   if (upper.startsWith('CREATE TABLE')) return `Table missing: ${table}`
   if (upper.startsWith('DROP TABLE')) return `Extra table: ${table}`
-  if (upper.startsWith('CREATE INDEX')) return `Index missing on ${table}`
-  if (upper.startsWith('DROP INDEX')) return `Extra index`
-  return `Schema change in ${table}`
+
+  // Indexes
+  if (upper.startsWith('CREATE INDEX') || upper.startsWith('CREATE UNIQUE INDEX')) {
+    return `Index missing on ${extractName(sql, /ON\s+["'`]?(\w+)["'`]?/i)}`
+  }
+  if (upper.startsWith('DROP INDEX')) return `Extra index: ${extractName(sql, /INDEX\s+["'`]?(\w+)["'`]?/i)}`
+
+  // Sequences
+  if (upper.startsWith('CREATE SEQUENCE')) return `Sequence missing: ${extractName(sql, /SEQUENCE\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('ALTER SEQUENCE')) return `Sequence altered: ${extractName(sql, /SEQUENCE\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('DROP SEQUENCE')) return `Extra sequence: ${extractName(sql, /SEQUENCE\s+["'`]?(\w+)["'`]?/i)}`
+
+  return `Schema change in ${extractName(sql, /(?:TABLE|INTO|FROM|UPDATE)\s+["'`]?(\w+)["'`]?/i)}`
+}
+
+function extractName(sql: string, pattern: RegExp): string {
+  return sql.match(pattern)?.[1] ?? 'unknown'
 }

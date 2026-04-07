@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { scan } from '../../src/scanner'
 import { promote } from '../../src/promote'
-import { createDefaultRegistry } from '../../src/layers/index'
+import { createDefaultRegistry } from '../../src/checks/index'
 import type { ScanResult } from '../../src/types/drift'
 import { SOURCE_URL, TARGET_URL, skipIfNoContainers, makeConfig, reseedTarget } from './helpers'
 
@@ -23,7 +23,7 @@ describe('integration: promote', () => {
     if (skipIfNoContainers()) return
 
     const registry = createDefaultRegistry()
-    initialScan = await scan(registry, { config, layers: ['rls'] })
+    initialScan = await scan(registry, { config, checks: ['rls'] })
   })
 
   afterAll(async () => {
@@ -45,26 +45,26 @@ describe('integration: promote', () => {
 
     // Verify nothing actually changed
     const registry = createDefaultRegistry()
-    const rescan = await scan(registry, { config, layers: ['rls'] })
-    expect(rescan.layers[0].issues.length).toBe(initialScan.layers[0].issues.length)
+    const rescan = await scan(registry, { config, checks: ['rls'] })
+    expect(rescan.checks[0].issues.length).toBe(initialScan.checks[0].issues.length)
   })
 
   it.skipIf(skipIfNoContainers())('should apply RLS fixes to target', async () => {
     const promoteResult = await promote({
       dbUrl: TARGET_URL!,
       scanResult: initialScan,
-      layers: ['rls'],
+      checks: ['rls'],
     })
 
     expect(promoteResult.errors, `promote SQL errors: ${JSON.stringify(promoteResult.errors)}`).toHaveLength(0)
     expect(promoteResult.applied.length).toBeGreaterThanOrEqual(1)
 
-    // Re-scan RLS layer — drift should be reduced
+    // Re-scan RLS check — drift should be reduced
     const registry = createDefaultRegistry()
-    const rescan = await scan(registry, { config, layers: ['rls'] })
-    const rlsIssues = rescan.layers.find(l => l.layer === 'rls')!.issues
+    const rescan = await scan(registry, { config, checks: ['rls'] })
+    const rlsIssues = rescan.checks.find(l => l.layer === 'rls')!.issues
 
-    expect(rlsIssues.length).toBeLessThan(initialScan.layers[0].issues.length)
+    expect(rlsIssues.length).toBeLessThan(initialScan.checks[0].issues.length)
   })
 })
 
@@ -77,7 +77,7 @@ describe('integration: promote cron', () => {
     // Ensure target is fresh before cron promote
     await reseedTarget()
     const registry = createDefaultRegistry()
-    cronScan = await scan(registry, { config, layers: ['cron'] })
+    cronScan = await scan(registry, { config, checks: ['cron'] })
   })
 
   afterAll(async () => {
@@ -86,7 +86,7 @@ describe('integration: promote cron', () => {
   })
 
   it.skipIf(skipIfNoContainers())('should detect cron drift before promote', () => {
-    const cron = cronScan.layers.find(l => l.layer === 'cron')!
+    const cron = cronScan.checks.find(l => l.layer === 'cron')!
     expect(cron.status).toBe('drifted')
     expect(cron.issues.length).toBeGreaterThanOrEqual(2)
   })
@@ -95,7 +95,7 @@ describe('integration: promote cron', () => {
     const result = await promote({
       dbUrl: TARGET_URL!,
       scanResult: cronScan,
-      layers: ['cron'],
+      checks: ['cron'],
     })
 
     // cron.schedule / cron.unschedule won't work in plain Postgres (no pg_cron),
@@ -122,24 +122,24 @@ describe('integration: promote idempotency', () => {
     const registry = createDefaultRegistry()
 
     // First promote
-    const scan1 = await scan(registry, { config, layers: ['rls'] })
+    const scan1 = await scan(registry, { config, checks: ['rls'] })
     const promote1 = await promote({
       dbUrl: TARGET_URL!,
       scanResult: scan1,
-      layers: ['rls'],
+      checks: ['rls'],
     })
     expect(promote1.errors).toHaveLength(0)
 
     // Second promote — should be a no-op (no issues to fix)
-    const scan2 = await scan(registry, { config, layers: ['rls'] })
-    const rlsAfter = scan2.layers.find(l => l.layer === 'rls')!
+    const scan2 = await scan(registry, { config, checks: ['rls'] })
+    const rlsAfter = scan2.checks.find(l => l.layer === 'rls')!
 
     // If no drift remains, promote has nothing to apply
     if (rlsAfter.status === 'clean') {
       const promote2 = await promote({
         dbUrl: TARGET_URL!,
         scanResult: scan2,
-        layers: ['rls'],
+        checks: ['rls'],
       })
       expect(promote2.applied).toHaveLength(0)
       expect(promote2.errors).toHaveLength(0)

@@ -1,7 +1,7 @@
 -- SupaForge E2E test: SOURCE (dev) database seed
 -- Runs against a REAL Supabase local instance (has auth.uid(), pg_cron, pg_net, storage schema).
 --
--- Layers exercised: RLS, Cron, Webhooks, Storage policies.
+-- Layers exercised: Schema, RLS, Cron, Webhooks, Storage policies, Realtime, Vault, Extensions, Data.
 --
 -- Idempotent: safe to run multiple times on an existing instance.
 
@@ -35,6 +35,13 @@ CREATE TABLE IF NOT EXISTS public.payments (
     amount      INTEGER NOT NULL,
     status      TEXT NOT NULL DEFAULT 'pending',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS public.plans (
+    id          SERIAL PRIMARY KEY,
+    name        TEXT NOT NULL,
+    price       INTEGER NOT NULL DEFAULT 0,
+    active      BOOLEAN DEFAULT true
 );
 
 -- === Idempotent teardown: drop re-created objects from any prior run =========
@@ -148,3 +155,40 @@ CREATE POLICY "avatars_insert"
     ON storage.objects FOR INSERT
     TO authenticated
     WITH CHECK (bucket_id = 'avatars');
+
+-- === Reference Data (plans table for data check) ===
+INSERT INTO public.plans (name, price, active) VALUES
+    ('Free', 0, true),
+    ('Pro', 2900, true),
+    ('Enterprise', 9900, true)
+ON CONFLICT DO NOTHING;
+
+-- === Realtime Publications ===
+-- Create a publication for real-time subscriptions
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = 'supaforge_live') THEN
+    CREATE PUBLICATION supaforge_live FOR TABLE public.posts, public.payments;
+  END IF;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- === Vault Secrets ===
+-- supabase_vault extension should exist in a real local Supabase instance
+DO $$
+BEGIN
+  PERFORM vault.create_secret('test-api-key-123', 'api_key', 'External API key for integrations');
+EXCEPTION
+  WHEN undefined_function THEN NULL;     -- vault not available
+  WHEN unique_violation THEN NULL;       -- already exists
+  WHEN OTHERS THEN NULL;
+END $$;
+
+DO $$
+BEGIN
+  PERFORM vault.create_secret('smtp-pass-456', 'smtp_password', 'SMTP credentials for email');
+EXCEPTION
+  WHEN undefined_function THEN NULL;
+  WHEN unique_violation THEN NULL;
+  WHEN OTHERS THEN NULL;
+END $$;

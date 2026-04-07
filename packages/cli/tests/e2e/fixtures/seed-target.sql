@@ -2,10 +2,15 @@
 -- Intentionally DRIFTED from source to create detectable issues.
 --
 -- Drift summary:
---   RLS:      Missing "posts_insert_own" (CVE-2025-48757), modified "users_select_own" USING
---   Cron:     Missing "weekly_digest", modified "cleanup_sessions" schedule (0 6 vs 0 3)
---   Webhooks: Missing "on_payment_received", extra "on_invoice_sent", pg_net NOT installed
---   Storage:  Missing "avatars_insert" policy, bucket visibility + missing bucket via API
+--   Schema:    Source has plans table, target has it too but may lack bio column (for schema check)
+--   RLS:       Missing "posts_insert_own" (CVE-2025-48757), modified "users_select_own" USING
+--   Cron:      Missing "weekly_digest", modified "cleanup_sessions" schedule (0 6 vs 0 3)
+--   Webhooks:  Missing "on_payment_received", extra "on_invoice_sent", pg_net NOT installed
+--   Storage:   Missing "avatars_insert" policy, bucket visibility + missing bucket via API
+--   Realtime:  Missing supaforge_live publication (source publishes posts + payments)
+--   Vault:     Missing "smtp_password" secret (source has api_key + smtp_password)
+--   Extensions: pg_net NOT installed (source has it)
+--   Data:      Missing "Enterprise" plan, different "Pro" price
 --
 -- Idempotent: safe to run multiple times on an existing instance.
 
@@ -42,6 +47,13 @@ CREATE TABLE IF NOT EXISTS public.payments (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS public.plans (
+    id          SERIAL PRIMARY KEY,
+    name        TEXT NOT NULL,
+    price       INTEGER NOT NULL DEFAULT 0,
+    active      BOOLEAN DEFAULT true
+);
+
 -- === Idempotent teardown: drop re-created objects from any prior run =========
 DO $$
 BEGIN
@@ -76,9 +88,26 @@ BEGIN
 EXCEPTION WHEN undefined_table THEN NULL;
 END $$;
 
+-- Truncate plans so drifted data can be re-inserted cleanly
+TRUNCATE public.plans RESTART IDENTITY CASCADE;
+
 -- Remove any cron jobs that may have been promoted in a previous run,
 -- restoring the drifted state (weekly_digest is MISSING in target).
 SELECT cron.unschedule(jobid) FROM cron.job WHERE jobname = 'weekly_digest';
+
+-- Remove any realtime publications that may have been promoted in a previous run
+DO $$
+BEGIN
+  DROP PUBLICATION IF EXISTS supaforge_live;
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
+
+-- Remove any vault secrets that may have been promoted (keep only api_key)
+DO $$
+BEGIN
+  DELETE FROM vault.secrets WHERE name <> 'api_key';
+EXCEPTION WHEN OTHERS THEN NULL;
+END $$;
 -- ===========================================================================
 
 -- === RLS Policies (DRIFTED) ===
@@ -154,3 +183,25 @@ CREATE POLICY "avatars_select"
     USING (bucket_id = 'avatars');
 
 -- DRIFT: "avatars_insert" policy is MISSING
+
+-- === Reference Data (DRIFTED) ===
+-- DRIFT: Missing "Enterprise" plan, "Pro" has different price (1900 vs 2900)
+INSERT INTO public.plans (name, price, active) VALUES
+    ('Free', 0, true),
+    ('Pro', 1900, true)
+ON CONFLICT DO NOTHING;
+
+-- === Realtime Publications (DRIFTED) ===
+-- DRIFT: supaforge_live publication is MISSING (source publishes posts + payments)
+
+-- === Vault Secrets (DRIFTED) ===
+-- DRIFT: Only api_key exists in target, smtp_password is MISSING
+DO $$
+BEGIN
+  PERFORM vault.create_secret('test-api-key-123', 'api_key', 'External API key for integrations');
+EXCEPTION
+  WHEN undefined_function THEN NULL;     -- vault not available
+  WHEN unique_violation THEN NULL;       -- already exists
+  WHEN OTHERS THEN NULL;
+END $$;
+-- DRIFT: smtp_password secret intentionally NOT created

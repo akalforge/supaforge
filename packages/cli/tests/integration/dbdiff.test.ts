@@ -117,7 +117,7 @@ describe('integration: SchemaCheck via @dbdiff/cli', () => {
 
     // Source has extra "bio" column → at least one schema issue
     expect(issues.length).toBeGreaterThanOrEqual(1)
-    expect(issues[0].layer).toBe('schema')
+    expect(issues[0].check).toBe('schema')
     expect(issues[0].sql?.up).toBeTruthy()
     expect(issues[0].sql?.down).toBeTruthy()
   })
@@ -143,7 +143,7 @@ describe('integration: DataCheck via @dbdiff/cli', () => {
     const issues = await layer.scan(makeContext())
 
     expect(issues.length).toBeGreaterThanOrEqual(1)
-    expect(issues[0].layer).toBe('data')
+    expect(issues[0].check).toBe('data')
   })
 
   it.skipIf(skipIfNoContainers())('returns empty when no data tables configured', async () => {

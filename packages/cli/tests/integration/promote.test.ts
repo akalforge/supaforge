@@ -62,7 +62,7 @@ describe('integration: promote', () => {
     // Re-scan RLS check — drift should be reduced
     const registry = createDefaultRegistry()
     const rescan = await scan(registry, { config, checks: ['rls'] })
-    const rlsIssues = rescan.checks.find(l => l.layer === 'rls')!.issues
+    const rlsIssues = rescan.checks.find(l => l.check === 'rls')!.issues
 
     expect(rlsIssues.length).toBeLessThan(initialScan.checks[0].issues.length)
   })
@@ -86,7 +86,7 @@ describe('integration: promote cron', () => {
   })
 
   it.skipIf(skipIfNoContainers())('should detect cron drift before promote', () => {
-    const cron = cronScan.checks.find(l => l.layer === 'cron')!
+    const cron = cronScan.checks.find(l => l.check === 'cron')!
     expect(cron.status).toBe('drifted')
     expect(cron.issues.length).toBeGreaterThanOrEqual(2)
   })
@@ -132,7 +132,7 @@ describe('integration: promote idempotency', () => {
 
     // Second promote — should be a no-op (no issues to fix)
     const scan2 = await scan(registry, { config, checks: ['rls'] })
-    const rlsAfter = scan2.checks.find(l => l.layer === 'rls')!
+    const rlsAfter = scan2.checks.find(l => l.check === 'rls')!
 
     // If no drift remains, promote has nothing to apply
     if (rlsAfter.status === 'clean') {

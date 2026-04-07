@@ -27,7 +27,7 @@ describe('integration: full scan', () => {
   })
 
   it.skipIf(skipIfNoContainers())('should produce schema layer results', () => {
-    const schema = result.checks.find(l => l.layer === 'schema')!
+    const schema = result.checks.find(l => l.check === 'schema')!
     expect(schema).toBeDefined()
     expect(schema.status).toBe('drifted')
     // The bio column and idx_posts_published index are missing from target
@@ -35,7 +35,7 @@ describe('integration: full scan', () => {
   })
 
   it.skipIf(skipIfNoContainers())('should detect RLS drift', () => {
-    const rls = result.checks.find(l => l.layer === 'rls')!
+    const rls = result.checks.find(l => l.check === 'rls')!
     expect(rls.status).toBe('drifted')
     expect(rls.issues.length).toBeGreaterThanOrEqual(1)
 
@@ -50,7 +50,7 @@ describe('integration: full scan', () => {
   })
 
   it.skipIf(skipIfNoContainers())('should detect cron drift', () => {
-    const cron = result.checks.find(l => l.layer === 'cron')!
+    const cron = result.checks.find(l => l.check === 'cron')!
     expect(cron.status).toBe('drifted')
 
     // Missing weekly_digest
@@ -63,7 +63,7 @@ describe('integration: full scan', () => {
   })
 
   it.skipIf(skipIfNoContainers())('should detect webhook drift', () => {
-    const webhooks = result.checks.find(l => l.layer === 'webhooks')!
+    const webhooks = result.checks.find(l => l.check === 'webhooks')!
     expect(webhooks.status).toBe('drifted')
 
     // Missing on_payment_received webhook
@@ -76,7 +76,7 @@ describe('integration: full scan', () => {
   })
 
   it.skipIf(skipIfNoContainers())('should detect storage policy drift', () => {
-    const storage = result.checks.find(l => l.layer === 'storage')!
+    const storage = result.checks.find(l => l.check === 'storage')!
     // Storage layer should detect policy drift (missing insert, modified select)
     // Bucket detection is skipped because we don't have API keys
     expect(storage.status).toBe('drifted')
@@ -102,21 +102,21 @@ describe('integration: full scan', () => {
   })
 
   it.skipIf(skipIfNoContainers())('should include all 8 layers in results', () => {
-    const layerNames = result.checks.map(l => l.layer)
-    expect(layerNames).toContain('schema')
-    expect(layerNames).toContain('rls')
-    expect(layerNames).toContain('edge-functions')
-    expect(layerNames).toContain('storage')
-    expect(layerNames).toContain('auth')
-    expect(layerNames).toContain('cron')
-    expect(layerNames).toContain('data')
-    expect(layerNames).toContain('webhooks')
+    const checkNames = result.checks.map(l => l.check)
+    expect(checkNames).toContain('schema')
+    expect(checkNames).toContain('rls')
+    expect(checkNames).toContain('edge-functions')
+    expect(checkNames).toContain('storage')
+    expect(checkNames).toContain('auth')
+    expect(checkNames).toContain('cron')
+    expect(checkNames).toContain('data')
+    expect(checkNames).toContain('webhooks')
   })
 
   it.skipIf(skipIfNoContainers())('should gracefully skip API-dependent layers', () => {
     // Without projectRef/apiKey, auth and edge-functions should be clean (no-op)
-    const auth = result.checks.find(l => l.layer === 'auth')!
-    const edgeFn = result.checks.find(l => l.layer === 'edge-functions')!
+    const auth = result.checks.find(l => l.check === 'auth')!
+    const edgeFn = result.checks.find(l => l.check === 'edge-functions')!
     expect(auth.status).not.toBe('error')
     expect(edgeFn.status).not.toBe('error')
   })
@@ -131,7 +131,7 @@ describe('integration: single-layer scan', () => {
     // Only rls should be present, rest skipped
     const active = result.checks.filter(l => l.status !== 'skipped')
     expect(active).toHaveLength(1)
-    expect(active[0].layer).toBe('rls')
+    expect(active[0].check).toBe('rls')
   })
 
   it.skipIf(skipIfNoContainers())('should scan only storage when --check=storage', async () => {
@@ -141,7 +141,7 @@ describe('integration: single-layer scan', () => {
 
     const active = result.checks.filter(l => l.status !== 'skipped')
     expect(active).toHaveLength(1)
-    expect(active[0].layer).toBe('storage')
+    expect(active[0].check).toBe('storage')
     // Should detect the storage policy drift
     expect(active[0].issues.length).toBeGreaterThanOrEqual(1)
   })
@@ -156,9 +156,9 @@ describe('integration: single-layer scan', () => {
     const registry = createDefaultRegistry()
     const result = await scan(registry, { config, checks: ['rls', 'cron', 'webhooks', 'storage'] })
 
-    for (const check of result.checks) {
-      if (check.status === 'skipped') continue
-      expect(check.issues, `${check.layer} should be clean`).toHaveLength(0)
+    for (const c of result.checks) {
+      if (c.status === 'skipped') continue
+      expect(c.issues, `${c.check} should be clean`).toHaveLength(0)
     }
     expect(result.score).toBe(100)
   })

@@ -1,6 +1,6 @@
 # SupaForge
 
-> Detect and fix drift across all your Supabase environments — the environment sync tool Supabase developers have been asking for.
+> Diff and sync your Supabase environments.
 
 [![CI](https://github.com/akalforge/supaforge/actions/workflows/ci.yml/badge.svg)](https://github.com/akalforge/supaforge/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/supaforge.svg)](https://www.npmjs.com/package/supaforge)

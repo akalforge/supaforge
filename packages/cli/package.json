@@ -1,7 +1,7 @@
 {
   "name": "supaforge",
   "version": "0.3.0-rc.1",
-  "description": "Detect and fix drift across all your Supabase environments",
+  "description": "Diff and sync your Supabase environments",
   "author": "Akal Forge",
   "license": "MIT",
   "type": "module",

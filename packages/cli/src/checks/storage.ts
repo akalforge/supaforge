@@ -1,7 +1,7 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
-import { Layer, type LayerContext } from './base'
+import { Check, type CheckContext } from './base'
 
 interface StorageBucket {
   id: string
@@ -23,7 +23,7 @@ interface StoragePolicy {
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
-export class StorageLayer extends Layer {
+export class StorageCheck extends Check {
   readonly name = 'storage' as const
 
   constructor(
@@ -33,13 +33,13 @@ export class StorageLayer extends Layer {
     super()
   }
 
-  async scan(ctx: LayerContext): Promise<DriftIssue[]> {
+  async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     const bucketIssues = await this.scanBuckets(ctx)
     const policyIssues = await this.scanPolicies(ctx)
     return [...bucketIssues, ...policyIssues]
   }
 
-  private async scanBuckets(ctx: LayerContext): Promise<DriftIssue[]> {
+  private async scanBuckets(ctx: CheckContext): Promise<DriftIssue[]> {
     const { projectRef: sourceRef, apiKey: sourceKey, apiUrl: sourceApiUrl } = ctx.source
     const { projectRef: targetRef, apiKey: targetKey, apiUrl: targetApiUrl } = ctx.target
 
@@ -55,7 +55,7 @@ export class StorageLayer extends Layer {
     return diffBuckets(source, target, targetRef, targetKey, targetApiUrl)
   }
 
-  private async scanPolicies(ctx: LayerContext): Promise<DriftIssue[]> {
+  private async scanPolicies(ctx: CheckContext): Promise<DriftIssue[]> {
     const [source, target] = await Promise.all([
       this.fetchStoragePolicies(ctx.source.dbUrl),
       this.fetchStoragePolicies(ctx.target.dbUrl),
@@ -112,7 +112,7 @@ function diffBuckets(
     if (!targetMap.has(id)) {
       issues.push({
         id: `storage-missing-${id}`,
-        layer: 'storage',
+        check: 'storage',
         severity: 'warning',
         title: `Missing bucket: ${b.name}`,
         description: `Bucket "${b.name}" exists in source but not in target.`,
@@ -138,7 +138,7 @@ function diffBuckets(
     if (!sourceMap.has(id)) {
       issues.push({
         id: `storage-extra-${id}`,
-        layer: 'storage',
+        check: 'storage',
         severity: 'info',
         title: `Extra bucket: ${b.name}`,
         description: `Bucket "${b.name}" exists in target but not in source.`,
@@ -167,7 +167,7 @@ function diffBuckets(
       updateBody.public = sb.public
       issues.push({
         id: `storage-visibility-${id}`,
-        layer: 'storage',
+        check: 'storage',
         severity: sb.public && !tb.public ? 'warning' : 'critical',
         title: `Bucket visibility mismatch: ${sb.name}`,
         description: `Bucket "${sb.name}" is ${sb.public ? 'public' : 'private'} in source but ${tb.public ? 'public' : 'private'} in target.`,
@@ -181,7 +181,7 @@ function diffBuckets(
       updateBody.file_size_limit = sb.file_size_limit
       issues.push({
         id: `storage-sizelimit-${id}`,
-        layer: 'storage',
+        check: 'storage',
         severity: 'warning',
         title: `Bucket file size limit mismatch: ${sb.name}`,
         description: `Bucket "${sb.name}" file_size_limit is ${sb.file_size_limit ?? 'unlimited'} in source but ${tb.file_size_limit ?? 'unlimited'} in target.`,
@@ -197,7 +197,7 @@ function diffBuckets(
       updateBody.allowed_mime_types = sb.allowed_mime_types
       issues.push({
         id: `storage-mimetypes-${id}`,
-        layer: 'storage',
+        check: 'storage',
         severity: 'warning',
         title: `Bucket allowed MIME types mismatch: ${sb.name}`,
         description: `Bucket "${sb.name}" allowed_mime_types differ between source and target.`,
@@ -282,7 +282,7 @@ function diffStoragePolicies(source: StoragePolicy[], target: StoragePolicy[]): 
     if (!targetMap.has(key)) {
       issues.push({
         id: `storage-policy-missing-${key}`,
-        layer: 'storage',
+        check: 'storage',
         severity: 'critical',
         title: `Missing storage policy: ${sp.policyname} on ${sp.tablename}`,
         description: `Storage RLS policy "${sp.policyname}" on storage.${sp.tablename} exists in source but not in target.`,
@@ -299,7 +299,7 @@ function diffStoragePolicies(source: StoragePolicy[], target: StoragePolicy[]): 
     if (!sourceMap.has(key)) {
       issues.push({
         id: `storage-policy-extra-${key}`,
-        layer: 'storage',
+        check: 'storage',
         severity: 'info',
         title: `Extra storage policy: ${tp.policyname} on ${tp.tablename}`,
         description: `Storage RLS policy "${tp.policyname}" on storage.${tp.tablename} exists in target but not in source.`,
@@ -317,7 +317,7 @@ function diffStoragePolicies(source: StoragePolicy[], target: StoragePolicy[]): 
     if (!tp || storagePoliciesEqual(sp, tp)) continue
     issues.push({
       id: `storage-policy-changed-${key}`,
-      layer: 'storage',
+      check: 'storage',
       severity: 'critical',
       title: `Storage policy changed: ${sp.policyname} on ${sp.tablename}`,
       description: `Storage RLS policy "${sp.policyname}" on storage.${sp.tablename} differs between source and target.`,

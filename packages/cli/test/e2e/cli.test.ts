@@ -28,8 +28,8 @@ function run(args: string[], options?: { cwd?: string; env?: Record<string, stri
 describe('CLI e2e: scan', () => {
   it('should show help', async () => {
     const { stdout } = await run(['scan', '--help'])
-    expect(stdout).toContain('Scan all 8 layers')
-    expect(stdout).toContain('--layer')
+    expect(stdout).toContain('Scan all checks')
+    expect(stdout).toContain('--check')
     expect(stdout).toContain('--json')
   })
 
@@ -45,9 +45,9 @@ describe('CLI e2e: scan', () => {
     }
   })
 
-  it('should reject invalid --layer value', async () => {
+  it('should reject invalid --check value', async () => {
     try {
-      await run(['scan', '--layer=bogus'])
+      await run(['scan', '--check=bogus'])
       expect.unreachable('Should have thrown')
     } catch (err: any) {
       const output = (err.stderr || '') + (err.stdout || '')
@@ -60,8 +60,8 @@ describe('CLI e2e: promote', () => {
   it('should show help', async () => {
     const { stdout } = await run(['promote', '--help'])
     expect(stdout).toContain('Apply SQL fixes')
-    expect(stdout).toContain('--dry-run')
-    expect(stdout).toContain('--layer')
+    expect(stdout).toContain('--apply')
+    expect(stdout).toContain('--check')
   })
 
   it('should error without config file', async () => {

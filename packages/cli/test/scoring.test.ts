@@ -1,20 +1,20 @@
 import { describe, it, expect } from 'vitest'
 import { computeScore, summarize } from '../src/scoring.js'
-import type { LayerResult } from '../src/types/drift.js'
+import type { CheckResult } from '../src/types/drift.js'
 
-const clean: LayerResult = {
-  layer: 'schema',
+const clean: CheckResult = {
+  check: 'schema',
   status: 'clean',
   issues: [],
   durationMs: 10,
 }
 
-const drifted: LayerResult = {
-  layer: 'rls',
+const drifted: CheckResult = {
+  check: 'rls',
   status: 'drifted',
   issues: [
-    { id: '1', layer: 'rls', severity: 'critical', title: 'Missing policy', description: '' },
-    { id: '2', layer: 'rls', severity: 'warning', title: 'Extra policy', description: '' },
+    { id: '1', check: 'rls', severity: 'critical', title: 'Missing policy', description: '' },
+    { id: '2', check: 'rls', severity: 'warning', title: 'Extra policy', description: '' },
   ],
   durationMs: 20,
 }
@@ -28,11 +28,11 @@ describe('summarize', () => {
     expect(summarize([drifted])).toEqual({ total: 2, critical: 1, warning: 1, info: 0 })
   })
 
-  it('aggregates across multiple layers', () => {
-    const infoResult: LayerResult = {
-      layer: 'cron',
+  it('aggregates across multiple checks', () => {
+    const infoResult: CheckResult = {
+      check: 'cron',
       status: 'drifted',
-      issues: [{ id: '3', layer: 'cron', severity: 'info', title: 'Extra job', description: '' }],
+      issues: [{ id: '3', check: 'cron', severity: 'info', title: 'Extra job', description: '' }],
       durationMs: 5,
     }
     expect(summarize([drifted, infoResult])).toEqual({ total: 3, critical: 1, warning: 1, info: 1 })
@@ -50,11 +50,11 @@ describe('computeScore', () => {
   })
 
   it('never goes below 0', () => {
-    const manyIssues: LayerResult = {
+    const manyIssues: CheckResult = {
       ...drifted,
       issues: Array.from({ length: 20 }, (_, i) => ({
         id: String(i),
-        layer: 'rls' as const,
+        check: 'rls' as const,
         severity: 'critical' as const,
         title: '',
         description: '',
@@ -64,10 +64,10 @@ describe('computeScore', () => {
   })
 
   it('penalises info issues lightly', () => {
-    const infoOnly: LayerResult = {
-      layer: 'auth',
+    const infoOnly: CheckResult = {
+      check: 'auth',
       status: 'drifted',
-      issues: [{ id: '1', layer: 'auth', severity: 'info', title: '', description: '' }],
+      issues: [{ id: '1', check: 'auth', severity: 'info', title: '', description: '' }],
       durationMs: 5,
     }
     expect(computeScore([infoOnly])).toBe(99)

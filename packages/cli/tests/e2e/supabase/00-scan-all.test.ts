@@ -10,13 +10,13 @@
 import { describe, it, expect, beforeAll } from 'vitest'
 import { scan } from '../../../src/scanner'
 import { promote } from '../../../src/promote'
-import { createDefaultRegistry } from '../../../src/layers/index'
+import { createDefaultRegistry } from '../../../src/checks/index'
 import type { SupaForgeConfig } from '../../../src/types/config'
-import type { ScanResult, LayerName } from '../../../src/types/drift'
+import type { ScanResult, CheckName } from '../../../src/types/drift'
 import { shouldSkip, buildConfig } from './helpers'
 
-/** Layers testable against local Supabase (no Management API needed). */
-const TESTABLE_LAYERS: LayerName[] = ['rls', 'cron', 'webhooks', 'storage']
+/** Checks testable against local Supabase (no Management API needed). */
+const TESTABLE_CHECKS: CheckName[] = ['rls', 'cron', 'webhooks', 'storage']
 
 describe('e2e: full multi-layer scan', () => {
   let config: SupaForgeConfig
@@ -27,17 +27,17 @@ describe('e2e: full multi-layer scan', () => {
     config = buildConfig()
 
     const registry = createDefaultRegistry()
-    initialScan = await scan(registry, { config, layers: TESTABLE_LAYERS })
+    initialScan = await scan(registry, { config, checks: TESTABLE_CHECKS })
   })
 
   it.skipIf(shouldSkip())('should scan all layers without errors', () => {
-    const errorLayers = initialScan.layers.filter(l => l.status === 'error')
-    expect(errorLayers, `Error layers: ${JSON.stringify(errorLayers)}`).toHaveLength(0)
+    const errorChecks = initialScan.checks.filter(l => l.status === 'error')
+    expect(errorChecks, `Error checks: ${JSON.stringify(errorChecks)}`).toHaveLength(0)
   })
 
   it.skipIf(shouldSkip())('should detect drift across multiple layers', () => {
-    const driftedLayers = initialScan.layers.filter(l => l.status === 'drifted')
-    expect(driftedLayers.length).toBeGreaterThanOrEqual(3)
+    const driftedChecks = initialScan.checks.filter(l => l.status === 'drifted')
+    expect(driftedChecks.length).toBeGreaterThanOrEqual(3)
 
     // Score should reflect issues
     expect(initialScan.score).toBeLessThan(100)
@@ -46,7 +46,7 @@ describe('e2e: full multi-layer scan', () => {
   })
 
   it.skipIf(shouldSkip())('should have issues with SQL fixes or API actions', () => {
-    const allIssues = initialScan.layers.flatMap(l => l.issues)
+    const allIssues = initialScan.checks.flatMap(l => l.issues)
 
     const withSql = allIssues.filter(i => i.sql?.up)
     const withAction = allIssues.filter(i => i.action)
@@ -58,7 +58,7 @@ describe('e2e: full multi-layer scan', () => {
     const result = await promote({
       dbUrl: process.env.SUPAFORGE_E2E_TARGET_DB_URL!,
       scanResult: initialScan,
-      layers: TESTABLE_LAYERS.map(String),
+      checks: TESTABLE_CHECKS.map(String),
       dryRun: true,
     })
 
@@ -67,7 +67,7 @@ describe('e2e: full multi-layer scan', () => {
 
     // Verify nothing changed (dry-run only)
     const registry = createDefaultRegistry()
-    const rescan = await scan(registry, { config, layers: TESTABLE_LAYERS })
+    const rescan = await scan(registry, { config, checks: TESTABLE_CHECKS })
     expect(rescan.summary.total).toBe(initialScan.summary.total)
   })
 })

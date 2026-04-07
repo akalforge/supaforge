@@ -1,7 +1,7 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
-import { Layer, type LayerContext } from './base'
+import { Check, type CheckContext } from './base'
 
 interface WebhookEntry {
   id: number
@@ -17,14 +17,14 @@ interface WebhookEntry {
   trigger_table: string | null
 }
 
-export class WebhooksLayer extends Layer {
+export class WebhooksCheck extends Check {
   readonly name = 'webhooks' as const
 
   constructor(private queryFn: QueryFn = pgQuery) {
     super()
   }
 
-  async scan(ctx: LayerContext): Promise<DriftIssue[]> {
+  async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     const [sourceHooks, targetHooks, sourceNet, targetNet] = await Promise.all([
       this.fetchHooks(ctx.source.dbUrl),
       this.fetchHooks(ctx.target.dbUrl),
@@ -38,7 +38,7 @@ export class WebhooksLayer extends Layer {
     if (sourceNet && !targetNet) {
       issues.push({
         id: 'webhooks-pgnet-missing',
-        layer: 'webhooks',
+        check: 'webhooks',
         severity: 'critical',
         title: 'pg_net extension missing in target',
         description: 'The pg_net extension is enabled in source but not in target. Database webhooks will silently fail.',
@@ -138,7 +138,7 @@ function diffHooks(source: WebhookEntry[], target: WebhookEntry[]): DriftIssue[]
 
       issues.push({
         id: `webhooks-missing-${name}`,
-        layer: 'webhooks',
+        check: 'webhooks',
         severity: 'warning',
         title: `Missing webhook: ${name}`,
         description: h.trigger_table
@@ -161,7 +161,7 @@ function diffHooks(source: WebhookEntry[], target: WebhookEntry[]): DriftIssue[]
 
       issues.push({
         id: `webhooks-extra-${name}`,
-        layer: 'webhooks',
+        check: 'webhooks',
         severity: 'info',
         title: `Extra webhook: ${name}`,
         description: h.trigger_table

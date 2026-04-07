@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { RlsLayer } from '../../src/layers/rls.js'
-import type { LayerContext } from '../../src/layers/base.js'
+import { RlsCheck } from '../../src/checks/rls.js'
+import type { CheckContext } from '../../src/checks/base.js'
 import type { QueryFn } from '../../src/db.js'
 
-function mockContext(): LayerContext {
+function mockContext(): CheckContext {
   return {
     source: { dbUrl: 'postgres://source' },
     target: { dbUrl: 'postgres://target' },
@@ -28,15 +28,15 @@ const makePolicy = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 })
 
-describe('RlsLayer', () => {
+describe('RlsCheck', () => {
   it('detects missing policies in target (CVE-2025-48757 pattern)', async () => {
     const queryFn: QueryFn = async (dbUrl) => {
       if (dbUrl.includes('source')) return [makePolicy()]
       return []
     }
 
-    const layer = new RlsLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new RlsCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('critical')
@@ -52,8 +52,8 @@ describe('RlsLayer', () => {
       return []
     }
 
-    const layer = new RlsLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new RlsCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('warning')
@@ -66,8 +66,8 @@ describe('RlsLayer', () => {
       return [makePolicy({ qual: '(true)' })]
     }
 
-    const layer = new RlsLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new RlsCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('critical')
@@ -82,8 +82,8 @@ describe('RlsLayer', () => {
       return [makePolicy({ with_check: '(true)' })]
     }
 
-    const layer = new RlsLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new RlsCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('critical')
@@ -93,8 +93,8 @@ describe('RlsLayer', () => {
     const policy = makePolicy()
     const queryFn: QueryFn = async () => [policy]
 
-    const layer = new RlsLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new RlsCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(0)
   })
@@ -109,8 +109,8 @@ describe('RlsLayer', () => {
       return [policies[0]] // missing posts_read in target
     }
 
-    const layer = new RlsLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new RlsCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].title).toContain('posts_read')
@@ -123,8 +123,8 @@ describe('RlsLayer', () => {
       return []
     }
 
-    const layer = new RlsLayer(queryFn)
-    await layer.scan(mockContext())
+    const check = new RlsCheck(queryFn)
+    await check.scan(mockContext())
 
     expect(calls.length).toBe(2)
     expect(calls[0].sql).toContain('NOT IN')
@@ -137,8 +137,8 @@ describe('RlsLayer', () => {
       return []
     }
 
-    const layer = new RlsLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new RlsCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     const sql = issues[0].sql!.up
     expect(sql).toContain('CREATE POLICY "users_read"')
@@ -156,8 +156,8 @@ describe('RlsLayer', () => {
       return []
     }
 
-    const layer = new RlsLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new RlsCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     const sql = issues[0].sql!.up
     expect(sql).toContain('TO authenticated')

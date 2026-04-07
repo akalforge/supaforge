@@ -2,6 +2,8 @@ import { spawn } from 'node:child_process'
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { resolve, dirname } from 'node:path'
 import pg from 'pg'
+import { captureSnapshot, type SnapshotResult } from './snapshot'
+import type { EnvironmentConfig, SupaForgeConfig } from './types/config'
 
 /** Prefix for branch database names created by SupaForge. */
 export const BRANCH_DB_PREFIX = 'supaforge_branch_'
@@ -18,6 +20,8 @@ export interface BranchMeta {
   createdFrom: string
   createdAt: string
   schemaOnly: boolean
+  /** Directory containing the layer snapshot taken at branch creation time. */
+  snapshotDir?: string
 }
 
 export interface BranchesManifest {
@@ -35,6 +39,10 @@ export interface CreateBranchOptions {
   schemaOnly?: boolean
   /** Working directory for .supaforge/ metadata. */
   cwd?: string
+  /** Capture a full-layer snapshot alongside the DB clone. */
+  env?: EnvironmentConfig
+  /** Config needed for snapshot (ignore schemas, data tables, etc.). */
+  config?: SupaForgeConfig
 }
 
 export interface BranchDiffSummary {
@@ -136,6 +144,21 @@ export async function createBranch(opts: CreateBranchOptions): Promise<BranchMet
     createdFrom: opts.sourceLabel,
     createdAt: new Date().toISOString(),
     schemaOnly: opts.schemaOnly ?? false,
+  }
+
+  // Capture a layer snapshot if environment + config provided
+  if (opts.env && opts.config) {
+    try {
+      const snapshot = await captureSnapshot({
+        envName: opts.sourceLabel,
+        env: opts.env,
+        config: opts.config,
+        cwd,
+      })
+      meta.snapshotDir = snapshot.dir
+    } catch {
+      // Non-fatal: branch still works without snapshot
+    }
   }
 
   manifest.branches.push(meta)

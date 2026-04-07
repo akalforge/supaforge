@@ -1,7 +1,7 @@
 import { Command, Args, Flags } from '@oclif/core'
 import { loadConfig, validateConfig } from '../../config'
 import { loadManifest, type BranchMeta } from '../../branch'
-import { createDefaultRegistry } from '../../layers/index'
+import { createDefaultRegistry } from '../../checks/index'
 import { scan } from '../../scanner'
 import { renderSummary } from '../../render'
 

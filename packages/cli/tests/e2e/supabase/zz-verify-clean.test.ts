@@ -7,12 +7,12 @@
  */
 import { describe, it, expect, beforeAll } from 'vitest'
 import { scan } from '../../../src/scanner'
-import { createDefaultRegistry } from '../../../src/layers/index'
+import { createDefaultRegistry } from '../../../src/checks/index'
 import type { SupaForgeConfig } from '../../../src/types/config'
-import type { ScanResult, LayerName } from '../../../src/types/drift'
+import type { ScanResult, CheckName } from '../../../src/types/drift'
 import { shouldSkip, buildConfig } from './helpers'
 
-const TESTABLE_LAYERS: LayerName[] = ['rls', 'cron', 'webhooks', 'storage']
+const TESTABLE_CHECKS: CheckName[] = ['rls', 'cron', 'webhooks', 'storage']
 
 describe('e2e: post-promote verification', () => {
   let config: SupaForgeConfig
@@ -23,12 +23,12 @@ describe('e2e: post-promote verification', () => {
     config = buildConfig()
 
     const registry = createDefaultRegistry()
-    result = await scan(registry, { config, layers: TESTABLE_LAYERS })
+    result = await scan(registry, { config, checks: TESTABLE_CHECKS })
   })
 
   it.skipIf(shouldSkip())('should have no errors after all promotes', () => {
-    const errorLayers = result.layers.filter(l => l.status === 'error')
-    expect(errorLayers, `Error layers: ${JSON.stringify(errorLayers)}`).toHaveLength(0)
+    const errorChecks = result.checks.filter(l => l.status === 'error')
+    expect(errorChecks, `Error checks: ${JSON.stringify(errorChecks)}`).toHaveLength(0)
   })
 
   it.skipIf(shouldSkip())('should have no critical issues remaining', () => {

@@ -2,7 +2,7 @@
 
 ## What This Is
 
-Supabase environment drift detection and sync CLI. Scans 8 layers (schema, RLS policies, Edge Functions, storage, auth config, cron jobs, reference data, webhooks) and generates SQL fixes to promote changes between environments.
+Supabase environment drift detection and sync CLI. Scans all checks (schema, RLS policies, Edge Functions, storage, auth config, cron jobs, reference data, webhooks, realtime publications, vault secrets, Postgres extensions) and generates SQL fixes to promote changes between environments.
 
 **Motivation**: CVE-2025-48757 exposed 170+ Lovable-generated apps with missing RLS policies never promoted to production.
 
@@ -11,8 +11,8 @@ Supabase environment drift detection and sync CLI. Scans 8 layers (schema, RLS p
 ```
 packages/cli/src/
   commands/     — oclif commands: scan, diff, promote, hukam
-  layers/       — Layer implementations (base, schema, rls, edge-functions, storage, auth, cron, data, webhooks)
-                  + registry.ts (LayerRegistry), index.ts (factory)
+  checks/       — Check implementations (base, schema, rls, edge-functions, storage, auth, cron, data, webhooks, realtime, vault, extensions)
+                  + registry.ts (CheckRegistry), index.ts (factory)
   types/        — config.ts, drift.ts, index.ts
   config.ts     — Config loading/validation
   db.ts         — PostgreSQL query helper (pg driver)
@@ -21,15 +21,15 @@ packages/cli/src/
   promote.ts    — Execute SQL fixes in target DB
   hooks.ts      — HookBus event system
   render.ts     — Output formatting
-  scoring.ts    — Score calculation from layer results
+  scoring.ts    — Score calculation from check results
   defaults.ts   — DEFAULT_IGNORE_SCHEMAS
 ```
 
-**Key flow**: `scan` command → load config → create layer registry → `scanner.scan()` iterates layers → each `layer.scan(ctx)` returns `DriftIssue[]` → scoring → render output.
+**Key flow**: `scan` command → load config → create check registry → `scanner.scan()` iterates checks → each `check.scan(ctx)` returns `DriftIssue[]` → scoring → render output.
 
-**Patterns**: Layer (abstract base + concrete implementations), Registry (LayerRegistry), Strategy (each layer is a strategy), Hook Bus (event-driven pipeline).
+**Patterns**: Check (abstract base + concrete implementations), Registry (CheckRegistry), Strategy (each check is a strategy), Hook Bus (event-driven pipeline).
 
-**DBDiff integration**: Schema/data layers invoke `@dbdiff/cli diff` via local binary resolution in `dbdiff.ts`. `@dbdiff/cli` is a direct dependency. The adapter writes to a temp file (`--output`), reads it back, and parses UP/DOWN markers. When schemas are identical dbdiff doesn't create the output file — the adapter handles this gracefully.
+**DBDiff integration**: Schema/data checks invoke `@dbdiff/cli diff` via local binary resolution in `dbdiff.ts`. `@dbdiff/cli` is a direct dependency. The adapter writes to a temp file (`--output`), reads it back, and parses UP/DOWN markers. When schemas are identical dbdiff doesn't create the output file — the adapter handles this gracefully.
 
 ## Build & Test
 
@@ -53,8 +53,8 @@ npm run test:e2e                       # E2E tests
 
 - **TypeScript strict mode**, ESM-only (no CommonJS).
 - **oclif** for command structure — each command extends `Command`.
-- **Layer pattern**: All layers extend abstract `Layer` class with `name` and `scan(ctx)`.
-- **Dependency injection**: Layers accept `queryFn`/`fetchFn` for testability.
+- **Check pattern**: All checks extend abstract `Check` class with `name` and `scan(ctx)`.
+- **Dependency injection**: Checks accept `queryFn`/`fetchFn` for testability.
 - **Config file**: `supaforge.config.json` in working directory.
 
 ## Key Gotchas
@@ -62,12 +62,12 @@ npm run test:e2e                       # E2E tests
 - `@dbdiff/cli` is a direct dependency — `dbdiff.ts` resolves the local binary via `createRequire`, falls back to `npx` if not found.
 - `dbdiff.ts` parses UP/DOWN SQL from markers: `#---------- UP ----------` / `#---------- DOWN ----------`.
 - Integration tests are sequential (`fileParallelism: false`) with 30s timeout.
-- `defaults.ts` defines `DEFAULT_IGNORE_SCHEMAS` (auth, storage, etc.) — checked by all DB-querying layers.
+- `defaults.ts` defines `DEFAULT_IGNORE_SCHEMAS` (auth, storage, etc.) — checked by all DB-querying checks.
 
 ## Docs
 
 - [README.md](../README.md) — Overview, motivation, usage
-- [docs/spec.md](../docs/spec.md) — Full specification, layer details, architecture
+- [docs/spec.md](../docs/spec.md) — Full specification, check details, architecture
 
 ## Definition of Done
 

@@ -1,7 +1,7 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
-import { Layer, type LayerContext } from './base'
+import { Check, type CheckContext } from './base'
 
 interface RlsPolicy {
   schemaname: string
@@ -14,14 +14,14 @@ interface RlsPolicy {
   with_check: string | null
 }
 
-export class RlsLayer extends Layer {
+export class RlsCheck extends Check {
   readonly name = 'rls' as const
 
   constructor(private queryFn: QueryFn = pgQuery) {
     super()
   }
 
-  async scan(ctx: LayerContext): Promise<DriftIssue[]> {
+  async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     const ignoreSchemas = ctx.config.ignoreSchemas ?? []
     const [source, target] = await Promise.all([
       this.fetchPolicies(ctx.source.dbUrl, ignoreSchemas),
@@ -103,7 +103,7 @@ export function diffPolicies(source: RlsPolicy[], target: RlsPolicy[]): DriftIss
     if (!targetMap.has(key)) {
       issues.push({
         id: `rls-missing-${key}`,
-        layer: 'rls',
+        check: 'rls',
         severity: 'critical',
         title: `Missing RLS policy: ${p.policyname}`,
         description: `Policy "${p.policyname}" on ${p.schemaname}.${p.tablename} exists in source but is missing from target. This is a CVE-2025-48757 risk pattern.`,
@@ -121,7 +121,7 @@ export function diffPolicies(source: RlsPolicy[], target: RlsPolicy[]): DriftIss
     if (!sourceMap.has(key)) {
       issues.push({
         id: `rls-extra-${key}`,
-        layer: 'rls',
+        check: 'rls',
         severity: 'warning',
         title: `Extra RLS policy: ${p.policyname}`,
         description: `Policy "${p.policyname}" on ${p.schemaname}.${p.tablename} exists in target but not in source.`,
@@ -140,7 +140,7 @@ export function diffPolicies(source: RlsPolicy[], target: RlsPolicy[]): DriftIss
     if (tp && !policiesEqual(sp, tp)) {
       issues.push({
         id: `rls-modified-${key}`,
-        layer: 'rls',
+        check: 'rls',
         severity: 'critical',
         title: `Modified RLS policy: ${sp.policyname}`,
         description: `Policy "${sp.policyname}" on ${sp.schemaname}.${sp.tablename} has different USING/WITH CHECK expressions between source and target.`,

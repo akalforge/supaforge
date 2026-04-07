@@ -4,18 +4,18 @@
  * Verifies that:
  * 1. resolveDbDiffBin() finds the installed binary
  * 2. runDbDiff() produces valid UP/DOWN SQL against real Postgres
- * 3. SchemaLayer and DataLayer return DriftIssues via the real CLI
+ * 3. SchemaCheck and DataCheck return DriftIssues via the real CLI
  *
  * Requires containers from scripts/test-integration.sh or CI services.
  */
 import { describe, it, expect, beforeAll } from 'vitest'
 import { runDbDiff, resolveDbDiffBin, parseDbDiffOutput, sqlToIssues } from '../../src/dbdiff'
-import { SchemaLayer } from '../../src/layers/schema'
-import { DataLayer } from '../../src/layers/data'
-import type { LayerContext } from '../../src/layers/base'
+import { SchemaCheck } from '../../src/checks/schema'
+import { DataCheck } from '../../src/checks/data'
+import type { CheckContext } from '../../src/checks/base'
 import { SOURCE_URL, TARGET_URL, skipIfNoContainers } from './helpers'
 
-function makeContext(overrides?: Partial<LayerContext>): LayerContext {
+function makeContext(overrides?: Partial<CheckContext>): CheckContext {
   return {
     source: { dbUrl: SOURCE_URL! },
     target: { dbUrl: TARGET_URL! },
@@ -26,7 +26,7 @@ function makeContext(overrides?: Partial<LayerContext>): LayerContext {
       },
       source: 'source',
       target: 'target',
-      layers: {
+      checks: {
         data: { tables: ['plans'] },
       },
     },
@@ -108,22 +108,22 @@ describe('integration: runDbDiff data', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 4. SchemaLayer with real CLI
+// 4. SchemaCheck with real CLI
 // ---------------------------------------------------------------------------
-describe('integration: SchemaLayer via @dbdiff/cli', () => {
+describe('integration: SchemaCheck via @dbdiff/cli', () => {
   it.skipIf(skipIfNoContainers())('produces DriftIssues from real schema diff', async () => {
-    const layer = new SchemaLayer() // uses real runDbDiff
+    const layer = new SchemaCheck() // uses real runDbDiff
     const issues = await layer.scan(makeContext())
 
     // Source has extra "bio" column → at least one schema issue
     expect(issues.length).toBeGreaterThanOrEqual(1)
-    expect(issues[0].layer).toBe('schema')
+    expect(issues[0].check).toBe('schema')
     expect(issues[0].sql?.up).toBeTruthy()
     expect(issues[0].sql?.down).toBeTruthy()
   })
 
   it.skipIf(skipIfNoContainers())('returns empty when diffing source against itself', async () => {
-    const layer = new SchemaLayer()
+    const layer = new SchemaCheck()
     const ctx = makeContext({
       target: { dbUrl: SOURCE_URL! },
     })
@@ -135,21 +135,21 @@ describe('integration: SchemaLayer via @dbdiff/cli', () => {
 })
 
 // ---------------------------------------------------------------------------
-// 5. DataLayer with real CLI
+// 5. DataCheck with real CLI
 // ---------------------------------------------------------------------------
-describe('integration: DataLayer via @dbdiff/cli', () => {
+describe('integration: DataCheck via @dbdiff/cli', () => {
   it.skipIf(skipIfNoContainers())('detects data drift in plans table', async () => {
-    const layer = new DataLayer() // uses real runDbDiff
+    const layer = new DataCheck() // uses real runDbDiff
     const issues = await layer.scan(makeContext())
 
     expect(issues.length).toBeGreaterThanOrEqual(1)
-    expect(issues[0].layer).toBe('data')
+    expect(issues[0].check).toBe('data')
   })
 
   it.skipIf(skipIfNoContainers())('returns empty when no data tables configured', async () => {
-    const layer = new DataLayer()
+    const layer = new DataCheck()
     const ctx = makeContext()
-    ctx.config.layers = {} // no data tables
+    ctx.config.checks = {} // no data tables
     const issues = await layer.scan(ctx)
     expect(issues).toHaveLength(0)
   })

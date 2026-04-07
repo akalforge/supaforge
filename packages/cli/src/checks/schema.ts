@@ -1,6 +1,6 @@
 import type { DriftIssue } from '../types/drift'
 import { runDbDiff, sqlToIssues, type DbDiffOptions } from '../dbdiff'
-import { Layer, type LayerContext } from './base'
+import { Check, type CheckContext } from './base'
 
 export type RunDbDiffFn = (options: DbDiffOptions) => ReturnType<typeof runDbDiff>
 
@@ -12,14 +12,14 @@ export type RunDbDiffFn = (options: DbDiffOptions) => ReturnType<typeof runDbDif
  *
  * Falls back gracefully when @dbdiff/cli is not installed.
  */
-export class SchemaLayer extends Layer {
+export class SchemaCheck extends Check {
   readonly name = 'schema' as const
 
   constructor(private runFn: RunDbDiffFn = runDbDiff) {
     super()
   }
 
-  async scan(ctx: LayerContext): Promise<DriftIssue[]> {
+  async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     try {
       const result = await this.runFn({
         sourceUrl: ctx.source.dbUrl,

@@ -1,5 +1,5 @@
 import type { DriftIssue, SyncAction } from '../types/drift'
-import { Layer, type LayerContext } from './base'
+import { Check, type CheckContext } from './base'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
@@ -15,14 +15,14 @@ const CRITICAL_KEYS = [
   'SECURITY_UPDATE_PASSWORD_REQUIRE_REAUTHENTICATION',
 ]
 
-export class AuthLayer extends Layer {
+export class AuthCheck extends Check {
   readonly name = 'auth' as const
 
   constructor(private fetchFn: FetchFn = globalThis.fetch.bind(globalThis)) {
     super()
   }
 
-  async scan(ctx: LayerContext): Promise<DriftIssue[]> {
+  async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     const { projectRef: sourceRef, apiKey: sourceKey } = ctx.source
     const { projectRef: targetRef, apiKey: targetKey } = ctx.target
 
@@ -75,7 +75,7 @@ function diffAuthConfig(
 
       issues.push({
         id: `auth-${key.toLowerCase()}`,
-        layer: 'auth',
+        check: 'auth',
         severity: isCritical ? 'critical' : 'info',
         title: `Auth config mismatch: ${key}`,
         description: `"${key}" differs between source (${JSON.stringify(sv)}) and target (${JSON.stringify(tv)}).`,

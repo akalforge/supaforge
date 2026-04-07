@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { StorageLayer } from '../../src/layers/storage.js'
-import type { LayerContext } from '../../src/layers/base.js'
-import type { FetchFn } from '../../src/layers/storage.js'
+import { StorageCheck } from '../../src/checks/storage.js'
+import type { CheckContext } from '../../src/checks/base.js'
+import type { FetchFn } from '../../src/checks/storage.js'
 import type { QueryFn } from '../../src/db.js'
 
-function mockContext(): LayerContext {
+function mockContext(): CheckContext {
   return {
     source: { dbUrl: 'postgres://source', projectRef: 'src-ref', apiKey: 'src-key' },
     target: { dbUrl: 'postgres://target', projectRef: 'tgt-ref', apiKey: 'tgt-key' },
@@ -56,20 +56,20 @@ function makeQueryFn(sourcePolicies: unknown[], targetPolicies: unknown[]): Quer
 /** No-op queryFn that returns empty results (for bucket-only tests). */
 const emptyQueryFn: QueryFn = async () => [] as never
 
-describe('StorageLayer', () => {
+describe('StorageCheck', () => {
   it('returns no issues when buckets match', async () => {
     const bucket = makeBucket()
-    const layer = new StorageLayer(makeFetchFn([bucket], [bucket]), emptyQueryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new StorageCheck(makeFetchFn([bucket], [bucket]), emptyQueryFn)
+    const issues = await check.scan(mockContext())
     expect(issues).toHaveLength(0)
   })
 
   it('detects missing bucket in target', async () => {
-    const layer = new StorageLayer(makeFetchFn(
+    const check = new StorageCheck(makeFetchFn(
       [makeBucket()],
       [],
     ), emptyQueryFn)
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('warning')
@@ -84,11 +84,11 @@ describe('StorageLayer', () => {
   })
 
   it('detects extra bucket in target', async () => {
-    const layer = new StorageLayer(makeFetchFn(
+    const check = new StorageCheck(makeFetchFn(
       [],
       [makeBucket({ id: 'uploads', name: 'uploads' })],
     ), emptyQueryFn)
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('info')
@@ -101,11 +101,11 @@ describe('StorageLayer', () => {
   })
 
   it('detects critical visibility mismatch (private in source, public in target)', async () => {
-    const layer = new StorageLayer(makeFetchFn(
+    const check = new StorageCheck(makeFetchFn(
       [makeBucket({ public: false })],
       [makeBucket({ public: true })],
     ), emptyQueryFn)
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('critical')
@@ -121,22 +121,22 @@ describe('StorageLayer', () => {
   })
 
   it('detects warning visibility mismatch (public in source, private in target)', async () => {
-    const layer = new StorageLayer(makeFetchFn(
+    const check = new StorageCheck(makeFetchFn(
       [makeBucket({ public: true })],
       [makeBucket({ public: false })],
     ), emptyQueryFn)
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('warning')
   })
 
   it('detects multiple issues at once', async () => {
-    const layer = new StorageLayer(makeFetchFn(
+    const check = new StorageCheck(makeFetchFn(
       [makeBucket(), makeBucket({ id: 'docs', name: 'docs', public: true })],
       [makeBucket({ public: true }), makeBucket({ id: 'temp', name: 'temp' })],
     ), emptyQueryFn)
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     // missing docs, extra temp, visibility mismatch on avatars
     expect(issues.length).toBeGreaterThanOrEqual(3)
@@ -147,7 +147,7 @@ describe('StorageLayer', () => {
   })
 
   it('returns empty when projectRef or apiKey is missing', async () => {
-    const ctx: LayerContext = {
+    const ctx: CheckContext = {
       source: { dbUrl: 'postgres://source' },
       target: { dbUrl: 'postgres://target' },
       config: {
@@ -156,8 +156,8 @@ describe('StorageLayer', () => {
         target: 'prod',
       },
     }
-    const layer = new StorageLayer(makeFetchFn([], []), emptyQueryFn)
-    const issues = await layer.scan(ctx)
+    const check = new StorageCheck(makeFetchFn([], []), emptyQueryFn)
+    const issues = await check.scan(ctx)
     expect(issues).toHaveLength(0)
   })
 
@@ -168,8 +168,8 @@ describe('StorageLayer', () => {
       return { ok: true, json: async () => [] } as Response
     }
 
-    const layer = new StorageLayer(fetchFn, emptyQueryFn)
-    await layer.scan(mockContext())
+    const check = new StorageCheck(fetchFn, emptyQueryFn)
+    await check.scan(mockContext())
 
     expect(calls).toHaveLength(2)
     expect(calls[0].url).toContain('src-ref.supabase.co/storage/v1/bucket')
@@ -182,18 +182,18 @@ describe('StorageLayer', () => {
       return { ok: false, statusText: 'Not Found' } as Response
     }
 
-    const layer = new StorageLayer(fetchFn, emptyQueryFn)
-    await expect(layer.scan(mockContext())).rejects.toThrow('Not Found')
+    const check = new StorageCheck(fetchFn, emptyQueryFn)
+    await expect(check.scan(mockContext())).rejects.toThrow('Not Found')
   })
 
   // ── Bucket config field tests ──────────────────────────────────────────
 
   it('detects file_size_limit mismatch', async () => {
-    const layer = new StorageLayer(makeFetchFn(
+    const check = new StorageCheck(makeFetchFn(
       [makeBucket({ file_size_limit: 5242880 })],
       [makeBucket({ file_size_limit: 10485760 })],
     ), emptyQueryFn)
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].id).toBe('storage-sizelimit-avatars')
@@ -202,11 +202,11 @@ describe('StorageLayer', () => {
   })
 
   it('detects file_size_limit set vs null', async () => {
-    const layer = new StorageLayer(makeFetchFn(
+    const check = new StorageCheck(makeFetchFn(
       [makeBucket({ file_size_limit: 5242880 })],
       [makeBucket({ file_size_limit: null })],
     ), emptyQueryFn)
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     const sizeIssue = issues.find(i => i.id === 'storage-sizelimit-avatars')
     expect(sizeIssue).toBeDefined()
@@ -214,11 +214,11 @@ describe('StorageLayer', () => {
   })
 
   it('detects allowed_mime_types mismatch', async () => {
-    const layer = new StorageLayer(makeFetchFn(
+    const check = new StorageCheck(makeFetchFn(
       [makeBucket({ allowed_mime_types: ['image/png'] })],
       [makeBucket({ allowed_mime_types: ['image/png', 'image/gif'] })],
     ), emptyQueryFn)
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     const mimeIssue = issues.find(i => i.id === 'storage-mimetypes-avatars')
     expect(mimeIssue).toBeDefined()
@@ -227,22 +227,22 @@ describe('StorageLayer', () => {
   })
 
   it('treats matching mime types in different order as equal', async () => {
-    const layer = new StorageLayer(makeFetchFn(
+    const check = new StorageCheck(makeFetchFn(
       [makeBucket({ allowed_mime_types: ['image/jpeg', 'image/png'] })],
       [makeBucket({ allowed_mime_types: ['image/png', 'image/jpeg'] })],
     ), emptyQueryFn)
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     const mimeIssue = issues.find(i => i.id === 'storage-mimetypes-avatars')
     expect(mimeIssue).toBeUndefined()
   })
 
   it('detects allowed_mime_types set vs null', async () => {
-    const layer = new StorageLayer(makeFetchFn(
+    const check = new StorageCheck(makeFetchFn(
       [makeBucket({ allowed_mime_types: ['image/png'] })],
       [makeBucket({ allowed_mime_types: null })],
     ), emptyQueryFn)
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     const mimeIssue = issues.find(i => i.id === 'storage-mimetypes-avatars')
     expect(mimeIssue).toBeDefined()
@@ -251,7 +251,7 @@ describe('StorageLayer', () => {
   // ── Storage policy tests ───────────────────────────────────────────────
 
   it('detects missing storage policy', async () => {
-    const layer = new StorageLayer(
+    const check = new StorageCheck(
       makeFetchFn([], []),
       makeQueryFn([makePolicy()], []),
     )
@@ -259,7 +259,7 @@ describe('StorageLayer', () => {
     // Skip bucket scan by clearing API credentials
     ctx.source.projectRef = undefined
     ctx.target.projectRef = undefined
-    const issues = await layer.scan(ctx)
+    const issues = await check.scan(ctx)
 
     expect(issues).toHaveLength(1)
     expect(issues[0].id).toBe('storage-policy-missing-objects.allow_read')
@@ -274,14 +274,14 @@ describe('StorageLayer', () => {
   })
 
   it('detects extra storage policy', async () => {
-    const layer = new StorageLayer(
+    const check = new StorageCheck(
       makeFetchFn([], []),
       makeQueryFn([], [makePolicy()]),
     )
     const ctx = mockContext()
     ctx.source.projectRef = undefined
     ctx.target.projectRef = undefined
-    const issues = await layer.scan(ctx)
+    const issues = await check.scan(ctx)
 
     expect(issues).toHaveLength(1)
     expect(issues[0].id).toBe('storage-policy-extra-objects.allow_read')
@@ -289,7 +289,7 @@ describe('StorageLayer', () => {
   })
 
   it('detects changed storage policy', async () => {
-    const layer = new StorageLayer(
+    const check = new StorageCheck(
       makeFetchFn([], []),
       makeQueryFn(
         [makePolicy({ qual: '(auth.uid() = owner)' })],
@@ -299,7 +299,7 @@ describe('StorageLayer', () => {
     const ctx = mockContext()
     ctx.source.projectRef = undefined
     ctx.target.projectRef = undefined
-    const issues = await layer.scan(ctx)
+    const issues = await check.scan(ctx)
 
     expect(issues).toHaveLength(1)
     expect(issues[0].id).toBe('storage-policy-changed-objects.allow_read')
@@ -309,23 +309,23 @@ describe('StorageLayer', () => {
 
   it('returns no policy issues when policies match', async () => {
     const policy = makePolicy()
-    const layer = new StorageLayer(
+    const check = new StorageCheck(
       makeFetchFn([], []),
       makeQueryFn([policy], [policy]),
     )
     const ctx = mockContext()
     ctx.source.projectRef = undefined
     ctx.target.projectRef = undefined
-    const issues = await layer.scan(ctx)
+    const issues = await check.scan(ctx)
     expect(issues).toHaveLength(0)
   })
 
   it('combines bucket and policy issues', async () => {
-    const layer = new StorageLayer(
+    const check = new StorageCheck(
       makeFetchFn([makeBucket()], []),
       makeQueryFn([makePolicy()], []),
     )
-    const issues = await layer.scan(mockContext())
+    const issues = await check.scan(mockContext())
 
     // 1 missing bucket + 1 missing policy
     expect(issues).toHaveLength(2)

@@ -59,14 +59,14 @@ Open an issue with the **feature request** template. Describe the use case and h
 - **TypeScript strict mode** — no `any` unless absolutely necessary
 - **ESM only** — no CommonJS requires
 - **Extensionless imports** — do not add `.js` to import paths (tsup/Bundler handles resolution)
-- **Injectable dependencies** — layers accept `QueryFn`/`FetchFn` for testability
+- **Injectable dependencies** — checks accept `QueryFn`/`FetchFn` for testability
 - **No external state** — pure functions where possible
 
 ## Testing Guidelines
 
 - Tests live in `test/` mirroring `src/` structure
 - Use **vitest** with the standard `describe`/`it`/`expect` API
-- Layer tests should use injectable stubs — no real database connections
+- Check tests should use injectable stubs — no real database connections
 - Aim for isolated, fast, deterministic tests
 
 ## Commit Message Guidelines
@@ -74,7 +74,7 @@ Open an issue with the **feature request** template. Describe the use case and h
 Use clear, imperative commit messages:
 
 ```
-fix: handle pg_cron not installed in cron layer
+fix: handle pg_cron not installed in cron check
 feat: add --json flag to diff command
 test: add scoring edge-case tests
 docs: update README with hook examples
@@ -93,7 +93,7 @@ docs: update README with hook examples
 packages/cli/
 ├── src/
 │   ├── commands/    # oclif CLI commands
-│   ├── layers/      # 8 drift detection layers
+│   ├── checks/      # Drift detection checks
 │   ├── types/       # TypeScript interfaces
 │   ├── config.ts    # Config loader
 │   ├── hooks.ts     # HookBus

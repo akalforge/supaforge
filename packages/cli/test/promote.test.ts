@@ -7,7 +7,7 @@ function makeScanResult(overrides: Partial<ScanResult> = {}): ScanResult {
     timestamp: new Date().toISOString(),
     source: 'dev',
     target: 'prod',
-    layers: [],
+    checks: [],
     score: 100,
     summary: { total: 0, critical: 0, warning: 0, info: 0 },
     ...overrides,
@@ -29,14 +29,14 @@ describe('promote', () => {
 
   it('collects SQL statements in dry-run mode', async () => {
     const scanResult = makeScanResult({
-      layers: [
+      checks: [
         {
-          layer: 'rls',
+          check: 'rls',
           status: 'drifted',
           issues: [
             {
               id: 'rls-missing-public.users.read_policy',
-              layer: 'rls',
+              check: 'rls',
               severity: 'critical',
               title: 'Missing RLS policy',
               description: 'Policy missing in target',
@@ -59,21 +59,21 @@ describe('promote', () => {
     })
 
     expect(result.applied).toHaveLength(1)
-    expect(result.applied[0].layer).toBe('rls')
+    expect(result.applied[0].check).toBe('rls')
     expect(result.applied[0].sql).toContain('CREATE POLICY')
     expect(result.errors).toHaveLength(0)
   })
 
   it('skips issues without SQL fix', async () => {
     const scanResult = makeScanResult({
-      layers: [
+      checks: [
         {
-          layer: 'auth',
+          check: 'auth',
           status: 'drifted',
           issues: [
             {
               id: 'auth-jwt_exp',
-              layer: 'auth',
+              check: 'auth',
               severity: 'critical',
               title: 'Auth config mismatch: JWT_EXP',
               description: 'JWT_EXP differs',
@@ -97,16 +97,16 @@ describe('promote', () => {
     expect(result.skipped[0].reason).toContain('No SQL fix')
   })
 
-  it('filters by specific layers', async () => {
+  it('filters by specific checks', async () => {
     const scanResult = makeScanResult({
-      layers: [
+      checks: [
         {
-          layer: 'rls',
+          check: 'rls',
           status: 'drifted',
           issues: [
             {
               id: 'rls-missing-1',
-              layer: 'rls',
+              check: 'rls',
               severity: 'critical',
               title: 'Missing RLS',
               description: 'desc',
@@ -116,12 +116,12 @@ describe('promote', () => {
           durationMs: 10,
         },
         {
-          layer: 'cron',
+          check: 'cron',
           status: 'drifted',
           issues: [
             {
               id: 'cron-missing-1',
-              layer: 'cron',
+              check: 'cron',
               severity: 'warning',
               title: 'Missing cron',
               description: 'desc',
@@ -137,19 +137,19 @@ describe('promote', () => {
     const result = await promote({
       dbUrl: 'postgres://unused',
       scanResult,
-      layers: ['rls'],
+      checks: ['rls'],
       dryRun: true,
     })
 
     expect(result.applied).toHaveLength(1)
-    expect(result.applied[0].layer).toBe('rls')
+    expect(result.applied[0].check).toBe('rls')
   })
 
-  it('skips clean layers', async () => {
+  it('skips clean checks', async () => {
     const scanResult = makeScanResult({
-      layers: [
+      checks: [
         {
-          layer: 'rls',
+          check: 'rls',
           status: 'clean',
           issues: [],
           durationMs: 10,

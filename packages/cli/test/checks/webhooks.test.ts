@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest'
-import { WebhooksLayer } from '../../src/layers/webhooks.js'
-import type { LayerContext } from '../../src/layers/base.js'
+import { WebhooksCheck } from '../../src/checks/webhooks.js'
+import type { CheckContext } from '../../src/checks/base.js'
 import type { QueryFn } from '../../src/db.js'
 
-function mockContext(): LayerContext {
+function mockContext(): CheckContext {
   return {
     source: { dbUrl: 'postgres://source' },
     target: { dbUrl: 'postgres://target' },
@@ -36,7 +36,7 @@ const makeHookWithTrigger = (overrides: Record<string, unknown> = {}) => ({
   ...overrides,
 })
 
-describe('WebhooksLayer', () => {
+describe('WebhooksCheck', () => {
   it('returns no issues when hooks and extensions match', async () => {
     const hook = makeHook()
     const queryFn: QueryFn = async (_dbUrl, sql) => {
@@ -44,8 +44,8 @@ describe('WebhooksLayer', () => {
       return [hook]
     }
 
-    const layer = new WebhooksLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
     expect(issues).toHaveLength(0)
   })
 
@@ -57,8 +57,8 @@ describe('WebhooksLayer', () => {
       return []
     }
 
-    const layer = new WebhooksLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     const pgNetIssue = issues.find(i => i.id === 'webhooks-pgnet-missing')
     expect(pgNetIssue).toBeDefined()
@@ -74,8 +74,8 @@ describe('WebhooksLayer', () => {
       return []
     }
 
-    const layer = new WebhooksLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('warning')
@@ -92,8 +92,8 @@ describe('WebhooksLayer', () => {
       return []
     }
 
-    const layer = new WebhooksLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('info')
@@ -111,8 +111,8 @@ describe('WebhooksLayer', () => {
       return []
     }
 
-    const layer = new WebhooksLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(2)
     const ids = issues.map(i => i.id)
@@ -126,8 +126,8 @@ describe('WebhooksLayer', () => {
       throw new Error('relation "supabase_functions.hooks" does not exist')
     }
 
-    const layer = new WebhooksLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
     expect(issues).toHaveLength(0)
   })
 
@@ -137,8 +137,8 @@ describe('WebhooksLayer', () => {
       return []
     }
 
-    const layer = new WebhooksLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
     // Both pg_net checks fail → false/false → no pg_net issue
     expect(issues).toHaveLength(0)
   })
@@ -155,8 +155,8 @@ describe('WebhooksLayer', () => {
       return []
     }
 
-    const layer = new WebhooksLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(2)
     expect(issues[0].id).toBe('webhooks-missing-hook_a')
@@ -169,8 +169,8 @@ describe('WebhooksLayer', () => {
       return []
     }
 
-    const layer = new WebhooksLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
     expect(issues).toHaveLength(0)
   })
 
@@ -183,8 +183,8 @@ describe('WebhooksLayer', () => {
       return []
     }
 
-    const layer = new WebhooksLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].sql).toBeDefined()
@@ -205,8 +205,8 @@ describe('WebhooksLayer', () => {
       return []
     }
 
-    const layer = new WebhooksLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].sql).toBeDefined()
@@ -223,8 +223,8 @@ describe('WebhooksLayer', () => {
       return []
     }
 
-    const layer = new WebhooksLayer(queryFn)
-    const issues = await layer.scan(mockContext())
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
 
     expect(issues[0].description).toContain('public.users')
     expect(issues[0].description).toContain('INSERT OR UPDATE')

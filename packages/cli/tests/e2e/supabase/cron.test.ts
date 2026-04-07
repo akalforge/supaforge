@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeAll } from 'vitest'
 import { scan } from '../../../src/scanner'
 import { promote } from '../../../src/promote'
-import { createDefaultRegistry } from '../../../src/layers/index'
+import { createDefaultRegistry } from '../../../src/checks/index'
 import type { SupaForgeConfig } from '../../../src/types/config'
 import type { ScanResult } from '../../../src/types/drift'
 import { shouldSkip, buildConfig } from './helpers'
@@ -22,11 +22,11 @@ describe('e2e: cron layer', () => {
     config = buildConfig()
 
     const registry = createDefaultRegistry()
-    initialScan = await scan(registry, { config, layers: ['cron'] })
+    initialScan = await scan(registry, { config, checks: ['cron'] })
   })
 
   it.skipIf(shouldSkip())('should detect missing weekly_digest job', () => {
-    const cron = initialScan.layers.find(l => l.layer === 'cron')!
+    const cron = initialScan.checks.find(l => l.check === 'cron')!
     expect(cron.status).toBe('drifted')
 
     const missing = cron.issues.find(i => i.id.includes('weekly_digest'))
@@ -37,7 +37,7 @@ describe('e2e: cron layer', () => {
   })
 
   it.skipIf(shouldSkip())('should detect modified cleanup_sessions schedule', () => {
-    const cron = initialScan.layers.find(l => l.layer === 'cron')!
+    const cron = initialScan.checks.find(l => l.check === 'cron')!
 
     const modified = cron.issues.find(i => i.id.includes('cleanup_sessions'))
     expect(modified).toBeDefined()
@@ -50,7 +50,7 @@ describe('e2e: cron layer', () => {
     const promoteResult = await promote({
       dbUrl: process.env.SUPAFORGE_E2E_TARGET_DB_URL!,
       scanResult: initialScan,
-      layers: ['cron'],
+      checks: ['cron'],
     })
 
     expect(promoteResult.errors, JSON.stringify(promoteResult.errors)).toHaveLength(0)
@@ -58,8 +58,8 @@ describe('e2e: cron layer', () => {
 
     // Re-scan: cron drift should be resolved
     const registry = createDefaultRegistry()
-    const rescan = await scan(registry, { config, layers: ['cron'] })
-    const cronResult = rescan.layers.find(l => l.layer === 'cron')!
+    const rescan = await scan(registry, { config, checks: ['cron'] })
+    const cronResult = rescan.checks.find(l => l.check === 'cron')!
 
     // Missing weekly_digest should now exist
     const missingDigest = cronResult.issues.find(i => i.id.includes('weekly_digest') && i.title.includes('Missing'))

@@ -1,6 +1,6 @@
 # supaforge
 
-> Detect and fix drift across all your Supabase environments — the environment sync tool Supabase developers have been asking for.
+> Diff and sync your Supabase environments.
 
 Built by [Akal Forge](https://github.com/akalforge). Powered by [oclif](https://oclif.io).
 

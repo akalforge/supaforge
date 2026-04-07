@@ -3,7 +3,7 @@ set -euo pipefail
 
 # SupaForge E2E test runner — two real Supabase local instances.
 #
-# Requires: Supabase CLI (npx supabase), Docker (or Podman with docker compat), psql, curl.
+# Requires: Supabase CLI (supabase binary or npx), Docker (or Podman with docker compat), psql, curl.
 #
 # Usage:
 #   ./scripts/test-e2e.sh               # full run
@@ -20,6 +20,13 @@ SEED_TARGET="$CLI_DIR/tests/e2e/fixtures/seed-target.sql"
 
 # Services to exclude from Supabase start (studio, imgproxy etc. not needed for testing)
 EXCLUDE="imgproxy"
+
+# Resolve Supabase CLI: prefer binary in PATH, fall back to npx
+if command -v supabase &>/dev/null; then
+  SUPABASE="supabase"
+else
+  SUPABASE="npx supabase"
+fi
 
 # ─── Podman socket compat ────────────────────────────────────────────────────
 # If Docker is not available but Podman is, export DOCKER_HOST so the Supabase
@@ -46,8 +53,8 @@ done
 check_deps() {
   local missing=()
 
-  if ! npx supabase --version &>/dev/null 2>&1; then
-    missing+=("supabase (install: npm i -g supabase)")
+  if ! $SUPABASE --version &>/dev/null 2>&1; then
+    missing+=("supabase (install: https://supabase.com/docs/guides/cli)")
   fi
 
   if ! command -v docker &>/dev/null && ! command -v podman &>/dev/null; then
@@ -79,7 +86,7 @@ check_deps
 parse_status() {
   local dir="$1"
   local key="$2"
-  cd "$dir" && npx supabase status -o env 2>/dev/null | grep "^${key}=" | head -1 | sed "s/^${key}=//" | tr -d '"'
+  cd "$dir" && $SUPABASE status -o env 2>/dev/null | grep "^${key}=" | head -1 | sed "s/^${key}=//" | tr -d '"'
 }
 
 wait_for_pg() {
@@ -153,15 +160,15 @@ cleanup() {
     echo ""
     echo "🔒 --no-teardown: instances left running"
     echo "   Stop with:"
-    echo "     cd $SOURCE_PROJECT && npx supabase stop --no-backup"
-    echo "     cd $TARGET_PROJECT && npx supabase stop --no-backup"
+    echo "     cd $SOURCE_PROJECT && supabase stop --no-backup"
+    echo "     cd $TARGET_PROJECT && supabase stop --no-backup"
     return 0
   fi
 
   echo ""
   echo "🧹 Tearing down Supabase instances..."
-  (cd "$SOURCE_PROJECT" && npx supabase stop --no-backup 2>/dev/null) || true
-  (cd "$TARGET_PROJECT" && npx supabase stop --no-backup 2>/dev/null) || true
+  (cd "$SOURCE_PROJECT" && $SUPABASE stop --no-backup 2>/dev/null) || true
+  (cd "$TARGET_PROJECT" && $SUPABASE stop --no-backup 2>/dev/null) || true
 }
 
 trap cleanup EXIT
@@ -170,11 +177,11 @@ trap cleanup EXIT
 
 if [[ "$SKIP_START" == "false" ]]; then
   echo "🚀 Starting source Supabase instance (port 54321/54322)..."
-  (cd "$SOURCE_PROJECT" && npx supabase start --exclude "$EXCLUDE")
+  (cd "$SOURCE_PROJECT" && $SUPABASE start --exclude "$EXCLUDE")
 
   echo ""
   echo "🚀 Starting target Supabase instance (port 55321/55322)..."
-  (cd "$TARGET_PROJECT" && npx supabase start --exclude "$EXCLUDE")
+  (cd "$TARGET_PROJECT" && $SUPABASE start --exclude "$EXCLUDE")
 else
   echo "⏭️  --skip-start: reusing running instances"
 fi

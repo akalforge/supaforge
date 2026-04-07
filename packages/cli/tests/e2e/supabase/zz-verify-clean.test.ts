@@ -12,7 +12,7 @@ import type { SupaForgeConfig } from '../../../src/types/config'
 import type { ScanResult, CheckName } from '../../../src/types/drift'
 import { shouldSkip, buildConfig } from './helpers'
 
-const TESTABLE_CHECKS: CheckName[] = ['rls', 'cron', 'webhooks', 'storage']
+const TESTABLE_CHECKS: CheckName[] = ['rls', 'cron', 'webhooks', 'storage', 'extensions', 'realtime', 'vault']
 
 describe('e2e: post-promote verification', () => {
   let config: SupaForgeConfig

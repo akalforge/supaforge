@@ -3,7 +3,7 @@ import { loadConfig, validateSingleEnvConfig } from '../config'
 import { captureSnapshot, listSnapshots } from '../snapshot'
 
 export default class Snapshot extends Command {
-  static override description = 'Capture a full snapshot of a single Supabase environment (all layers)'
+  static override description = 'Capture a full snapshot of a single Supabase environment (all checks)'
 
   static override examples = [
     '<%= config.bin %> snapshot --env=production',

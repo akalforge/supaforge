@@ -39,7 +39,7 @@ export interface CreateBranchOptions {
   schemaOnly?: boolean
   /** Working directory for .supaforge/ metadata. */
   cwd?: string
-  /** Capture a full-layer snapshot alongside the DB clone. */
+  /** Capture a full snapshot alongside the DB clone. */
   env?: EnvironmentConfig
   /** Config needed for snapshot (ignore schemas, data tables, etc.). */
   config?: SupaForgeConfig

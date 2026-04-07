@@ -44,9 +44,15 @@ const IGNORE_SCHEMAS = [
   'storage',
 ]
 
+/** Options for building E2E config. */
+export interface BuildConfigOptions {
+  /** Tables to include in the data check (e.g. ['plans']). */
+  dataTables?: string[]
+}
+
 /** Build SupaForgeConfig from environment variables. */
-export function buildConfig(): SupaForgeConfig {
-  return {
+export function buildConfig(opts?: BuildConfigOptions): SupaForgeConfig {
+  const config: SupaForgeConfig = {
     environments: {
       source: {
         dbUrl: process.env.SUPAFORGE_E2E_SOURCE_DB_URL!,
@@ -63,4 +69,10 @@ export function buildConfig(): SupaForgeConfig {
     target: 'target',
     ignoreSchemas: IGNORE_SCHEMAS,
   }
+
+  if (opts?.dataTables?.length) {
+    config.checks = { data: { tables: opts.dataTables } }
+  }
+
+  return config
 }

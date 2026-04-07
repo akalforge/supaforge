@@ -3,7 +3,7 @@ import { loadConfig, validateSingleEnvConfig } from '../../config'
 import { createBranch } from '../../branch'
 
 export default class BranchCreate extends Command {
-  static override description = 'Create a database branch by copying an environment (with full-layer snapshot)'
+  static override description = 'Create a database branch by copying an environment (with full snapshot)'
 
   static override examples = [
     '<%= config.bin %> branch create feature-x --apply',

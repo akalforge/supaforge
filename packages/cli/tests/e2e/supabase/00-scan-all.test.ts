@@ -4,7 +4,7 @@
  * Runs FIRST (alphabetically) before individual layer tests promote fixes.
  * Validates that all testable layers detect drift without errors.
  *
- * Note: schema + data layers depend on @dbdiff/cli (tested separately).
+ * Note: schema + data layers depend on @dbdiff/cli (tested separately in 04-data.test.ts).
  *       edge-functions + auth layers require Management API (cloud-only, tested via unit tests).
  */
 import { describe, it, expect, beforeAll } from 'vitest'
@@ -16,7 +16,7 @@ import type { ScanResult, CheckName } from '../../../src/types/drift'
 import { shouldSkip, buildConfig } from './helpers'
 
 /** Checks testable against local Supabase (no Management API needed). */
-const TESTABLE_CHECKS: CheckName[] = ['rls', 'cron', 'webhooks', 'storage']
+const TESTABLE_CHECKS: CheckName[] = ['rls', 'cron', 'webhooks', 'storage', 'extensions', 'realtime', 'vault']
 
 describe('e2e: full multi-layer scan', () => {
   let config: SupaForgeConfig
@@ -37,11 +37,12 @@ describe('e2e: full multi-layer scan', () => {
 
   it.skipIf(shouldSkip())('should detect drift across multiple layers', () => {
     const driftedChecks = initialScan.checks.filter(l => l.status === 'drifted')
-    expect(driftedChecks.length).toBeGreaterThanOrEqual(3)
+    // Extensions, realtime, vault, rls, cron, webhooks, storage should all be drifted
+    expect(driftedChecks.length).toBeGreaterThanOrEqual(5)
 
     // Score should reflect issues
     expect(initialScan.score).toBeLessThan(100)
-    expect(initialScan.summary.total).toBeGreaterThanOrEqual(5)
+    expect(initialScan.summary.total).toBeGreaterThanOrEqual(8)
     expect(initialScan.summary.critical).toBeGreaterThanOrEqual(1)
   })
 

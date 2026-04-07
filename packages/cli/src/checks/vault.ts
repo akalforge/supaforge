@@ -52,14 +52,27 @@ export class VaultCheck extends Check {
     try {
       return await this.queryFn(dbUrl, VAULT_SQL) as unknown as VaultSecret[]
     } catch {
-      // supabase_vault extension may not be installed
-      return []
+      // unique_name column may not exist in older supabase_vault versions
+      try {
+        const rows = await this.queryFn(dbUrl, VAULT_SQL_FALLBACK) as unknown as VaultSecret[]
+        return rows.map(r => ({ ...r, unique_name: null }))
+      } catch {
+        // supabase_vault extension may not be installed
+        return []
+      }
     }
   }
 }
 
 const VAULT_SQL = `
   SELECT id, name, description, secret, unique_name, nonce, key_id,
+         created_at::text, updated_at::text
+  FROM vault.secrets
+  ORDER BY name, id
+`
+
+const VAULT_SQL_FALLBACK = `
+  SELECT id, name, description, secret, nonce, key_id,
          created_at::text, updated_at::text
   FROM vault.secrets
   ORDER BY name, id
@@ -85,7 +98,7 @@ export function diffVaultSecrets(source: VaultSecret[], target: VaultSecret[]): 
         description: `Secret "${key}" exists in source but not in target. The secret value cannot be auto-synced — it must be recreated manually in the target environment.`,
         sourceValue: { name: s.name, description: s.description, unique_name: s.unique_name },
         sql: {
-          up: `SELECT vault.create_secret('PLACEHOLDER_VALUE'${s.unique_name ? `, '${escapeSql(s.unique_name)}'` : ''}${s.description ? `, '${escapeSql(s.description)}'` : ''});`,
+          up: `SELECT vault.create_secret('PLACEHOLDER_VALUE', '${escapeSql(s.unique_name ?? s.name)}'${s.description ? `, '${escapeSql(s.description)}'` : ''});`,
           down: `-- Remove secret "${key}" from target (manual action required)`,
         },
       })

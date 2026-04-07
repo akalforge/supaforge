@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeAll } from 'vitest'
 import { scan } from '../../../src/scanner'
 import { promote } from '../../../src/promote'
-import { createDefaultRegistry } from '../../../src/layers/index'
+import { createDefaultRegistry } from '../../../src/checks/index'
 import type { SupaForgeConfig } from '../../../src/types/config'
 import type { ScanResult } from '../../../src/types/drift'
 import { shouldSkip, buildConfig } from './helpers'
@@ -24,17 +24,17 @@ describe('e2e: storage layer', () => {
     config = buildConfig()
 
     const registry = createDefaultRegistry()
-    initialScan = await scan(registry, { config, layers: ['storage'] })
+    initialScan = await scan(registry, { config, checks: ['storage'] })
   })
 
   it.skipIf(shouldSkip())('should detect storage drift', () => {
-    const storage = initialScan.layers.find(l => l.layer === 'storage')!
+    const storage = initialScan.checks.find(l => l.check === 'storage')!
     expect(storage.status).toBe('drifted')
     expect(storage.issues.length).toBeGreaterThanOrEqual(1)
   })
 
   it.skipIf(shouldSkip())('should detect missing documents bucket', () => {
-    const storage = initialScan.layers.find(l => l.layer === 'storage')!
+    const storage = initialScan.checks.find(l => l.check === 'storage')!
     const missing = storage.issues.find(i => i.id.includes('storage-missing-documents'))
     expect(missing).toBeDefined()
     expect(missing!.title).toContain('Missing bucket')
@@ -45,7 +45,7 @@ describe('e2e: storage layer', () => {
   })
 
   it.skipIf(shouldSkip())('should detect extra backups bucket', () => {
-    const storage = initialScan.layers.find(l => l.layer === 'storage')!
+    const storage = initialScan.checks.find(l => l.check === 'storage')!
     const extra = storage.issues.find(i => i.id.includes('storage-extra-backups'))
     expect(extra).toBeDefined()
     expect(extra!.title).toContain('Extra bucket')
@@ -54,15 +54,15 @@ describe('e2e: storage layer', () => {
   })
 
   it.skipIf(shouldSkip())('should detect avatars visibility mismatch', () => {
-    const storage = initialScan.layers.find(l => l.layer === 'storage')!
+    const storage = initialScan.checks.find(l => l.check === 'storage')!
     const visibility = storage.issues.find(i => i.id.includes('storage-visibility-avatars'))
     expect(visibility).toBeDefined()
     expect(visibility!.title).toContain('visibility mismatch')
   })
 
   it.skipIf(shouldSkip())('should detect missing storage policy', () => {
-    const storage = initialScan.layers.find(l => l.layer === 'storage')!
-    // Storage policies are RLS on storage.objects — the storage layer diffs them
+    const storage = initialScan.checks.find(l => l.check === 'storage')!
+    // Storage policies are RLS on storage.objects — the storage check diffs them
     const missingPolicy = storage.issues.find(i =>
       i.id.includes('avatars_insert') && i.sql?.up,
     )
@@ -77,7 +77,7 @@ describe('e2e: storage layer', () => {
     const promoteResult = await promote({
       dbUrl: process.env.SUPAFORGE_E2E_TARGET_DB_URL!,
       scanResult: initialScan,
-      layers: ['storage'],
+      checks: ['storage'],
     })
 
     expect(promoteResult.errors, JSON.stringify(promoteResult.errors)).toHaveLength(0)
@@ -85,8 +85,8 @@ describe('e2e: storage layer', () => {
 
     // Re-scan: bucket + policy drift should be reduced
     const registry = createDefaultRegistry()
-    const rescan = await scan(registry, { config, layers: ['storage'] })
-    const storageResult = rescan.layers.find(l => l.layer === 'storage')!
+    const rescan = await scan(registry, { config, checks: ['storage'] })
+    const storageResult = rescan.checks.find(l => l.check === 'storage')!
 
     // Missing documents bucket should be created
     const missingDocs = storageResult.issues.find(i => i.id.includes('storage-missing-documents'))

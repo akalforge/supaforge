@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeAll } from 'vitest'
 import { scan } from '../../../src/scanner'
 import { promote } from '../../../src/promote'
-import { createDefaultRegistry } from '../../../src/layers/index'
+import { createDefaultRegistry } from '../../../src/checks/index'
 import type { SupaForgeConfig } from '../../../src/types/config'
 import type { ScanResult } from '../../../src/types/drift'
 import { shouldSkip, buildConfig } from './helpers'
@@ -23,11 +23,11 @@ describe('e2e: webhooks layer', () => {
     config = buildConfig()
 
     const registry = createDefaultRegistry()
-    initialScan = await scan(registry, { config, layers: ['webhooks'] })
+    initialScan = await scan(registry, { config, checks: ['webhooks'] })
   })
 
   it.skipIf(shouldSkip())('should detect pg_net extension status in target', () => {
-    const webhooks = initialScan.layers.find(l => l.layer === 'webhooks')!
+    const webhooks = initialScan.checks.find(l => l.check === 'webhooks')!
     expect(webhooks.status).toBe('drifted')
 
     const pgnet = webhooks.issues.find(i => i.id === 'webhooks-pgnet-missing')
@@ -40,7 +40,7 @@ describe('e2e: webhooks layer', () => {
   })
 
   it.skipIf(shouldSkip())('should detect missing on_payment_received webhook', () => {
-    const webhooks = initialScan.layers.find(l => l.layer === 'webhooks')!
+    const webhooks = initialScan.checks.find(l => l.check === 'webhooks')!
 
     const missing = webhooks.issues.find(i => i.id.includes('on_payment_received'))
     expect(missing).toBeDefined()
@@ -50,7 +50,7 @@ describe('e2e: webhooks layer', () => {
   })
 
   it.skipIf(shouldSkip())('should detect extra on_invoice_sent webhook', () => {
-    const webhooks = initialScan.layers.find(l => l.layer === 'webhooks')!
+    const webhooks = initialScan.checks.find(l => l.check === 'webhooks')!
 
     const extra = webhooks.issues.find(i => i.id.includes('on_invoice_sent'))
     expect(extra).toBeDefined()
@@ -63,7 +63,7 @@ describe('e2e: webhooks layer', () => {
     const promoteResult = await promote({
       dbUrl: process.env.SUPAFORGE_E2E_TARGET_DB_URL!,
       scanResult: initialScan,
-      layers: ['webhooks'],
+      checks: ['webhooks'],
     })
 
     expect(promoteResult.errors, JSON.stringify(promoteResult.errors)).toHaveLength(0)
@@ -74,8 +74,8 @@ describe('e2e: webhooks layer', () => {
 
     // Re-scan: pg_net should now be installed
     const registry = createDefaultRegistry()
-    const rescan = await scan(registry, { config, layers: ['webhooks'] })
-    const webhooksResult = rescan.layers.find(l => l.layer === 'webhooks')!
+    const rescan = await scan(registry, { config, checks: ['webhooks'] })
+    const webhooksResult = rescan.checks.find(l => l.check === 'webhooks')!
 
     const pgnetMissing = webhooksResult.issues.find(i => i.id === 'webhooks-pgnet-missing')
     expect(pgnetMissing).toBeUndefined()

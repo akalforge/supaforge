@@ -8,7 +8,7 @@
 import { describe, it, expect, beforeAll } from 'vitest'
 import { scan } from '../../../src/scanner'
 import { promote } from '../../../src/promote'
-import { createDefaultRegistry } from '../../../src/layers/index'
+import { createDefaultRegistry } from '../../../src/checks/index'
 import type { SupaForgeConfig } from '../../../src/types/config'
 import type { ScanResult } from '../../../src/types/drift'
 import { shouldSkip, buildConfig } from './helpers'
@@ -22,11 +22,11 @@ describe('e2e: RLS layer', () => {
     config = buildConfig()
 
     const registry = createDefaultRegistry()
-    initialScan = await scan(registry, { config, layers: ['rls'] })
+    initialScan = await scan(registry, { config, checks: ['rls'] })
   })
 
   it.skipIf(shouldSkip())('should detect missing posts_insert_own policy', () => {
-    const rls = initialScan.layers.find(l => l.layer === 'rls')!
+    const rls = initialScan.checks.find(l => l.check === 'rls')!
     expect(rls.status).toBe('drifted')
 
     const missing = rls.issues.find(i => i.id.includes('posts_insert_own'))
@@ -37,7 +37,7 @@ describe('e2e: RLS layer', () => {
   })
 
   it.skipIf(shouldSkip())('should detect modified users_select_own policy', () => {
-    const rls = initialScan.layers.find(l => l.layer === 'rls')!
+    const rls = initialScan.checks.find(l => l.check === 'rls')!
 
     const modified = rls.issues.find(i => i.id.includes('users_select_own'))
     expect(modified).toBeDefined()
@@ -50,7 +50,7 @@ describe('e2e: RLS layer', () => {
     const result = await promote({
       dbUrl: process.env.SUPAFORGE_E2E_TARGET_DB_URL!,
       scanResult: initialScan,
-      layers: ['rls'],
+      checks: ['rls'],
       dryRun: true,
     })
 
@@ -59,15 +59,15 @@ describe('e2e: RLS layer', () => {
 
     // Verify nothing changed
     const registry = createDefaultRegistry()
-    const rescan = await scan(registry, { config, layers: ['rls'] })
-    expect(rescan.layers[0].issues.length).toBe(initialScan.layers[0].issues.length)
+    const rescan = await scan(registry, { config, checks: ['rls'] })
+    expect(rescan.checks[0].issues.length).toBe(initialScan.checks[0].issues.length)
   })
 
   it.skipIf(shouldSkip())('should promote RLS fixes and resolve drift', async () => {
     const promoteResult = await promote({
       dbUrl: process.env.SUPAFORGE_E2E_TARGET_DB_URL!,
       scanResult: initialScan,
-      layers: ['rls'],
+      checks: ['rls'],
     })
 
     expect(promoteResult.errors, JSON.stringify(promoteResult.errors)).toHaveLength(0)
@@ -75,8 +75,8 @@ describe('e2e: RLS layer', () => {
 
     // Re-scan: drift should be resolved
     const registry = createDefaultRegistry()
-    const rescan = await scan(registry, { config, layers: ['rls'] })
-    const rlsResult = rescan.layers.find(l => l.layer === 'rls')!
+    const rescan = await scan(registry, { config, checks: ['rls'] })
+    const rlsResult = rescan.checks.find(l => l.check === 'rls')!
 
     // Missing posts_insert_own should now exist
     const missingInsert = rlsResult.issues.find(

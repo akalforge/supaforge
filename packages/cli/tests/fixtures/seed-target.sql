@@ -5,13 +5,16 @@
 --
 -- Differences from source:
 -- 1. Schema: Missing "bio" column on users table (detected by @dbdiff/cli)
--- 2. Schema: Missing idx_posts_published partial index (detected by @dbdiff/cli)
--- 3. RLS: Missing "posts_insert_own" policy (CVE-2025-48757 pattern)
--- 4. RLS: Modified "users_select_own" USING expression (auth.uid()=id → true)
--- 5. Cron: Missing "weekly_digest" job, modified "cleanup_sessions" schedule
--- 6. Webhooks: Missing "on_payment_received", extra "on_invoice_sent"
--- 7. Reference data: Missing "Enterprise" plan, different "Pro" price
--- 8. Storage: Missing "storage_objects_insert_own" policy, modified select policy
+-- 2. Schema: Missing "current_mood" column on users table (enum-typed column)
+-- 3. Schema: Missing idx_posts_published partial index (detected by @dbdiff/cli)
+-- 4. Enum: Missing "mood" enum type entirely
+-- 5. Enum: "post_status" missing 'archived' value (ALTER TYPE ... ADD VALUE)
+-- 6. RLS: Missing "posts_insert_own" policy (CVE-2025-48757 pattern)
+-- 7. RLS: Modified "users_select_own" USING expression (auth.uid()=id → true)
+-- 8. Cron: Missing "weekly_digest" job, modified "cleanup_sessions" schedule
+-- 9. Webhooks: Missing "on_payment_received", extra "on_invoice_sent"
+-- 10. Reference data: Missing "Enterprise" plan, different "Pro" price
+-- 11. Storage: Missing "storage_objects_insert_own" policy, modified select policy
 
 BEGIN;
 
@@ -28,6 +31,11 @@ DROP SCHEMA IF EXISTS storage CASCADE;
 -- === Extensions ===
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp" SCHEMA public;
 -- NOTE: pg_net intentionally NOT installed in target
+
+-- === Enum types (DRIFTED) ===
+-- DRIFT: "mood" enum is MISSING entirely
+-- DRIFT: "post_status" exists but is missing the 'archived' value
+CREATE TYPE public.post_status AS ENUM ('draft', 'published');
 
 -- === Supabase-compatibility stubs (plain Postgres) ===
 CREATE SCHEMA IF NOT EXISTS auth;
@@ -54,6 +62,7 @@ CREATE TABLE public.posts (
     title       TEXT NOT NULL,
     body        TEXT,
     published   BOOLEAN DEFAULT false,
+    status      public.post_status DEFAULT 'draft',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );

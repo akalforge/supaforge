@@ -19,6 +19,10 @@ DROP SCHEMA IF EXISTS storage CASCADE;
 -- === Extensions ===
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp" SCHEMA public;
 
+-- === Enum types (source has enums that target lacks) ===
+CREATE TYPE public.mood AS ENUM ('happy', 'sad', 'neutral');
+CREATE TYPE public.post_status AS ENUM ('draft', 'published', 'archived');
+
 -- === Supabase-compatibility stubs (plain Postgres) ===
 CREATE SCHEMA IF NOT EXISTS auth;
 CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid AS $$
@@ -35,6 +39,7 @@ CREATE TABLE public.users (
     full_name   TEXT,
     bio         TEXT,
     avatar_url  TEXT,
+    current_mood public.mood DEFAULT 'neutral',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -45,6 +50,7 @@ CREATE TABLE public.posts (
     title       TEXT NOT NULL,
     body        TEXT,
     published   BOOLEAN DEFAULT false,
+    status      public.post_status DEFAULT 'draft',
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );

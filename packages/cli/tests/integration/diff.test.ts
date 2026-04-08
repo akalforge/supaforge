@@ -52,6 +52,23 @@ describe('integration: diff (detailed scan)', () => {
     expect(withSql.length).toBeGreaterThanOrEqual(1)
   })
 
+  it.skipIf(skipIfNoContainers())('should produce enum diff with CREATE TYPE and DROP+CREATE SQL', () => {
+    const schema = result.checks.find(l => l.check === 'schema')!
+
+    // Missing mood enum → CREATE TYPE in UP
+    const createMood = schema.issues.find(i => i.sql?.up.match(/CREATE TYPE.*mood/i))
+    expect(createMood).toBeDefined()
+    expect(createMood!.sql!.up).toMatch(/CREATE TYPE.*mood.*ENUM/i)
+
+    // post_status missing 'archived' → dbdiff recreates via DROP + CREATE
+    const postStatusIssues = schema.issues.filter(i =>
+      i.sql?.up.match(/post_status/i),
+    )
+    expect(postStatusIssues.length).toBeGreaterThanOrEqual(1)
+    const allUp = postStatusIssues.map(i => i.sql!.up).join('\n')
+    expect(allUp).toMatch(/post_status/i)
+  })
+
   it.skipIf(skipIfNoContainers())('should produce data diff', () => {
     const data = result.checks.find(l => l.check === 'data')!
     // Data check should detect plan differences if configured

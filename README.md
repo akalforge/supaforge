@@ -3,7 +3,7 @@
 > Diff and sync your Supabase environments.
 
 [![CI](https://github.com/akalforge/supaforge/actions/workflows/ci.yml/badge.svg)](https://github.com/akalforge/supaforge/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/supaforge.svg)](https://www.npmjs.com/package/supaforge)
+[![npm version](https://img.shields.io/npm/v/@akalforge/supaforge.svg)](https://www.npmjs.com/package/@akalforge/supaforge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 ---
@@ -19,7 +19,7 @@ Built by **[Akal Forge](https://github.com/akalforge)** — precision developer 
 ## Quick Start
 
 ```bash
-npm install -g supaforge
+npm install -g @akalforge/supaforge
 
 # Create config
 cat > supaforge.config.json << 'EOF'
@@ -161,7 +161,7 @@ Supabase internal schemas (`auth`, `storage`, `realtime`, `vault`, etc.) are ign
 SupaForge includes a lightweight hook bus for extensibility:
 
 ```typescript
-import { HookBus, scan, createDefaultRegistry, loadConfig } from 'supaforge'
+import { HookBus, scan, createDefaultRegistry, loadConfig } from '@akalforge/supaforge'
 
 const bus = new HookBus()
 

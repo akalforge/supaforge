@@ -7,7 +7,7 @@ Built by [Akal Forge](https://github.com/akalforge). Powered by [oclif](https://
 ## Quick Start
 
 ```bash
-npm install -g supaforge
+npm install -g @akalforge/supaforge
 
 # Create config
 cat > supaforge.config.json << 'EOF'
@@ -204,7 +204,7 @@ Supabase internal schemas (`auth`, `storage`, `realtime`, `vault`, etc.) are ign
 SupaForge includes a lightweight hook bus for extensibility:
 
 ```typescript
-import { HookBus, scan, createDefaultRegistry, loadConfig } from 'supaforge'
+import { HookBus, scan, createDefaultRegistry, loadConfig } from '@akalforge/supaforge'
 
 const bus = new HookBus()
 

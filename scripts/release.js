@@ -17,7 +17,7 @@ const preidFlag = process.argv.find(a => a.startsWith('--preid='));
 const DEFAULT_PREID = 'rc';
 const preid = preidFlag ? preidFlag.split('=')[1] : DEFAULT_PREID;
 
-const BUMP_TYPES = ['major', 'minor', 'patch', 'premajor', 'preminor', 'prepatch', 'prerelease'];
+const BUMP_TYPES = ['major', 'minor', 'patch', 'premajor', 'preminor', 'prepatch', 'prerelease', 'tag'];
 
 function runCommand(command) {
   try {
@@ -70,6 +70,7 @@ function computeVersion(currentVersion) {
         if (v.preTag === preid) return formatSemver({ ...v, preNum: v.preNum + 1 });
         return formatSemver({ major: v.major, minor: v.minor, patch: v.patch + 1, preTag: preid, preNum: 1 });
       }
+      case 'tag': return currentVersion; // no bump, just tag
     }
   }
   // Explicit version string (e.g. "1.0.0-rc.1")
@@ -102,8 +103,11 @@ if (isDryRun) {
 }
 
 // Apply
-writeVersion(newVersion);
-console.log(`Updated ${pkgPath} to v${newVersion}`);
+const isTagOnly = versionType === 'tag' || newVersion === pkg.version;
+if (!isTagOnly) {
+  writeVersion(newVersion);
+  console.log(`Updated ${pkgPath} to v${newVersion}`);
+}
 
 // Git workflow
 runCommand('git add .');
@@ -111,7 +115,8 @@ runCommand('git add .');
 // Check if there are changes to commit
 try {
   execSync('git diff --staged --quiet', { encoding: 'utf8' });
-  console.log('No version changes detected (already at this version)');
+  if (isTagOnly) console.log(`Tagging current version ${newVersion} (no version bump)`);
+  else console.log('No version changes detected (already at this version)');
 } catch (_e) {
   runCommand(`git commit -m "chore: release ${tagName}"`);
   runCommand('git push origin main');

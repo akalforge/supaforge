@@ -30,8 +30,24 @@ describe('integration: full scan', () => {
     const schema = result.checks.find(l => l.check === 'schema')!
     expect(schema).toBeDefined()
     expect(schema.status).toBe('drifted')
-    // The bio column and idx_posts_published index are missing from target
+    // The bio column, current_mood column, idx_posts_published index, and enum types are missing from target
     expect(schema.issues.length).toBeGreaterThanOrEqual(1)
+  })
+
+  it.skipIf(skipIfNoContainers())('should detect enum type drift', () => {
+    const schema = result.checks.find(l => l.check === 'schema')!
+
+    // Missing mood enum → create-type issue
+    const missingMood = schema.issues.find(i => i.title.includes('mood'))
+    expect(missingMood).toBeDefined()
+    expect(missingMood!.sql?.up).toMatch(/CREATE TYPE.*mood/i)
+
+    // post_status missing 'archived' value → dbdiff recreates via DROP + CREATE
+    const postStatusIssues = schema.issues.filter(i => i.title.includes('post_status'))
+    expect(postStatusIssues.length).toBeGreaterThanOrEqual(1)
+    const hasDrop = postStatusIssues.some(i => i.sql?.up.match(/DROP TYPE.*post_status/i))
+    const hasCreate = postStatusIssues.some(i => i.sql?.up.match(/CREATE TYPE.*post_status.*archived/i))
+    expect(hasDrop || hasCreate).toBe(true)
   })
 
   it.skipIf(skipIfNoContainers())('should detect RLS drift', () => {

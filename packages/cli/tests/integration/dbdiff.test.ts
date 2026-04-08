@@ -68,6 +68,53 @@ describe('integration: runDbDiff schema', () => {
     expect(result.up).toContain('bio')
   })
 
+  it.skipIf(skipIfNoContainers())('detects missing enum type (mood)', async () => {
+    const result = await runDbDiff({
+      sourceUrl: SOURCE_URL!,
+      targetUrl: TARGET_URL!,
+      type: 'schema',
+      include: 'both',
+    })
+
+    // Source has CREATE TYPE mood AS ENUM, target does not
+    expect(result.up).toMatch(/CREATE TYPE.*mood/i)
+  })
+
+  it.skipIf(skipIfNoContainers())('detects drifted enum type (post_status missing value)', async () => {
+    const result = await runDbDiff({
+      sourceUrl: SOURCE_URL!,
+      targetUrl: TARGET_URL!,
+      type: 'schema',
+      include: 'both',
+    })
+
+    // dbdiff recreates enums with value differences via DROP + CREATE
+    expect(result.up).toMatch(/DROP TYPE.*post_status/i)
+    expect(result.up).toMatch(/CREATE TYPE.*post_status.*archived/i)
+  })
+
+  it.skipIf(skipIfNoContainers())('classifies enum statements correctly as DriftIssues', async () => {
+    const result = await runDbDiff({
+      sourceUrl: SOURCE_URL!,
+      targetUrl: TARGET_URL!,
+      type: 'schema',
+      include: 'both',
+    })
+
+    const issues = sqlToIssues(result, 'schema')
+
+    // Should have a "Type missing: mood" issue (create-type)
+    const missingMood = issues.find(i => i.title.includes('mood'))
+    expect(missingMood).toBeDefined()
+    expect(missingMood!.id).toContain('create-type')
+
+    // post_status is recreated via DROP + CREATE → drop-type or create-type
+    const postStatusIssues = issues.filter(i => i.title.includes('post_status'))
+    expect(postStatusIssues.length).toBeGreaterThanOrEqual(1)
+    const types = postStatusIssues.map(i => i.id)
+    expect(types.some(id => id.includes('drop-type') || id.includes('create-type'))).toBe(true)
+  })
+
   it.skipIf(skipIfNoContainers())('handles identical schemas with empty output', async () => {
     // Diff source against itself — should be empty
     const result = await runDbDiff({

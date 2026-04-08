@@ -229,6 +229,22 @@ npm run test:integration
 
 See [`packages/cli/README.md`](packages/cli/README.md#integration-tests-docker--podman) for manual setup and more options.
 
+### Releasing
+
+Releases are dry-run by default. Pass `--apply` to publish for real.
+
+```bash
+node scripts/release.js patch             # Dry-run: 0.0.1 → 0.0.2
+node scripts/release.js minor             # Dry-run: 0.0.1 → 0.1.0
+node scripts/release.js prerelease        # Dry-run: 0.0.1 → 0.0.2-rc.1
+node scripts/release.js prerelease --preid=beta  # Dry-run: → 0.0.2-beta.1
+node scripts/release.js 1.0.0-rc.1       # Dry-run: explicit version
+
+node scripts/release.js patch --apply     # Actually bump, commit, tag, push
+```
+
+The tag push triggers `.github/workflows/release.yml` which publishes to npm and GitHub Packages.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, coding standards, and pull request guidelines.

@@ -1,6 +1,6 @@
 {
   "name": "supaforge",
-  "version": "0.3.0-rc.1",
+  "version": "0.0.1",
   "description": "Diff and sync your Supabase environments",
   "author": "Akal Forge",
   "license": "MIT",
@@ -34,7 +34,7 @@
     "topicSeparator": " "
   },
   "dependencies": {
-    "@dbdiff/cli": "^3.0.0-rc.1",
+    "@dbdiff/cli": "^3.0.0-rc.2",
     "@oclif/core": "^4",
     "pg": "^8"
   },

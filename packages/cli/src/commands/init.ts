@@ -2,7 +2,7 @@ import { Command, Flags } from '@oclif/core'
 import { createInterface } from 'node:readline'
 import { writeFile, access } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { validateConfig, expandEnvVars, parseProjectRef } from '../config'
+import { validateConfig, validateSingleEnvConfig, expandEnvVars, parseProjectRef } from '../config'
 import type { SupaForgeConfig, EnvironmentConfig } from '../types/config'
 
 const CONFIG_FILENAME = 'supaforge.config.json'
@@ -39,8 +39,68 @@ export async function collectConfig(
   const environments: Record<string, EnvironmentConfig> = {}
   const envVars: Record<string, string> = {}
 
-  log('Add your Supabase environments (at least 2).')
-  log('Sensitive values (DB URL, API key) will be stored as $ENV_VAR references.\n')
+  const mode = await ask('Setup mode — compare two environments or single database? [multi/single]: ')
+  const singleEnv = mode.toLowerCase().startsWith('s')
+
+  if (singleEnv) {
+    log('Set up your Supabase database.')
+    log('Sensitive values (DB URL, API key) will be stored as $ENV_VAR references.\n')
+  } else {
+    log('Add your Supabase environments (at least 2).')
+    log('Sensitive values (DB URL, API key) will be stored as $ENV_VAR references.\n')
+  }
+
+  if (singleEnv) {
+    const defaultName = 'prod'
+    let name = await ask(`Environment name [${defaultName}]: `)
+    if (!name) name = defaultName
+
+    const prefix = envPrefix(name)
+    const dbUrlVar = `${prefix}_DATABASE_URL`
+
+    const dbUrl = await ask(`  Database URL for "${name}": `)
+    if (!dbUrl) {
+      log('  ⚠ Database URL is required.')
+      // Re-ask once
+      const retry = await ask(`  Database URL for "${name}": `)
+      if (!retry) {
+        log('  ✗ Cannot continue without a database URL.')
+        return { config: { environments }, envVars }
+      }
+      envVars[dbUrlVar] = retry
+    } else {
+      envVars[dbUrlVar] = dbUrl
+    }
+
+    const projectUrl = await ask(`  Supabase Project URL for "${name}" (e.g. https://xyz.supabase.co, optional): `)
+    const projectRef = projectUrl ? parseProjectRef(projectUrl) : ''
+
+    let apiKey = ''
+    if (projectRef) {
+      apiKey = await ask(`  Supabase service-role key for "${name}" (Settings → API, optional): `)
+    }
+
+    const apiKeyVar = `${prefix}_API_KEY`
+    if (apiKey) {
+      envVars[apiKeyVar] = apiKey
+    }
+
+    const env: EnvironmentConfig = { dbUrl: `$${dbUrlVar}` }
+    if (projectRef) env.projectRef = projectRef
+    if (apiKey) env.apiKey = `$${apiKeyVar}`
+
+    environments[name] = env
+
+    const dataTables = await ask('\nReference-data tables to track (comma-separated, or Enter to skip): ')
+    const checks = dataTables
+      ? { data: { tables: dataTables.split(',').map((t) => t.trim()).filter(Boolean) } }
+      : undefined
+
+    const config: SupaForgeConfig = { environments }
+    if (checks) config.checks = checks
+
+    return { config, envVars }
+  }
 
   let envCount = 0
   const defaults = ['staging', 'production']
@@ -179,6 +239,8 @@ export default class Init extends Command {
     try {
       const { config, envVars } = await collectConfig(ask, (msg) => this.log(msg))
 
+      const isSingleEnv = !config.source
+
       // Validate with env vars expanded (to catch structural issues)
       // but write the unexpanded $VAR references to the config file
       const expandedConfig = {
@@ -195,9 +257,17 @@ export default class Init extends Command {
         ),
       }
 
-      const errors = validateConfig(expandedConfig)
-      if (errors.length > 0) {
-        this.error(`Generated config is invalid:\n  ${errors.join('\n  ')}`)
+      if (isSingleEnv) {
+        const envName = Object.keys(expandedConfig.environments)[0]
+        const errors = validateSingleEnvConfig(expandedConfig, envName)
+        if (errors.length > 0) {
+          this.error(`Generated config is invalid:\n  ${errors.join('\n  ')}`)
+        }
+      } else {
+        const errors = validateConfig(expandedConfig)
+        if (errors.length > 0) {
+          this.error(`Generated config is invalid:\n  ${errors.join('\n  ')}`)
+        }
       }
 
       const json = JSON.stringify(config, null, 2) + '\n'
@@ -227,8 +297,15 @@ export default class Init extends Command {
       }
 
       this.log('\nNext steps:')
-      this.log('  supaforge scan     — check for drift')
-      this.log('  supaforge diff     — see detailed differences\n')
+      if (isSingleEnv) {
+        const envName = Object.keys(config.environments)[0]
+        this.log(`  supaforge snapshot --env=${envName} --apply   — capture current state`)
+        this.log(`  supaforge clone --env=${envName} --apply      — clone to local`)
+        this.log(`  supaforge backup --env=${envName} --apply     — incremental backup\n`)
+      } else {
+        this.log('  supaforge scan     — check for drift')
+        this.log('  supaforge diff     — see detailed differences\n')
+      }
     } finally {
       ask.close()
     }

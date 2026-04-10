@@ -53,6 +53,10 @@ export default class Clone extends Command {
     }
 
     const envName = flags.env ?? config.source
+    if (!envName) {
+      this.error('No environment specified. Use --env=<name> or set "source" in your config.')
+    }
+
     const errors = validateSingleEnvConfig(config, envName)
     if (errors.length > 0) {
       this.error(`Invalid configuration:\n  ${errors.join('\n  ')}`)

@@ -19,6 +19,17 @@ supaforge scan
 supaforge diff
 ```
 
+## Single Database
+
+Working with one Supabase project? Choose "single" mode during `supaforge init` to set up snapshot, clone, and backup workflows without needing a second environment.
+
+```bash
+supaforge init                               # Choose "single" mode
+supaforge snapshot --env=prod --apply        # Capture current state
+supaforge clone --env=prod --apply           # Clone remote to local
+supaforge backup --env=prod --apply          # Incremental backup
+```
+
 ## Comprehensive Checks
 
 | Check | Source | Detection | Fix |

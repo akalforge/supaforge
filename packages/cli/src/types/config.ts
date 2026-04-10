@@ -12,8 +12,8 @@ export interface ChecksConfig {
 
 export interface SupaForgeConfig {
   environments: Record<string, EnvironmentConfig>
-  source: string
-  target: string
+  source?: string
+  target?: string
   ignoreSchemas?: string[]
   checks?: ChecksConfig
 }

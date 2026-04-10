@@ -18,8 +18,8 @@ export async function scan(
   const { config } = options
   const checksToScan = options.checks ?? [...CHECK_NAMES]
 
-  const source = config.environments[config.source]
-  const target = config.environments[config.target]
+  const source = config.environments[config.source!]
+  const target = config.environments[config.target!]
   const ctx = { source, target, config }
 
   await bus?.emit('supaforge.scan.before', ctx)
@@ -60,8 +60,8 @@ export async function scan(
 
   const scanResult: ScanResult = {
     timestamp: new Date().toISOString(),
-    source: config.source,
-    target: config.target,
+    source: config.source!,
+    target: config.target!,
     checks: results,
     score,
     summary,

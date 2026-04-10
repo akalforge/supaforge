@@ -1,6 +1,8 @@
 {
   // ─── Environments ──────────────────────────────────────────────────────────
   // Define two or more Supabase environments to compare.
+  // For a single database (snapshot/backup only), define just one environment
+  // and omit "source" / "target" below.
   // Use $VAR or ${VAR} for secrets — they expand from environment variables.
   // Keep actual credentials in .env (never commit secrets to git).
 
@@ -43,8 +45,9 @@
     // }
   },
 
-  // ─── Source & Target ─────────────────────────────────────────────────────
+  // ─── Source & Target (optional for single-database configs) ───────────────
   // Which environments to compare. Source = truth, target = to be synced.
+  // Omit both for single-database setups (snapshot, clone, backup, restore).
   "source": "staging",
   "target": "production",
 

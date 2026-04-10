@@ -61,7 +61,7 @@ export default class Promote extends Command {
       return
     }
 
-    const targetEnv = config.environments[config.target]
+    const targetEnv = config.environments[config.target!]
     const dryRun = !flags.apply
     const result = await promote({
       dbUrl: targetEnv.dbUrl,

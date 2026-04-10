@@ -51,6 +51,41 @@ supaforge diff
 supaforge hukam
 ```
 
+## Single Database
+
+Only have one Supabase project? SupaForge works as a snapshot, backup, and audit tool for a single remote database — no second environment needed.
+
+```bash
+npm install -g @akalforge/supaforge
+
+# Interactive setup — choose "single" mode
+supaforge init
+
+# Or create config manually
+cat > supaforge.config.json << 'EOF'
+{
+  "environments": {
+    "prod": {
+      "dbUrl": "$PROD_DATABASE_URL",
+      "projectRef": "https://your-project.supabase.co",
+      "apiKey": "$PROD_API_KEY"
+    }
+  }
+}
+EOF
+
+# Capture a full snapshot (schema, RLS, cron, storage, auth, etc.)
+supaforge snapshot --env=prod --apply
+
+# Clone remote to local for development
+supaforge clone --env=prod --apply
+
+# Incremental backup (snapshot + migration file)
+supaforge backup --env=prod --apply
+```
+
+> Single-database configs omit `source` and `target`. The `scan`, `diff`, and `promote` commands require two environments — use `snapshot`, `clone`, `backup`, and `restore` instead.
+
 ## Comprehensive Checks
 
 | Check | Source | Status |

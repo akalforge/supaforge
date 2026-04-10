@@ -20,8 +20,9 @@ describe('envPrefix', () => {
 })
 
 describe('collectConfig', () => {
-  it('stores env var references in config, actual values in envVars', async () => {
+  it('multi-env: stores env var references in config, actual values in envVars', async () => {
     const answers = [
+      'multi',                                // mode
       '',                                     // env name → staging (default)
       'postgres://localhost:5432/staging',     // dbUrl for staging
       '',                                     // projectRef → skip
@@ -49,8 +50,9 @@ describe('collectConfig', () => {
     expect(config.checks).toBeUndefined()
   })
 
-  it('includes data tables when specified', async () => {
+  it('multi-env: includes data tables when specified', async () => {
     const answers = [
+      'multi',                             // mode
       'dev',                               // env name
       'postgres://localhost:5432/dev',      // dbUrl
       '',                                   // projectRef → skip
@@ -69,8 +71,9 @@ describe('collectConfig', () => {
     expect(config.checks!.data!.tables).toEqual(['countries', 'currencies'])
   })
 
-  it('stores apiKey as env var reference and extracts projectRef from URL', async () => {
+  it('multi-env: stores apiKey as env var reference and extracts projectRef from URL', async () => {
     const answers = [
+      'multi',                                       // mode
       'dev',                                         // env name
       'postgres://localhost:5432/dev',                // dbUrl
       'https://abcdef123456.supabase.co',            // Project URL → extracted to ref
@@ -105,8 +108,9 @@ describe('collectConfig', () => {
     expect(envVars.PROD_API_KEY).toBe('service-role-key-prod')
   })
 
-  it('supports three environments with custom source/target', async () => {
+  it('multi-env: supports three environments with custom source/target', async () => {
     const answers = [
+      'multi',                              // mode
       'dev',                                // env name
       'postgres://localhost:5432/dev',       // dbUrl
       '',                                   // projectRef → skip
@@ -128,5 +132,52 @@ describe('collectConfig', () => {
     expect(Object.keys(config.environments)).toEqual(['dev', 'staging', 'prod'])
     expect(config.source).toBe('dev')
     expect(config.target).toBe('prod')
+  })
+
+  it('single-env: creates config with one environment and no source/target', async () => {
+    const answers = [
+      'single',                              // mode
+      '',                                    // env name → prod (default)
+      'postgres://db.abc.supabase.co:5432/postgres', // dbUrl
+      'https://abc123.supabase.co',          // Project URL
+      'srk_secret_key',                      // apiKey
+      '',                                    // data tables → skip
+    ]
+
+    const { config, envVars } = await collectConfig(fakeAsk(answers), noop)
+
+    expect(Object.keys(config.environments)).toEqual(['prod'])
+    expect(config.environments.prod.dbUrl).toBe('$PROD_DATABASE_URL')
+    expect(config.environments.prod.projectRef).toBe('abc123')
+    expect(config.environments.prod.apiKey).toBe('$PROD_API_KEY')
+
+    expect(config.source).toBeUndefined()
+    expect(config.target).toBeUndefined()
+
+    expect(envVars.PROD_DATABASE_URL).toBe('postgres://db.abc.supabase.co:5432/postgres')
+    expect(envVars.PROD_API_KEY).toBe('srk_secret_key')
+  })
+
+  it('single-env: works with custom env name and no projectRef', async () => {
+    const answers = [
+      'single',                              // mode
+      'staging',                             // env name
+      'postgres://localhost:5432/staging',    // dbUrl
+      '',                                    // projectRef → skip
+      'feature_flags, plans',                // data tables
+    ]
+
+    const { config, envVars } = await collectConfig(fakeAsk(answers), noop)
+
+    expect(Object.keys(config.environments)).toEqual(['staging'])
+    expect(config.environments.staging.dbUrl).toBe('$STAGING_DATABASE_URL')
+    expect(config.environments.staging.projectRef).toBeUndefined()
+    expect(config.environments.staging.apiKey).toBeUndefined()
+
+    expect(config.source).toBeUndefined()
+    expect(config.target).toBeUndefined()
+
+    expect(envVars.STAGING_DATABASE_URL).toBe('postgres://localhost:5432/staging')
+    expect(config.checks!.data!.tables).toEqual(['feature_flags', 'plans'])
   })
 })

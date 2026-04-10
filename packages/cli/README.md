@@ -141,60 +141,33 @@ supaforge snapshot --env=prod --apply
 
 ## Configuration
 
-`supaforge.config.json` in your project root. Sensitive values like database URLs and API keys support `$VAR` and `${VAR}` references — these are expanded from environment variables at runtime.
-
-```json
-{
-  "environments": {
-    "dev": {
-      "dbUrl": "$DEV_DATABASE_URL",
-      "projectRef": "abc123",
-      "apiKey": "$DEV_API_KEY"
-    },
-    "prod": {
-      "dbUrl": "$PROD_DATABASE_URL",
-      "projectRef": "xyz789",
-      "apiKey": "$PROD_API_KEY"
-    }
-  },
-  "source": "dev",
-  "target": "prod",
-  "ignoreSchemas": ["auth", "storage", "realtime", "vault"],
-  "checks": {
-    "data": {
-      "tables": ["plans", "feature_flags", "pricing_tiers"]
-    }
-  }
-}
-```
-
-Store the actual credentials in `.env` (never commit this file):
+The fastest way to get started:
 
 ```bash
-DEV_DATABASE_URL=postgres://postgres:pass@db.DEV.supabase.co:5432/postgres
-DEV_API_KEY=your-dev-service-role-key
-PROD_DATABASE_URL=postgres://postgres:pass@db.PROD.supabase.co:5432/postgres
-PROD_API_KEY=your-prod-service-role-key
+supaforge init          # Interactive wizard — creates config + .env
 ```
 
-> **Tip**: `supaforge init` generates both files for you — config with `$VAR` references and `.env` with the actual values.
+Or copy the annotated example files and fill in your values:
+
+```bash
+cp supaforge.config.example.jsonc supaforge.config.json
+cp .env.example .env
 ```
 
-**Self-hosted Supabase**: Use `apiUrl` instead of `projectRef` to point at your local API gateway:
+**Key fields**:
 
-```json
-{
-  "environments": {
-    "local": {
-      "dbUrl": "postgresql://postgres:postgres@127.0.0.1:54322/postgres",
-      "apiKey": "your-service-role-key",
-      "apiUrl": "http://127.0.0.1:54321"
-    }
-  }
-}
-```
+| Field | Required | Description |
+|-------|----------|-------------|
+| `dbUrl` | Yes | PostgreSQL connection string. Use `$VAR` references for secrets. |
+| `projectRef` | No | Supabase project ID from your dashboard URL. Enables API-based checks (auth, storage, edge functions). |
+| `apiKey` | No | Supabase **service-role** key. Required when `projectRef` is set. Use `$VAR` references. |
+| `apiUrl` | No | Base URL for self-hosted Supabase API gateway. Use instead of `projectRef` for local/self-hosted. |
+| `source` / `target` | Yes | Environment names to compare. Source = truth, target = to be synced. |
+| `checks.data.tables` | No | Tables to include in row-level data drift detection. |
 
-Supabase internal schemas (`auth`, `storage`, `realtime`, `vault`, etc.) are ignored by default.
+Sensitive values (`dbUrl`, `apiKey`) support `$VAR` and `${VAR}` syntax — expanded from environment variables at runtime. Store actual credentials in `.env` (already in `.gitignore`).
+
+See [`supaforge.config.example.jsonc`](supaforge.config.example.jsonc) and [`.env.example`](.env.example) for fully commented examples.
 
 ## Extending with Hooks
 

@@ -75,11 +75,11 @@ export async function collectConfig(
 
     envVars[dbUrlVar] = dbUrl
 
-    const projectRef = await ask(`  Supabase project ref for "${name}" (optional): `)
+    const projectRef = await ask(`  Supabase project ref for "${name}" (from dashboard URL, optional): `)
 
     let apiKey = ''
     if (projectRef) {
-      apiKey = await ask(`  Supabase service-role key for "${name}" (optional): `)
+      apiKey = await ask(`  Supabase service-role key for "${name}" (Settings → API, optional): `)
     }
 
     const apiKeyVar = `${prefix}_API_KEY`

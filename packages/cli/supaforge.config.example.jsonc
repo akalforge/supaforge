@@ -1,0 +1,63 @@
+{
+  // ─── Environments ──────────────────────────────────────────────────────────
+  // Define two or more Supabase environments to compare.
+  // Use $VAR or ${VAR} for secrets — they expand from environment variables.
+  // Keep actual credentials in .env (never commit secrets to git).
+
+  "environments": {
+
+    "staging": {
+      // PostgreSQL connection string (required).
+      // Format: postgres://user:password@host:port/database
+      "dbUrl": "$STAGING_DATABASE_URL",
+
+      // Supabase project reference ID (optional).
+      // The short alphanumeric string from your dashboard URL:
+      //   https://supabase.com/dashboard/project/<projectRef>
+      // Needed for API-based checks: auth config, storage buckets, edge functions.
+      // Omit for self-hosted Supabase — use "apiUrl" instead.
+      "projectRef": "your-staging-project-ref",
+
+      // Supabase service-role key (optional, required if projectRef is set).
+      // Found in: Dashboard → Settings → API → service_role key.
+      // Never use the anon key — it lacks the permissions needed for drift checks.
+      "apiKey": "$STAGING_API_KEY"
+    },
+
+    "production": {
+      "dbUrl": "$PRODUCTION_DATABASE_URL",
+      "projectRef": "your-production-project-ref",
+      "apiKey": "$PRODUCTION_API_KEY"
+    }
+
+    // ─── Self-hosted example ───────────────────────────────────────────────
+    // For local development or self-hosted Supabase, use "apiUrl" instead of
+    // "projectRef" to point at your local API gateway:
+    //
+    // "local": {
+    //   "dbUrl": "$LOCAL_DATABASE_URL",
+    //   "apiKey": "$LOCAL_API_KEY",
+    //   "apiUrl": "http://127.0.0.1:54321"
+    // }
+  },
+
+  // ─── Source & Target ─────────────────────────────────────────────────────
+  // Which environments to compare. Source = truth, target = to be synced.
+  "source": "staging",
+  "target": "production",
+
+  // ─── Ignore Schemas (optional) ───────────────────────────────────────────
+  // Supabase internal schemas are ignored by default (auth, storage, realtime,
+  // vault, etc.). Override here if needed.
+  // "ignoreSchemas": ["auth", "storage", "realtime", "vault"],
+
+  // ─── Checks (optional) ──────────────────────────────────────────────────
+  // Fine-tune which checks run and what they inspect.
+  "checks": {
+    // Reference-data tables to include in data drift detection.
+    // Only these tables are compared row-by-row. Leave empty to skip data checks.
+    "data": {
+      "tables": ["plans", "feature_flags"]
+    }
+  }
+}

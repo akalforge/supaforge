@@ -47,7 +47,7 @@ supaforge scan
 # Show detailed diff with SQL fixes
 supaforge diff
 
-# The daily Hukamnama of your database 🙏
+# Alias for scan 🙏
 supaforge hukam
 ```
 

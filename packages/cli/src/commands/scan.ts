@@ -27,14 +27,8 @@ export default class Scan extends Command {
     target: Flags.string({ char: 't', description: 'Target environment name' }),
   }
 
-  protected isHukam = false
-
   async run(): Promise<void> {
     const { flags } = await this.parse(Scan)
-
-    if (this.isHukam) {
-      this.log('\n🙏 The daily Hukamnama of your database\n')
-    }
 
     let config
     try {

@@ -4,6 +4,11 @@
   "description": "Diff and sync your Supabase environments",
   "author": "Akal Forge",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/akalforge/supaforge",
+    "directory": "packages/cli"
+  },
   "type": "module",
   "bin": {
     "supaforge": "./bin/run.js"

@@ -1,5 +1,5 @@
-import { describe, it, expect } from 'vitest'
-import { resolveConfig, validateConfig } from '../src/config.js'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { resolveConfig, validateConfig, expandEnvVars } from '../src/config.js'
 import { DEFAULT_IGNORE_SCHEMAS } from '../src/defaults.js'
 import type { SupaForgeConfig } from '../src/types/config.js'
 
@@ -79,5 +79,74 @@ describe('validateConfig', () => {
     const config = { source: 'dev', target: 'prod' } as SupaForgeConfig
     const errors = validateConfig(config)
     expect(errors.some(e => e.includes('environments'))).toBe(true)
+  })
+})
+
+describe('expandEnvVars', () => {
+  const saved: Record<string, string | undefined> = {}
+
+  beforeEach(() => {
+    saved.TEST_DB_URL = process.env.TEST_DB_URL
+    saved.TEST_API_KEY = process.env.TEST_API_KEY
+    process.env.TEST_DB_URL = 'postgres://user:secret@host:5432/db'
+    process.env.TEST_API_KEY = 'my-service-role-key'
+  })
+
+  afterEach(() => {
+    if (saved.TEST_DB_URL === undefined) delete process.env.TEST_DB_URL
+    else process.env.TEST_DB_URL = saved.TEST_DB_URL
+    if (saved.TEST_API_KEY === undefined) delete process.env.TEST_API_KEY
+    else process.env.TEST_API_KEY = saved.TEST_API_KEY
+  })
+
+  it('expands $VAR syntax', () => {
+    expect(expandEnvVars('$TEST_DB_URL')).toBe('postgres://user:secret@host:5432/db')
+  })
+
+  it('expands ${VAR} syntax', () => {
+    expect(expandEnvVars('${TEST_DB_URL}')).toBe('postgres://user:secret@host:5432/db')
+  })
+
+  it('leaves unknown vars unchanged', () => {
+    expect(expandEnvVars('$NONEXISTENT_VAR_12345')).toBe('$NONEXISTENT_VAR_12345')
+  })
+
+  it('expands vars embedded in a string', () => {
+    expect(expandEnvVars('prefix_${TEST_API_KEY}_suffix')).toBe('prefix_my-service-role-key_suffix')
+  })
+
+  it('returns plain strings unchanged', () => {
+    expect(expandEnvVars('postgres://localhost:5432/db')).toBe('postgres://localhost:5432/db')
+  })
+})
+
+describe('resolveConfig with env vars', () => {
+  beforeEach(() => {
+    process.env.DEV_DATABASE_URL = 'postgres://localhost:5432/dev'
+    process.env.PROD_DATABASE_URL = 'postgres://localhost:5432/prod'
+    process.env.PROD_API_KEY = 'secret-key'
+  })
+
+  afterEach(() => {
+    delete process.env.DEV_DATABASE_URL
+    delete process.env.PROD_DATABASE_URL
+    delete process.env.PROD_API_KEY
+  })
+
+  it('expands env vars in dbUrl and apiKey during resolve', () => {
+    const config: SupaForgeConfig = {
+      environments: {
+        dev: { dbUrl: '$DEV_DATABASE_URL' },
+        prod: { dbUrl: '$PROD_DATABASE_URL', apiKey: '$PROD_API_KEY' },
+      },
+      source: 'dev',
+      target: 'prod',
+    }
+
+    const resolved = resolveConfig(config)
+
+    expect(resolved.environments.dev.dbUrl).toBe('postgres://localhost:5432/dev')
+    expect(resolved.environments.prod.dbUrl).toBe('postgres://localhost:5432/prod')
+    expect(resolved.environments.prod.apiKey).toBe('secret-key')
   })
 })

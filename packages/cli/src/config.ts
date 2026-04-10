@@ -1,9 +1,40 @@
 import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import type { SupaForgeConfig } from './types/config'
+import type { SupaForgeConfig, EnvironmentConfig } from './types/config'
 import { DEFAULT_IGNORE_SCHEMAS } from './defaults'
 
 const CONFIG_FILENAME = 'supaforge.config.json'
+
+/** Match $VAR or ${VAR} references. */
+const ENV_VAR_RE = /\$\{([^}]+)\}|\$([A-Z_][A-Z0-9_]*)/gi
+
+/**
+ * Expand $VAR and ${VAR} references in a string using process.env.
+ * Returns the original token unchanged if the env var is not set.
+ */
+export function expandEnvVars(value: string): string {
+  return value.replace(ENV_VAR_RE, (match, braced, bare) => {
+    const name = braced ?? bare
+    return process.env[name] ?? match
+  })
+}
+
+/**
+ * Expand env var references in all sensitive environment fields (dbUrl, apiKey).
+ */
+function expandEnvironments(
+  environments: Record<string, EnvironmentConfig>,
+): Record<string, EnvironmentConfig> {
+  const result: Record<string, EnvironmentConfig> = {}
+  for (const [name, env] of Object.entries(environments)) {
+    result[name] = {
+      ...env,
+      dbUrl: expandEnvVars(env.dbUrl),
+      ...(env.apiKey ? { apiKey: expandEnvVars(env.apiKey) } : {}),
+    }
+  }
+  return result
+}
 
 export async function loadConfig(cwd = process.cwd()): Promise<SupaForgeConfig> {
   const configPath = resolve(cwd, CONFIG_FILENAME)
@@ -15,6 +46,7 @@ export async function loadConfig(cwd = process.cwd()): Promise<SupaForgeConfig> 
 export function resolveConfig(config: SupaForgeConfig): SupaForgeConfig {
   return {
     ...config,
+    environments: expandEnvironments(config.environments),
     ignoreSchemas: config.ignoreSchemas ?? DEFAULT_IGNORE_SCHEMAS,
   }
 }

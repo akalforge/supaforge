@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { resolveConfig, validateConfig, expandEnvVars } from '../src/config.js'
+import { resolveConfig, validateConfig, expandEnvVars, parseProjectRef } from '../src/config.js'
 import { DEFAULT_IGNORE_SCHEMAS } from '../src/defaults.js'
 import type { SupaForgeConfig } from '../src/types/config.js'
 
@@ -148,5 +148,46 @@ describe('resolveConfig with env vars', () => {
     expect(resolved.environments.dev.dbUrl).toBe('postgres://localhost:5432/dev')
     expect(resolved.environments.prod.dbUrl).toBe('postgres://localhost:5432/prod')
     expect(resolved.environments.prod.apiKey).toBe('secret-key')
+  })
+})
+
+describe('parseProjectRef', () => {
+  it('extracts ref from full Project URL', () => {
+    expect(parseProjectRef('https://zfjldiglmcwojzdtxbky.supabase.co')).toBe('zfjldiglmcwojzdtxbky')
+  })
+
+  it('extracts ref from Project URL with trailing slash', () => {
+    expect(parseProjectRef('https://abcdef123456.supabase.co/')).toBe('abcdef123456')
+  })
+
+  it('returns bare ref unchanged', () => {
+    expect(parseProjectRef('abcdef123456')).toBe('abcdef123456')
+  })
+
+  it('trims whitespace', () => {
+    expect(parseProjectRef('  abcdef123456  ')).toBe('abcdef123456')
+  })
+
+  it('handles non-supabase URLs by returning full hostname', () => {
+    // Not a supabase.co URL — returns trimmed input as-is
+    expect(parseProjectRef('https://example.com')).toBe('https://example.com')
+  })
+})
+
+describe('resolveConfig normalises projectRef', () => {
+  it('extracts ref from full Project URL in config', () => {
+    const config: SupaForgeConfig = {
+      environments: {
+        dev: { dbUrl: 'postgres://localhost/dev', projectRef: 'https://abc123.supabase.co' },
+        prod: { dbUrl: 'postgres://localhost/prod', projectRef: 'xyz789' },
+      },
+      source: 'dev',
+      target: 'prod',
+    }
+
+    const resolved = resolveConfig(config)
+
+    expect(resolved.environments.dev.projectRef).toBe('abc123')
+    expect(resolved.environments.prod.projectRef).toBe('xyz789')
   })
 })

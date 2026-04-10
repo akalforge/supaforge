@@ -20,7 +20,29 @@ export function expandEnvVars(value: string): string {
 }
 
 /**
+ * Extract the project ref from a Supabase Project URL or return the value as-is
+ * if it's already a bare ref.
+ *
+ * Accepted formats:
+ *   - https://abcdef123456.supabase.co
+ *   - https://abcdef123456.supabase.co/
+ *   - abcdef123456  (bare ref, returned unchanged)
+ */
+export function parseProjectRef(value: string): string {
+  const trimmed = value.trim()
+  try {
+    const url = new URL(trimmed)
+    const match = url.hostname.match(/^([^.]+)\.supabase\.co$/)
+    if (match) return match[1]
+  } catch {
+    // Not a URL — treat as bare ref
+  }
+  return trimmed
+}
+
+/**
  * Expand env var references in all sensitive environment fields (dbUrl, apiKey).
+ * Also normalises projectRef from full URL to bare ref.
  */
 function expandEnvironments(
   environments: Record<string, EnvironmentConfig>,
@@ -31,6 +53,7 @@ function expandEnvironments(
       ...env,
       dbUrl: expandEnvVars(env.dbUrl),
       ...(env.apiKey ? { apiKey: expandEnvVars(env.apiKey) } : {}),
+      ...(env.projectRef ? { projectRef: parseProjectRef(env.projectRef) } : {}),
     }
   }
   return result

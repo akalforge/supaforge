@@ -2,7 +2,7 @@ import { Command, Flags } from '@oclif/core'
 import { createInterface } from 'node:readline'
 import { writeFile, access } from 'node:fs/promises'
 import { resolve } from 'node:path'
-import { validateConfig, expandEnvVars } from '../config'
+import { validateConfig, expandEnvVars, parseProjectRef } from '../config'
 import type { SupaForgeConfig, EnvironmentConfig } from '../types/config'
 
 const CONFIG_FILENAME = 'supaforge.config.json'
@@ -75,7 +75,8 @@ export async function collectConfig(
 
     envVars[dbUrlVar] = dbUrl
 
-    const projectRef = await ask(`  Supabase project ref for "${name}" (from dashboard URL, optional): `)
+    const projectUrl = await ask(`  Supabase Project URL for "${name}" (e.g. https://xyz.supabase.co, optional): `)
+    const projectRef = projectUrl ? parseProjectRef(projectUrl) : ''
 
     let apiKey = ''
     if (projectRef) {

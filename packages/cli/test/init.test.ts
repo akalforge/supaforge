@@ -69,20 +69,20 @@ describe('collectConfig', () => {
     expect(config.checks!.data!.tables).toEqual(['countries', 'currencies'])
   })
 
-  it('stores apiKey as env var reference when provided', async () => {
+  it('stores apiKey as env var reference and extracts projectRef from URL', async () => {
     const answers = [
-      'dev',                                // env name
-      'postgres://localhost:5432/dev',       // dbUrl
-      'abcdef123456',                        // projectRef
-      'service-role-key-dev',                // apiKey
-      'prod',                                // env name
-      'postgres://localhost:5432/prod',      // dbUrl
-      'xyz789',                              // projectRef
-      'service-role-key-prod',               // apiKey
-      'n',                                   // don't add another
-      '',                                    // source → dev (default)
-      '',                                    // target → prod (default)
-      '',                                    // data tables → skip
+      'dev',                                         // env name
+      'postgres://localhost:5432/dev',                // dbUrl
+      'https://abcdef123456.supabase.co',            // Project URL → extracted to ref
+      'service-role-key-dev',                         // apiKey
+      'prod',                                         // env name
+      'postgres://localhost:5432/prod',               // dbUrl
+      'xyz789',                                       // bare ref (also accepted)
+      'service-role-key-prod',                        // apiKey
+      'n',                                            // don't add another
+      '',                                             // source → dev (default)
+      '',                                             // target → prod (default)
+      '',                                             // data tables → skip
     ]
 
     const { config, envVars } = await collectConfig(fakeAsk(answers), noop)
@@ -90,10 +90,12 @@ describe('collectConfig', () => {
     // Config stores references
     expect(config.environments.dev.dbUrl).toBe('$DEV_DATABASE_URL')
     expect(config.environments.dev.apiKey).toBe('$DEV_API_KEY')
+    // Project URL extracted to bare ref
     expect(config.environments.dev.projectRef).toBe('abcdef123456')
 
     expect(config.environments.prod.dbUrl).toBe('$PROD_DATABASE_URL')
     expect(config.environments.prod.apiKey).toBe('$PROD_API_KEY')
+    // Bare ref kept as-is
     expect(config.environments.prod.projectRef).toBe('xyz789')
 
     // envVars stores actual values

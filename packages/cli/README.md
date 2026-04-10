@@ -159,7 +159,7 @@ cp .env.example .env
 | Field | Required | Description |
 |-------|----------|-------------|
 | `dbUrl` | Yes | PostgreSQL connection string. Use `$VAR` references for secrets. |
-| `projectRef` | No | Supabase project ID from your dashboard URL. Enables API-based checks (auth, storage, edge functions). |
+| `projectRef` | No | Supabase Project URL (e.g. `https://xyz.supabase.co`) or bare ref. Enables API-based checks (auth, storage, edge functions). |
 | `apiKey` | No | Supabase **service-role** key. Required when `projectRef` is set. Use `$VAR` references. |
 | `apiUrl` | No | Base URL for self-hosted Supabase API gateway. Use instead of `projectRef` for local/self-hosted. |
 | `source` / `target` | Yes | Environment names to compare. Source = truth, target = to be synced. |

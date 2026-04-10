@@ -9,25 +9,8 @@ Built by [Akal Forge](https://github.com/akalforge). Powered by [oclif](https://
 ```bash
 npm install -g @akalforge/supaforge
 
-# Create config
-cat > supaforge.config.json << 'EOF'
-{
-  "environments": {
-    "dev": {
-      "dbUrl": "postgres://postgres:pass@db.DEV.supabase.co:5432/postgres",
-      "projectRef": "your-dev-ref",
-      "apiKey": "your-dev-service-role-key"
-    },
-    "prod": {
-      "dbUrl": "postgres://postgres:pass@db.PROD.supabase.co:5432/postgres",
-      "projectRef": "your-prod-ref",
-      "apiKey": "your-prod-service-role-key"
-    }
-  },
-  "source": "dev",
-  "target": "prod"
-}
-EOF
+# Interactive setup — creates supaforge.config.json
+supaforge init
 
 # Scan for drift
 supaforge scan
@@ -55,6 +38,8 @@ supaforge diff
 ## Commands
 
 ```
+supaforge init                          Create supaforge.config.json interactively
+supaforge init --force                  Overwrite existing config file
 supaforge scan                          Scan everything
 supaforge scan --check=rls              Scan a specific check only
 supaforge scan --json                   Output as JSON
@@ -156,20 +141,20 @@ supaforge snapshot --env=prod --apply
 
 ## Configuration
 
-`supaforge.config.json` in your project root:
+`supaforge.config.json` in your project root. Sensitive values like database URLs and API keys support `$VAR` and `${VAR}` references — these are expanded from environment variables at runtime.
 
 ```json
 {
   "environments": {
     "dev": {
-      "dbUrl": "postgres://...",
+      "dbUrl": "$DEV_DATABASE_URL",
       "projectRef": "abc123",
-      "apiKey": "your-service-role-key"
+      "apiKey": "$DEV_API_KEY"
     },
     "prod": {
-      "dbUrl": "postgres://...",
+      "dbUrl": "$PROD_DATABASE_URL",
       "projectRef": "xyz789",
-      "apiKey": "your-service-role-key"
+      "apiKey": "$PROD_API_KEY"
     }
   },
   "source": "dev",
@@ -181,6 +166,18 @@ supaforge snapshot --env=prod --apply
     }
   }
 }
+```
+
+Store the actual credentials in `.env` (never commit this file):
+
+```bash
+DEV_DATABASE_URL=postgres://postgres:pass@db.DEV.supabase.co:5432/postgres
+DEV_API_KEY=your-dev-service-role-key
+PROD_DATABASE_URL=postgres://postgres:pass@db.PROD.supabase.co:5432/postgres
+PROD_API_KEY=your-prod-service-role-key
+```
+
+> **Tip**: `supaforge init` generates both files for you — config with `$VAR` references and `.env` with the actual values.
 ```
 
 **Self-hosted Supabase**: Use `apiUrl` instead of `projectRef` to point at your local API gateway:

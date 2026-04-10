@@ -3,6 +3,7 @@ import { defineConfig } from 'tsup'
 export default defineConfig({
   entry: [
     'src/index.ts',
+    'src/commands/init.ts',
     'src/commands/scan.ts',
     'src/commands/diff.ts',
     'src/commands/hukam.ts',

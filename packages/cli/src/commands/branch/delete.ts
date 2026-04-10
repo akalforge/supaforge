@@ -38,6 +38,10 @@ export default class BranchDelete extends Command {
     }
 
     const envName = flags.from ?? config.source
+    if (!envName) {
+      this.error('No environment specified. Use --from=<name> or set "source" in your config.')
+    }
+
     const errors = validateSingleEnvConfig(config, envName)
     if (errors.length > 0) {
       this.error(`Invalid configuration:\n  ${errors.join('\n  ')}`)

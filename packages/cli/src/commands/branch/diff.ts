@@ -50,6 +50,10 @@ export default class BranchDiff extends Command {
     }
 
     const envName = flags.against ?? config.source
+    if (!envName) {
+      this.error('No environment specified. Use --against=<name> or set "source" in your config.')
+    }
+
     const env = config.environments[envName]
     if (!env) {
       this.error(`Environment "${envName}" not found in config.`)

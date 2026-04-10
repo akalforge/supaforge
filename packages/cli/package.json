@@ -39,6 +39,7 @@
       "strategy": "pattern",
       "target": "./dist/commands"
     },
+    "helpClass": "./dist/help",
     "topicSeparator": " "
   },
   "dependencies": {

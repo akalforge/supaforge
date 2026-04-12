@@ -18,20 +18,20 @@
       // or just the ref works:
       //   "https://abcdef123456.supabase.co"  →  extracted automatically
       //   "abcdef123456"                       →  used as-is
-      // Needed for API-based checks: auth config, storage buckets, edge functions.
+      // Needed for API-based checks: auth config, edge functions.
       // Omit for self-hosted Supabase — use "apiUrl" instead.
       "projectRef": "https://your-staging-ref.supabase.co",
 
-      // Supabase service-role key (optional, required if projectRef is set).
-      // Found in: Dashboard → Settings → API → service_role key.
-      // Never use the anon key — it lacks the permissions needed for drift checks.
-      "apiKey": "$STAGING_API_KEY"
+      // Supabase personal access token (optional, required if projectRef is set).
+      // Generate at: supabase.com/dashboard/account/tokens
+      // Used for Management API checks: auth config, edge functions.
+      "accessToken": "$STAGING_ACCESS_TOKEN"
     },
 
     "production": {
       "dbUrl": "$PRODUCTION_DATABASE_URL",
       "projectRef": "https://your-production-ref.supabase.co",
-      "apiKey": "$PRODUCTION_API_KEY"
+      "accessToken": "$PRODUCTION_ACCESS_TOKEN"
     }
 
     // ─── Self-hosted example ───────────────────────────────────────────────
@@ -40,7 +40,7 @@
     //
     // "local": {
     //   "dbUrl": "$LOCAL_DATABASE_URL",
-    //   "apiKey": "$LOCAL_API_KEY",
+    //   "accessToken": "$LOCAL_ACCESS_TOKEN",
     //   "apiUrl": "http://127.0.0.1:54321"
     // }
   },

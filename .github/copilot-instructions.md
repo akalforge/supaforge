@@ -10,7 +10,7 @@ Supabase environment drift detection and sync CLI. Scans all checks (schema, RLS
 
 ```
 packages/cli/src/
-  commands/     — oclif commands: scan, diff, promote, hukam
+  commands/     — oclif commands: diff, snapshot, clone, restore, init, hukam + base.ts (shared BaseCommand)
   checks/       — Check implementations (base, schema, rls, edge-functions, storage, auth, cron, data, webhooks, realtime, vault, extensions)
                   + registry.ts (CheckRegistry), index.ts (factory)
   types/        — config.ts, drift.ts, index.ts
@@ -25,7 +25,7 @@ packages/cli/src/
   defaults.ts   — DEFAULT_IGNORE_SCHEMAS
 ```
 
-**Key flow**: `scan` command → load config → create check registry → `scanner.scan()` iterates checks → each `check.scan(ctx)` returns `DriftIssue[]` → scoring → render output.
+**Key flow**: `diff` command → load config → create check registry → `scanner.scan()` iterates checks → each `check.scan(ctx)` returns `DriftIssue[]` → scoring → render output. `--detail` shows full diff, `--apply` executes fixes via `promote()`.
 
 **Patterns**: Check (abstract base + concrete implementations), Registry (CheckRegistry), Strategy (each check is a strategy), Hook Bus (event-driven pipeline).
 
@@ -45,14 +45,14 @@ npm run test:integration               # Docker-based integration tests
 npm run test:e2e                       # E2E tests
 ```
 
-**Build**: tsup, ESM-only, targets Node 18+, 5 entry points (index + 4 commands).
+**Build**: tsup, ESM-only, targets Node 18+, 9 entry points (index + base + 6 commands + help).
 
 **Test structure**: `test/` for unit tests, `tests/integration/` for integration tests, `test/e2e/` for E2E.
 
 ## Conventions
 
 - **TypeScript strict mode**, ESM-only (no CommonJS).
-- **oclif** for command structure — each command extends `Command`.
+- **oclif** for command structure — each command extends `BaseCommand` (shared config/env helpers).
 - **Check pattern**: All checks extend abstract `Check` class with `name` and `scan(ctx)`.
 - **Dependency injection**: Checks accept `queryFn`/`fetchFn` for testability.
 - **Config file**: `supaforge.config.json` in working directory.

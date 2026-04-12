@@ -4,6 +4,7 @@ import { resolve, dirname } from 'node:path'
 import pg from 'pg'
 import { captureSnapshot, type SnapshotResult } from './snapshot'
 import type { EnvironmentConfig, SupaForgeConfig } from './types/config'
+import { checkPgDumpCompat } from './pg-tools'
 
 /** Prefix for branch database names created by SupaForge. */
 export const BRANCH_DB_PREFIX = 'supaforge_branch_'
@@ -128,9 +129,21 @@ export async function createBranch(opts: CreateBranchOptions): Promise<BranchMet
   }
 
   const created = await tryTemplateCopy(opts.sourceUrl, dbName)
-    || await tryDumpRestore(opts.sourceUrl, dbName, opts.schemaOnly ?? false)
-
+  let pgDumpPath = 'pg_dump'
+  let pgRestorePath = 'pg_restore'
   if (!created) {
+    // Template copy failed — need pg_dump pipeline. Check compatibility first.
+    const compat = await checkPgDumpCompat(opts.sourceUrl)
+    if (!compat.compatible) {
+      throw new Error(compat.message)
+    }
+    pgDumpPath = compat.pgDumpPath
+    pgRestorePath = compat.pgRestorePath
+  }
+
+  const dumpCreated = created || await tryDumpRestore(opts.sourceUrl, dbName, opts.schemaOnly ?? false, pgDumpPath, pgRestorePath)
+
+  if (!dumpCreated) {
     throw new Error(
       'Failed to create branch. Ensure you have CREATE DATABASE privileges and ' +
       'that pg_dump + pg_restore are available in your PATH.',
@@ -187,6 +200,8 @@ async function tryDumpRestore(
   sourceUrl: string,
   newDb: string,
   schemaOnly: boolean,
+  pgDumpPath = 'pg_dump',
+  pgRestorePath = 'pg_restore',
 ): Promise<boolean> {
   const maintenanceUrl = replaceDbName(sourceUrl, 'postgres')
 
@@ -214,8 +229,8 @@ async function tryDumpRestore(
 
   try {
     await new Promise<void>((resolve, reject) => {
-      const dump = spawn('pg_dump', dumpArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
-      const restore = spawn('pg_restore', restoreArgs, { stdio: [dump.stdout, 'pipe', 'pipe'] })
+      const dump = spawn(pgDumpPath, dumpArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+      const restore = spawn(pgRestorePath, restoreArgs, { stdio: [dump.stdout, 'pipe', 'pipe'] })
 
       let restoreStderr = ''
       restore.stderr?.on('data', (chunk: Buffer) => { restoreStderr += chunk.toString() })
@@ -293,4 +308,110 @@ export async function deleteBranch(
 
   manifest.branches.splice(idx, 1)
   await saveManifest(manifest, cwd)
+}
+
+// ─── Remote → Local Clone ────────────────────────────────────────────────────
+
+export interface CloneRemoteOptions {
+  /** Remote (source) database connection URL. */
+  remoteUrl: string
+  /** Local PostgreSQL base URL (e.g. postgres://postgres:postgres@localhost:54322/postgres). */
+  localBaseUrl: string
+  /** Database name to create locally. */
+  localDbName: string
+  /** Copy schema only (no data). */
+  schemaOnly?: boolean
+}
+
+/**
+ * Clone a remote database to a local PostgreSQL server via `pg_dump | pg_restore`.
+ *
+ * Unlike `createBranch` (which works on a single server), this dumps from one
+ * server and restores to another — the typical remote → local workflow.
+ *
+ * Returns the local database URL on success.
+ */
+export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<string> {
+  const compat = await checkPgDumpCompat(opts.remoteUrl)
+  if (!compat.compatible) {
+    throw new Error(compat.message)
+  }
+
+  const localMaintenanceUrl = opts.localBaseUrl
+  const localDbUrl = replaceDbName(opts.localBaseUrl, opts.localDbName)
+
+  // Create the empty target database on the local server
+  const client = new pg.Client({ connectionString: localMaintenanceUrl })
+  try {
+    await client.connect()
+    await client.query(`CREATE DATABASE "${opts.localDbName}"`)
+  } catch (err) {
+    const msg = (err as Error).message ?? ''
+    if (msg.includes('already exists')) {
+      throw new Error(
+        `Database "${opts.localDbName}" already exists on the local server. ` +
+        `Drop it first with: psql "${localMaintenanceUrl}" -c 'DROP DATABASE "${opts.localDbName}"'`,
+      )
+    }
+    throw new Error(`Failed to create local database: ${msg}`)
+  } finally {
+    await client.end()
+  }
+
+  // pg_dump from remote | pg_restore to local
+  const dumpArgs = ['--format=custom', '--no-owner', '--no-acl', opts.remoteUrl]
+  if (opts.schemaOnly) dumpArgs.unshift('--schema-only')
+
+  const restoreArgs = [
+    '--format=custom',
+    '--no-owner',
+    '--no-acl',
+    `--dbname=${localDbUrl}`,
+  ]
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const dump = spawn(compat.pgDumpPath, dumpArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
+      const restore = spawn(compat.pgRestorePath, restoreArgs, { stdio: [dump.stdout, 'pipe', 'pipe'] })
+
+      let restoreStderr = ''
+      restore.stderr?.on('data', (chunk: Buffer) => { restoreStderr += chunk.toString() })
+
+      let dumpError = ''
+      dump.stderr?.on('data', (chunk: Buffer) => { dumpError += chunk.toString() })
+
+      let dumpExit: number | null = null
+      let restoreExit: number | null = null
+      let settled = false
+
+      function trySettle() {
+        if (settled || dumpExit === null || restoreExit === null) return
+        settled = true
+        if (dumpExit !== 0) {
+          reject(new Error(`pg_dump failed (exit ${dumpExit}): ${dumpError}`))
+        } else if (restoreExit !== 0 && restoreExit !== 1) {
+          reject(new Error(`pg_restore failed (exit ${restoreExit}): ${restoreStderr}`))
+        } else {
+          resolve()
+        }
+      }
+
+      dump.on('close', (code) => { dumpExit = code ?? 1; trySettle() })
+      restore.on('close', (code) => { restoreExit = code ?? 1; trySettle() })
+      dump.on('error', (err) => { if (!settled) { settled = true; reject(err) } })
+      restore.on('error', (err) => { if (!settled) { settled = true; reject(err) } })
+    })
+  } catch (err) {
+    // Clean up the empty database on failure
+    const cleanup = new pg.Client({ connectionString: localMaintenanceUrl })
+    try {
+      await cleanup.connect()
+      await cleanup.query(`DROP DATABASE IF EXISTS "${opts.localDbName}"`)
+    } catch { /* best effort */ } finally {
+      await cleanup.end()
+    }
+    throw err
+  }
+
+  return localDbUrl
 }

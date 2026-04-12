@@ -1,19 +1,15 @@
 import { Help, type Command, type Interfaces } from '@oclif/core'
 
 /**
- * Desired command order — matches the natural workflow in the README:
- * setup → detect → fix → single-env ops → branching → easter egg
+ * Desired command order — matches the natural workflow:
+ * setup → detect → snapshot → clone → restore → easter egg
  */
 const ORDER = [
   'init',
-  'scan',
   'diff',
-  'promote',
   'snapshot',
   'clone',
-  'backup',
   'restore',
-  'branch',
   'hukam',
 ]
 
@@ -29,8 +25,7 @@ export default class CustomHelp extends Help {
 
   /**
    * Render only COMMANDS (no separate TOPICS section).
-   * Topics like `branch` appear as regular command entries —
-   * users discover subcommands via `supaforge branch --help`.
+   * Render only COMMANDS (no separate TOPICS section).
    */
   protected override async showRootHelp(): Promise<void> {
     const state = this.config.pjson?.oclif?.state as string | undefined

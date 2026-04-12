@@ -23,8 +23,10 @@ export class EdgeFunctionsCheck extends Check {
   }
 
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
-    const { projectRef: sourceRef, apiKey: sourceKey } = ctx.source
-    const { projectRef: targetRef, apiKey: targetKey } = ctx.target
+    const sourceRef = ctx.source.projectRef
+    const targetRef = ctx.target.projectRef
+    const sourceKey = ctx.source.accessToken
+    const targetKey = ctx.target.accessToken
 
     if (!sourceRef || !targetRef || !sourceKey || !targetKey) {
       return []
@@ -38,10 +40,10 @@ export class EdgeFunctionsCheck extends Check {
     return diffFunctions(source, target, targetRef, targetKey)
   }
 
-  private async listFunctions(projectRef: string, apiKey: string): Promise<EdgeFunction[]> {
+  private async listFunctions(projectRef: string, accessToken: string): Promise<EdgeFunction[]> {
     const url = `${MGMT_API}/${encodeURIComponent(projectRef)}/functions`
     const res = await this.fetchFn(url, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { Authorization: `Bearer ${accessToken}` },
     })
     if (!res.ok) throw new Error(`Failed to list functions for ${projectRef}: ${res.statusText}`)
     return res.json() as Promise<EdgeFunction[]>

@@ -5,12 +5,12 @@ import type { FetchFn } from '../../src/checks/edge-functions.js'
 
 function mockContext(): CheckContext {
   return {
-    source: { dbUrl: 'postgres://source', projectRef: 'src-ref', apiKey: 'src-key' },
-    target: { dbUrl: 'postgres://target', projectRef: 'tgt-ref', apiKey: 'tgt-key' },
+    source: { dbUrl: 'postgres://source', projectRef: 'src-ref', accessToken: 'src-key' },
+    target: { dbUrl: 'postgres://target', projectRef: 'tgt-ref', accessToken: 'tgt-key' },
     config: {
       environments: {
-        dev: { dbUrl: '', projectRef: 'src-ref', apiKey: 'src-key' },
-        prod: { dbUrl: '', projectRef: 'tgt-ref', apiKey: 'tgt-key' },
+        dev: { dbUrl: '', projectRef: 'src-ref', accessToken: 'src-key' },
+        prod: { dbUrl: '', projectRef: 'tgt-ref', accessToken: 'tgt-key' },
       },
       source: 'dev',
       target: 'prod',
@@ -109,7 +109,7 @@ describe('EdgeFunctionsCheck', () => {
     expect(ids).toContain('edge-fn-version-send-email')
   })
 
-  it('returns empty when projectRef or apiKey is missing', async () => {
+  it('returns empty when projectRef or accessToken is missing', async () => {
     const ctx: CheckContext = {
       source: { dbUrl: 'postgres://source' },
       target: { dbUrl: 'postgres://target' },

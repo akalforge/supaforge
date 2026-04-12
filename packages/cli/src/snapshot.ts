@@ -1,12 +1,17 @@
-import { spawn } from 'node:child_process'
-import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises'
+import { mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
 import type { EnvironmentConfig, SupaForgeConfig, SnapshotManifest, SnapshotLayerInfo } from './types/config'
-import { DEFAULT_IGNORE_SCHEMAS } from './defaults'
+import { DEFAULT_IGNORE_SCHEMAS, RELATION_NOT_FOUND } from './defaults'
+import { introspectSchema } from './schema-introspect'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
+
+/** Extract a concise error message from an unknown caught value. */
+function errMsg(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
 
 /** Supabase Management API base URL */
 const MGMT_API = 'https://api.supabase.com/v1/projects'
@@ -63,7 +68,7 @@ export async function captureSnapshot(options: SnapshotOptions): Promise<Snapsho
 
   const layers: Record<string, SnapshotLayerInfo> = {}
 
-  // Layer 1: Schema (pg_dump --schema-only)
+  // Layer 1: Schema (SQL introspection → JSON)
   layers.schema = await captureSchema(dir, options.env.dbUrl, ignoreSchemas)
 
   // Layer 2: RLS Policies
@@ -72,8 +77,8 @@ export async function captureSnapshot(options: SnapshotOptions): Promise<Snapsho
   // Layer 3: Edge Functions (API)
   layers['edge-functions'] = await captureEdgeFunctions(dir, options.env, fetchFn)
 
-  // Layer 4: Storage (API + DB)
-  layers.storage = await captureStorage(dir, options.env, fetchFn, queryFn)
+  // Layer 4: Storage (DB)
+  layers.storage = await captureStorage(dir, options.env, queryFn)
 
   // Layer 5: Auth Config (API)
   layers.auth = await captureAuthConfig(dir, options.env, fetchFn)
@@ -83,7 +88,7 @@ export async function captureSnapshot(options: SnapshotOptions): Promise<Snapsho
 
   // Layer 7: Reference Data
   const dataTables = options.config.checks?.data?.tables ?? []
-  layers.data = await captureData(dir, options.env.dbUrl, dataTables)
+  layers.data = await captureData(dir, options.env.dbUrl, dataTables, queryFn)
 
   // Layer 8: Webhooks
   layers.webhooks = await captureWebhooks(dir, options.env.dbUrl, queryFn)
@@ -111,22 +116,13 @@ async function captureSchema(
   dbUrl: string,
   ignoreSchemas: string[],
 ): Promise<SnapshotLayerInfo> {
-  const file = 'schema.sql'
+  const file = 'schema.json'
   try {
-    const excludeArgs = ignoreSchemas.flatMap(s => ['--exclude-schema', s])
-    const sql = await runPgDump([
-      '--schema-only',
-      '--no-owner',
-      '--no-acl',
-      '--no-comments',
-      ...excludeArgs,
-      dbUrl,
-    ])
-    await writeFile(join(dir, file), sql)
-    const tableCount = (sql.match(/CREATE TABLE/gi) ?? []).length
-    return { captured: true, file, itemCount: tableCount }
-  } catch {
-    return { captured: false, file, itemCount: 0 }
+    const schema = await introspectSchema(dbUrl, ignoreSchemas)
+    await writeFile(join(dir, file), JSON.stringify(schema, null, 2) + '\n')
+    return { captured: true, file, itemCount: schema.tables.length }
+  } catch (err) {
+    return { captured: false, file, itemCount: 0, error: errMsg(err) }
   }
 }
 
@@ -153,8 +149,8 @@ async function captureRlsPolicies(
       : '-- No RLS policies found\n'
     await writeFile(join(dir, file), output)
     return { captured: true, file, itemCount: rows.length }
-  } catch {
-    return { captured: false, file, itemCount: 0 }
+  } catch (err) {
+    return { captured: false, file, itemCount: 0, error: errMsg(err) }
   }
 }
 
@@ -164,50 +160,46 @@ async function captureEdgeFunctions(
   fetchFn: FetchFn,
 ): Promise<SnapshotLayerInfo> {
   const file = 'edge-functions.json'
-  if (!env.projectRef || !env.apiKey) {
-    return { captured: false, file, itemCount: 0 }
+  const token = env.accessToken
+  if (!env.projectRef || !token) {
+    return { captured: false, file, itemCount: 0, skipReason: 'no projectRef or accessToken configured' }
   }
 
   try {
     const url = `${MGMT_API}/${encodeURIComponent(env.projectRef)}/functions`
     const res = await fetchFn(url, {
-      headers: { Authorization: `Bearer ${env.apiKey}` },
+      headers: { Authorization: `Bearer ${token}` },
     })
     if (!res.ok) throw new Error(res.statusText)
     const functions = await res.json() as unknown[]
     await writeFile(join(dir, file), JSON.stringify(functions, null, 2) + '\n')
     return { captured: true, file, itemCount: functions.length }
-  } catch {
-    return { captured: false, file, itemCount: 0 }
+  } catch (err) {
+    return { captured: false, file, itemCount: 0, error: errMsg(err) }
   }
 }
 
 async function captureStorage(
   dir: string,
   env: EnvironmentConfig,
-  fetchFn: FetchFn,
   queryFn: QueryFn,
 ): Promise<SnapshotLayerInfo> {
   let bucketCount = 0
   let policyCount = 0
+  let storageError: string | undefined
 
-  // Buckets via API
+  // Buckets via direct DB query
   const bucketsFile = 'storage-buckets.json'
-  if ((env.projectRef || env.apiUrl) && env.apiKey) {
-    try {
-      const base = env.apiUrl
-        ? `${env.apiUrl}/storage/v1`
-        : `https://${encodeURIComponent(env.projectRef!)}.supabase.co/storage/v1`
-      const res = await fetchFn(`${base}/bucket`, {
-        headers: { Authorization: `Bearer ${env.apiKey}`, apikey: env.apiKey },
-      })
-      if (res.ok) {
-        const buckets = await res.json() as unknown[]
-        await writeFile(join(dir, bucketsFile), JSON.stringify(buckets, null, 2) + '\n')
-        bucketCount = buckets.length
-      }
-    } catch { /* skip */ }
-  }
+  try {
+    const buckets = await queryFn(env.dbUrl, `
+      SELECT id, name, public, file_size_limit, allowed_mime_types,
+             avif_autodetection, created_at, updated_at
+      FROM storage.buckets
+      ORDER BY name
+    `)
+    await writeFile(join(dir, bucketsFile), JSON.stringify(buckets, null, 2) + '\n')
+    bucketCount = buckets.length
+  } catch { /* storage schema may not exist — fall through to policies */ }
 
   // Storage policies via DB
   const policiesFile = 'storage-policies.sql'
@@ -223,12 +215,17 @@ async function captureStorage(
       : '-- No storage policies found\n'
     await writeFile(join(dir, policiesFile), output)
     policyCount = rows.length
-  } catch { /* skip */ }
+  } catch (err) {
+    storageError = errMsg(err)
+  }
 
+  const captured = bucketCount > 0 || policyCount > 0
   return {
-    captured: bucketCount > 0 || policyCount > 0,
+    captured,
     file: bucketsFile,
     itemCount: bucketCount + policyCount,
+    ...(storageError && !policyCount ? { error: storageError } : {}),
+    ...(!captured && !storageError ? { skipReason: 'no storage buckets or policies found' } : {}),
   }
 }
 
@@ -238,21 +235,22 @@ async function captureAuthConfig(
   fetchFn: FetchFn,
 ): Promise<SnapshotLayerInfo> {
   const file = 'auth.json'
-  if (!env.projectRef || !env.apiKey) {
-    return { captured: false, file, itemCount: 0 }
+  const token = env.accessToken
+  if (!env.projectRef || !token) {
+    return { captured: false, file, itemCount: 0, skipReason: 'no projectRef or accessToken configured' }
   }
 
   try {
     const url = `${MGMT_API}/${encodeURIComponent(env.projectRef)}/config/auth`
     const res = await fetchFn(url, {
-      headers: { Authorization: `Bearer ${env.apiKey}` },
+      headers: { Authorization: `Bearer ${token}` },
     })
     if (!res.ok) throw new Error(res.statusText)
     const config = await res.json() as Record<string, unknown>
     await writeFile(join(dir, file), JSON.stringify(config, null, 2) + '\n')
     return { captured: true, file, itemCount: Object.keys(config).length }
-  } catch {
-    return { captured: false, file, itemCount: 0 }
+  } catch (err) {
+    return { captured: false, file, itemCount: 0, error: errMsg(err) }
   }
 }
 
@@ -276,10 +274,13 @@ async function captureCronJobs(
       : '-- No cron jobs found (pg_cron may not be installed)\n'
     await writeFile(join(dir, file), output)
     return { captured: true, file, itemCount: rows.length }
-  } catch {
-    // pg_cron not installed
-    await writeFile(join(dir, file), '-- pg_cron extension not available\n')
-    return { captured: false, file, itemCount: 0 }
+  } catch (err) {
+    const msg = errMsg(err)
+    await writeFile(join(dir, file), '-- pg_cron extension not available\n').catch(() => {})
+    if (msg.includes(RELATION_NOT_FOUND)) {
+      return { captured: false, file, itemCount: 0, skipReason: 'pg_cron extension not installed' }
+    }
+    return { captured: false, file, itemCount: 0, error: msg }
   }
 }
 
@@ -287,30 +288,38 @@ async function captureData(
   dir: string,
   dbUrl: string,
   tables: string[],
+  queryFn: QueryFn,
 ): Promise<SnapshotLayerInfo> {
   if (tables.length === 0) {
-    return { captured: false, file: 'data/', itemCount: 0 }
+    return { captured: false, file: 'data/', itemCount: 0, skipReason: 'no tables configured in checks.data.tables' }
   }
 
   const dataDir = join(dir, 'data')
   await mkdir(dataDir, { recursive: true })
   let captured = 0
+  const errors: string[] = []
 
   for (const table of tables) {
     try {
-      const sql = await runPgDump([
-        '--data-only',
-        '--no-owner',
-        '--no-acl',
-        `--table=${table}`,
-        dbUrl,
-      ])
-      await writeFile(join(dataDir, `${table}.sql`), sql)
+      const rows = await queryFn(dbUrl, `SELECT * FROM ${quoteIdent(table)} ORDER BY 1`)
+      await writeFile(join(dataDir, `${table}.json`), JSON.stringify(rows, null, 2) + '\n')
       captured++
-    } catch { /* skip individual table failures */ }
+    } catch (err) {
+      errors.push(`${table}: ${errMsg(err)}`)
+    }
   }
 
-  return { captured: captured > 0, file: 'data/', itemCount: captured }
+  return {
+    captured: captured > 0,
+    file: 'data/',
+    itemCount: captured,
+    ...(errors.length > 0 ? { error: errors.join('; ') } : {}),
+  }
+}
+
+/** Quote a schema-qualified or bare table name for safe inclusion in SQL. */
+function quoteIdent(table: string): string {
+  return table.split('.').map(p => `"${p.replace(/"/g, '""')}"`).join('.')
 }
 
 async function captureWebhooks(
@@ -366,9 +375,13 @@ async function captureWebhooks(
       : '-- No webhooks found\n'
     await writeFile(join(dir, file), output)
     return { captured: true, file, itemCount: statements.length }
-  } catch {
-    await writeFile(join(dir, file), '-- supabase_functions schema not available\n')
-    return { captured: false, file, itemCount: 0 }
+  } catch (err) {
+    const msg = errMsg(err)
+    await writeFile(join(dir, file), '-- supabase_functions schema not available\n').catch(() => {})
+    if (msg.includes(RELATION_NOT_FOUND)) {
+      return { captured: false, file, itemCount: 0, skipReason: 'supabase_functions schema not available' }
+    }
+    return { captured: false, file, itemCount: 0, error: msg }
   }
 }
 
@@ -393,8 +406,8 @@ async function captureExtensions(
       : '-- No extensions found\n'
     await writeFile(join(dir, file), output)
     return { captured: true, file, itemCount: rows.length }
-  } catch {
-    return { captured: false, file, itemCount: 0 }
+  } catch (err) {
+    return { captured: false, file, itemCount: 0, error: errMsg(err) }
   }
 }
 
@@ -437,25 +450,46 @@ export async function listSnapshots(cwd = process.cwd()): Promise<{ dir: string;
   }
 }
 
-// ─── pg_dump Helper ──────────────────────────────────────────────────────────
+/** Default number of snapshots to keep when pruning. */
+export const DEFAULT_KEEP_COUNT = 7
 
-function runPgDump(args: string[]): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const proc = spawn('pg_dump', args, { stdio: ['ignore', 'pipe', 'pipe'] })
-    const chunks: Buffer[] = []
-    let stderr = ''
-    proc.stdout.on('data', (chunk: Buffer) => chunks.push(chunk))
-    proc.stderr.on('data', (chunk: Buffer) => { stderr += chunk.toString() })
-    proc.on('close', (code) => {
-      if (code === 0) {
-        resolve(Buffer.concat(chunks).toString('utf-8'))
-      } else {
-        reject(new Error(`pg_dump failed (exit ${code}): ${stderr}`))
-      }
-    })
-    proc.on('error', reject)
-  })
+export interface PruneResult {
+  /** Snapshot directories that were deleted. */
+  deleted: string[]
+  /** Snapshot directories that were kept. */
+  kept: string[]
 }
+
+/**
+ * Prune old snapshots, keeping the most recent `keep` snapshots.
+ * Snapshots are sorted chronologically by their timestamp directory name.
+ * Returns metadata about which directories were deleted.
+ */
+export async function pruneSnapshots(
+  keep = DEFAULT_KEEP_COUNT,
+  cwd = process.cwd(),
+): Promise<PruneResult> {
+  const snapshots = await listSnapshots(cwd)
+
+  // Already within budget — nothing to prune
+  if (snapshots.length <= keep) {
+    return { deleted: [], kept: snapshots.map(s => s.dir) }
+  }
+
+  // Snapshots come back sorted oldest-first from listSnapshots
+  const toDelete = snapshots.slice(0, snapshots.length - keep)
+  const toKeep = snapshots.slice(snapshots.length - keep)
+
+  for (const snap of toDelete) {
+    await rm(snap.dir, { recursive: true, force: true })
+  }
+
+  return {
+    deleted: toDelete.map(s => s.dir),
+    kept: toKeep.map(s => s.dir),
+  }
+}
+
 
 // ─── SQL Generation Helpers (reused from checks) ────────────────────────────
 

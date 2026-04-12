@@ -14,8 +14,8 @@ export interface RestoreOptions {
   targetUrl: string
   /** Project ref for API-based operations (auth, storage, edge functions). */
   targetProjectRef?: string
-  /** API key for Supabase Management API. */
-  targetApiKey?: string
+  /** Access token for Supabase Management API. */
+  targetAccessToken?: string
   /** Restore from a specific snapshot directory. */
   snapshotDir?: string
   /** Or restore from migrations up to a specific version. */

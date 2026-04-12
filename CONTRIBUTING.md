@@ -92,7 +92,7 @@ docs: update README with hook examples
 ```
 packages/cli/
 ├── src/
-│   ├── commands/    # oclif CLI commands
+│   ├── commands/    # CLI commands
 │   ├── checks/      # Drift detection checks
 │   ├── types/       # TypeScript interfaces
 │   ├── config.ts    # Config loader

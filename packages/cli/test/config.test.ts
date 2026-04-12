@@ -1,7 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { resolveConfig, validateConfig, expandEnvVars, parseProjectRef } from '../src/config.js'
+import { loadEnvFiles } from '../src/env-loader.js'
 import { DEFAULT_IGNORE_SCHEMAS } from '../src/defaults.js'
 import type { SupaForgeConfig } from '../src/types/config.js'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const validConfig: SupaForgeConfig = {
   environments: {
@@ -124,20 +128,20 @@ describe('resolveConfig with env vars', () => {
   beforeEach(() => {
     process.env.DEV_DATABASE_URL = 'postgres://localhost:5432/dev'
     process.env.PROD_DATABASE_URL = 'postgres://localhost:5432/prod'
-    process.env.PROD_API_KEY = 'secret-key'
+    process.env.PROD_ACCESS_TOKEN = 'secret-token'
   })
 
   afterEach(() => {
     delete process.env.DEV_DATABASE_URL
     delete process.env.PROD_DATABASE_URL
-    delete process.env.PROD_API_KEY
+    delete process.env.PROD_ACCESS_TOKEN
   })
 
-  it('expands env vars in dbUrl and apiKey during resolve', () => {
+  it('expands env vars in dbUrl and accessToken during resolve', () => {
     const config: SupaForgeConfig = {
       environments: {
         dev: { dbUrl: '$DEV_DATABASE_URL' },
-        prod: { dbUrl: '$PROD_DATABASE_URL', apiKey: '$PROD_API_KEY' },
+        prod: { dbUrl: '$PROD_DATABASE_URL', accessToken: '$PROD_ACCESS_TOKEN' },
       },
       source: 'dev',
       target: 'prod',
@@ -147,7 +151,7 @@ describe('resolveConfig with env vars', () => {
 
     expect(resolved.environments.dev.dbUrl).toBe('postgres://localhost:5432/dev')
     expect(resolved.environments.prod.dbUrl).toBe('postgres://localhost:5432/prod')
-    expect(resolved.environments.prod.apiKey).toBe('secret-key')
+    expect(resolved.environments.prod.accessToken).toBe('secret-token')
   })
 })
 
@@ -189,5 +193,80 @@ describe('resolveConfig normalises projectRef', () => {
 
     expect(resolved.environments.dev.projectRef).toBe('abc123')
     expect(resolved.environments.prod.projectRef).toBe('xyz789')
+  })
+})
+
+describe('loadEnvFiles', () => {
+  let tempDir: string
+  const saved: Record<string, string | undefined> = {}
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'supaforge-env-'))
+    saved.LOAD_ENV_TEST_A = process.env.LOAD_ENV_TEST_A
+    saved.LOAD_ENV_TEST_B = process.env.LOAD_ENV_TEST_B
+    saved.LOAD_ENV_TEST_EXISTING = process.env.LOAD_ENV_TEST_EXISTING
+    saved.NODE_ENV = process.env.NODE_ENV
+    delete process.env.LOAD_ENV_TEST_A
+    delete process.env.LOAD_ENV_TEST_B
+    delete process.env.LOAD_ENV_TEST_EXISTING
+    delete process.env.NODE_ENV
+  })
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true })
+    for (const [key, val] of Object.entries(saved)) {
+      if (val === undefined) delete process.env[key]
+      else process.env[key] = val
+    }
+  })
+
+  it('loads KEY=value pairs into process.env', async () => {
+    await writeFile(join(tempDir, '.env'), 'LOAD_ENV_TEST_A=hello\nLOAD_ENV_TEST_B=world\n')
+    const result = await loadEnvFiles(tempDir)
+    expect(process.env.LOAD_ENV_TEST_A).toBe('hello')
+    expect(process.env.LOAD_ENV_TEST_B).toBe('world')
+    expect(result.loaded).toContain('.env')
+    expect(result.injected).toBe(2)
+  })
+
+  it('strips surrounding quotes', async () => {
+    await writeFile(join(tempDir, '.env'), 'LOAD_ENV_TEST_A="quoted"\nLOAD_ENV_TEST_B=\'single\'\n')
+    await loadEnvFiles(tempDir)
+    expect(process.env.LOAD_ENV_TEST_A).toBe('quoted')
+    expect(process.env.LOAD_ENV_TEST_B).toBe('single')
+  })
+
+  it('does not overwrite existing env vars', async () => {
+    process.env.LOAD_ENV_TEST_EXISTING = 'original'
+    await writeFile(join(tempDir, '.env'), 'LOAD_ENV_TEST_EXISTING=overwritten\n')
+    await loadEnvFiles(tempDir)
+    expect(process.env.LOAD_ENV_TEST_EXISTING).toBe('original')
+  })
+
+  it('skips comments and blank lines', async () => {
+    await writeFile(join(tempDir, '.env'), '# comment\n\nLOAD_ENV_TEST_A=ok\n')
+    await loadEnvFiles(tempDir)
+    expect(process.env.LOAD_ENV_TEST_A).toBe('ok')
+  })
+
+  it('returns empty result when no .env files exist', async () => {
+    const result = await loadEnvFiles(tempDir)
+    expect(result.loaded).toEqual([])
+    expect(result.injected).toBe(0)
+  })
+
+  it('.env.local takes priority over .env', async () => {
+    await writeFile(join(tempDir, '.env'), 'LOAD_ENV_TEST_A=base\n')
+    await writeFile(join(tempDir, '.env.local'), 'LOAD_ENV_TEST_A=local\n')
+    await loadEnvFiles(tempDir)
+    expect(process.env.LOAD_ENV_TEST_A).toBe('local')
+  })
+
+  it('loads NODE_ENV-specific files when NODE_ENV is set', async () => {
+    process.env.NODE_ENV = 'production'
+    await writeFile(join(tempDir, '.env'), 'LOAD_ENV_TEST_A=base\n')
+    await writeFile(join(tempDir, '.env.production'), 'LOAD_ENV_TEST_A=prod\n')
+    await loadEnvFiles(tempDir)
+    expect(process.env.LOAD_ENV_TEST_A).toBe('prod')
   })
 })

@@ -11,12 +11,17 @@ import { RealtimeCheck } from './realtime'
 import { VaultCheck } from './vault'
 import { ExtensionsCheck } from './extensions'
 
-export function createDefaultRegistry(): CheckRegistry {
+export interface RegistryOptions {
+  /** Enable file-level drift detection in the storage check. */
+  includeFiles?: boolean
+}
+
+export function createDefaultRegistry(options: RegistryOptions = {}): CheckRegistry {
   const registry = new CheckRegistry()
   registry.register(new SchemaCheck())
   registry.register(new RlsCheck())
   registry.register(new EdgeFunctionsCheck())
-  registry.register(new StorageCheck())
+  registry.register(new StorageCheck(undefined, options.includeFiles ?? false))
   registry.register(new AuthCheck())
   registry.register(new CronCheck())
   registry.register(new DataCheck())

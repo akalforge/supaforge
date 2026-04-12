@@ -21,33 +21,19 @@ Built by **[Akal Forge](https://github.com/akalforge)** — precision developer 
 ```bash
 npm install -g @akalforge/supaforge
 
-# Create config
-cat > supaforge.config.json << 'EOF'
-{
-  "environments": {
-    "dev": {
-      "dbUrl": "postgres://postgres:pass@db.DEV.supabase.co:5432/postgres",
-      "projectRef": "your-dev-ref",
-      "apiKey": "your-dev-service-role-key"
-    },
-    "prod": {
-      "dbUrl": "postgres://postgres:pass@db.PROD.supabase.co:5432/postgres",
-      "projectRef": "your-prod-ref",
-      "apiKey": "your-prod-service-role-key"
-    }
-  },
-  "source": "dev",
-  "target": "prod"
-}
-EOF
+# Create config interactively
+supaforge init
 
-# Scan for drift
-supaforge scan
-
-# Show detailed diff with SQL fixes
+# Check for drift
 supaforge diff
 
-# Alias for scan 🙏
+# Show detailed SQL diffs
+supaforge diff --detail
+
+# Fix the drift
+supaforge diff --apply
+
+# Alias for diff
 supaforge hukam
 ```
 
@@ -68,23 +54,23 @@ cat > supaforge.config.json << 'EOF'
     "prod": {
       "dbUrl": "$PROD_DATABASE_URL",
       "projectRef": "https://your-project.supabase.co",
-      "apiKey": "$PROD_API_KEY"
+      "accessToken": "$SUPABASE_ACCESS_TOKEN"
     }
   }
 }
 EOF
 
 # Capture a full snapshot (schema, RLS, cron, storage, auth, etc.)
-supaforge snapshot --env=prod --apply
+supaforge snapshot --env=prod
 
 # Clone remote to local for development
 supaforge clone --env=prod --apply
 
 # Incremental backup (snapshot + migration file)
-supaforge backup --env=prod --apply
+supaforge snapshot --env=prod --migration
 ```
 
-> Single-database configs omit `source` and `target`. The `scan`, `diff`, and `promote` commands require two environments — use `snapshot`, `clone`, `backup`, and `restore` instead.
+> Single-database configs omit `source` and `target`. The `diff` command requires two environments — use `snapshot`, `clone`, and `restore` instead.
 
 ## Comprehensive Checks
 
@@ -128,7 +114,7 @@ How SupaForge maps to every standard Supabase module (see [Supabase Features](ht
 | **Platform** | Network restrictions | ⬜ N/A | Platform-level (not diffable via SQL or Management API) |
 | | SSL enforcement | ⬜ N/A | Platform-level |
 | | Custom domains | ⬜ N/A | Platform-level |
-| | Branching | ⬜ N/A | SupaForge provides its own branching via `supaforge branch` |
+| | Branching | ⬜ N/A | SupaForge provides its own cloning via `supaforge clone` |
 | | Read replicas | ⬜ N/A | Platform-level |
 
 ✅ = Covered &nbsp; 🔜 = Planned &nbsp; ⬜ = Not applicable / not planned
@@ -136,26 +122,25 @@ How SupaForge maps to every standard Supabase module (see [Supabase Features](ht
 ## Commands
 
 ```
-supaforge scan              Scan everything
-supaforge scan --check=rls  Scan a specific check only
-supaforge scan --json       Output as JSON
-supaforge diff              Show detailed diff with SQL fixes
-supaforge diff --check=rls  Detailed diff for one check
-supaforge promote           Preview fixes (dry-run by default)
-supaforge promote --apply   Actually execute fixes
-supaforge hukam             Alias for scan 🙏
+supaforge init                            Create config interactively
+supaforge diff                            Summary: what's drifted?
+supaforge diff --detail                   Show detailed SQL diffs
+supaforge diff --apply                    Fix the drift
+supaforge diff --check=rls                Limit to a specific check
+supaforge hukam                           Alias for diff 🙏
 
-# Single-environment (backup & restore)
-supaforge snapshot --env=prod --apply   Capture full 9-layer snapshot
-supaforge clone --env=prod --apply      Clone remote to local
-supaforge backup --env=prod --apply     Incremental backup (snapshot + diff)
-supaforge restore --env=local --apply   Restore from snapshot or migrations
+supaforge snapshot                        Capture full 9-layer snapshot
+supaforge snapshot --migration            Also generate incremental migration diff
+supaforge snapshot --list                 List all snapshots
+supaforge snapshot --prune --apply        Delete old snapshots
 
-# Branching
-supaforge branch create feature-x --apply
-supaforge branch list
-supaforge branch diff feature-x
-supaforge branch delete feature-x --apply
+supaforge clone --env=prod                Preflight checks
+supaforge clone --env=prod --apply        Clone remote to local
+supaforge clone --list                    List existing clones
+supaforge clone --delete=<name> --apply   Remove a clone
+
+supaforge restore --env=local --from-snapshot=latest --apply   Restore from snapshot
+supaforge restore --env=local --from-migrations --apply        Replay migrations
 ```
 
 > All commands that modify state preview by default. Add `--apply` to execute.
@@ -170,12 +155,12 @@ Create `supaforge.config.json` in your project root:
     "dev": {
       "dbUrl": "postgres://...",
       "projectRef": "abc123",
-      "apiKey": "your-service-role-key"
+      "accessToken": "your-service-role-key"
     },
     "prod": {
       "dbUrl": "postgres://...",
       "projectRef": "xyz789",
-      "apiKey": "your-service-role-key"
+      "accessToken": "your-service-role-key"
     }
   },
   "source": "dev",
@@ -220,7 +205,7 @@ const result = await scan(registry, { config }, bus)
 ```
 packages/cli/
 ├── src/
-│   ├── commands/        # oclif commands (scan, diff, hukam)
+│   ├── commands/        # CLI commands (diff, snapshot, clone, restore)
 │   ├── checks/          # Drift detection checks
 │   │   ├── base.ts      # Abstract Check class
 │   │   ├── registry.ts  # CheckRegistry
@@ -233,7 +218,7 @@ packages/cli/
 │   ├── scanner.ts       # Scan orchestrator
 │   ├── scoring.ts       # Health score (0–100)
 │   └── render.ts        # Terminal output
-└── test/                # 58 tests across 7 suites
+└── test/                # 366 tests across 30 files
 ```
 
 ## Development
@@ -242,12 +227,12 @@ packages/cli/
 git clone https://github.com/akalforge/supaforge.git
 cd supaforge/packages/cli
 npm install
-npm test       # Run all tests (220 unit + e2e)
+npm test       # Run all tests (366 across 30 files)
 npm run lint   # Type-check
 npm run build  # Build with tsup
 
 # Run in dev mode
-./bin/dev.js scan
+./bin/dev.js diff
 ```
 
 ### Integration Tests (Docker / Podman)

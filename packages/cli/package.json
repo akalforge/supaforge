@@ -45,6 +45,7 @@
   "dependencies": {
     "@dbdiff/cli": "^3.0.0-rc.2",
     "@oclif/core": "^4",
+    "@supabase/supabase-js": "^2.103.0",
     "pg": "^8"
   },
   "devDependencies": {

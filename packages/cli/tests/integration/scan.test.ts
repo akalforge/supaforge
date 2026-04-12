@@ -130,7 +130,7 @@ describe('integration: full scan', () => {
   })
 
   it.skipIf(skipIfNoContainers())('should gracefully skip API-dependent layers', () => {
-    // Without projectRef/apiKey, auth and edge-functions should be clean (no-op)
+    // Without projectRef/accessToken, auth and edge-functions should be clean (no-op)
     const auth = result.checks.find(l => l.check === 'auth')!
     const edgeFn = result.checks.find(l => l.check === 'edge-functions')!
     expect(auth.status).not.toBe('error')

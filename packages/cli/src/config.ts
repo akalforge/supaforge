@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import type { SupaForgeConfig, EnvironmentConfig } from './types/config'
 import { DEFAULT_IGNORE_SCHEMAS } from './defaults'
+import { loadEnvFiles } from './env-loader'
 
 const CONFIG_FILENAME = 'supaforge.config.json'
 
@@ -41,7 +42,7 @@ export function parseProjectRef(value: string): string {
 }
 
 /**
- * Expand env var references in all sensitive environment fields (dbUrl, apiKey).
+ * Expand env var references in all sensitive environment fields (dbUrl, accessToken).
  * Also normalises projectRef from full URL to bare ref.
  */
 function expandEnvironments(
@@ -52,7 +53,7 @@ function expandEnvironments(
     result[name] = {
       ...env,
       dbUrl: expandEnvVars(env.dbUrl),
-      ...(env.apiKey ? { apiKey: expandEnvVars(env.apiKey) } : {}),
+      ...(env.accessToken ? { accessToken: expandEnvVars(env.accessToken) } : {}),
       ...(env.projectRef ? { projectRef: parseProjectRef(env.projectRef) } : {}),
     }
   }
@@ -60,6 +61,7 @@ function expandEnvironments(
 }
 
 export async function loadConfig(cwd = process.cwd()): Promise<SupaForgeConfig> {
+  await loadEnvFiles(cwd)
   const configPath = resolve(cwd, CONFIG_FILENAME)
   const raw = await readFile(configPath, 'utf-8')
   const config = JSON.parse(raw) as SupaForgeConfig

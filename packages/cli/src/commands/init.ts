@@ -1,11 +1,17 @@
 import { Command, Flags } from '@oclif/core'
 import { createInterface } from 'node:readline'
-import { writeFile, access } from 'node:fs/promises'
+import { writeFile, readFile, appendFile, access } from 'node:fs/promises'
 import { resolve } from 'node:path'
 import { validateConfig, validateSingleEnvConfig, expandEnvVars, parseProjectRef } from '../config'
+import { INIT_HINTS } from '../defaults'
+import { UserCancelledError, isUserCancelled, ISSUES_URL } from '../errors'
+import { printBanner, printHints, ok, warn, dim, cmd, bold } from '../ui'
 import type { SupaForgeConfig, EnvironmentConfig } from '../types/config'
 
 const CONFIG_FILENAME = 'supaforge.config.json'
+
+/** Entries that supaforge init ensures are present in .gitignore. */
+const GITIGNORE_ENTRIES = [CONFIG_FILENAME, '.supaforge/']
 
 export type AskFn = ((question: string) => Promise<string>) & { close: () => void }
 
@@ -22,10 +28,83 @@ export function createPrompt(
   output: NodeJS.WritableStream = process.stdout,
 ): AskFn {
   const rl = createInterface({ input, output })
+  let closed = false
+  let rejectPending: ((err: Error) => void) | null = null
+
+  rl.on('close', () => {
+    closed = true
+    if (rejectPending) {
+      rejectPending(new UserCancelledError())
+      rejectPending = null
+    }
+  })
+
   const ask = (question: string): Promise<string> =>
-    new Promise((resolve) => rl.question(question, (answer) => resolve(answer.trim())))
+    new Promise((resolve, reject) => {
+      if (closed) {
+        reject(new UserCancelledError())
+        return
+      }
+      rejectPending = reject
+      rl.question(question, (answer) => {
+        rejectPending = null
+        resolve(answer.trim())
+      })
+    })
   ask.close = () => rl.close()
   return ask as AskFn
+}
+
+/**
+ * Prompt until the user enters a value that matches one of the options.
+ * Accepts exact match, single-char shortcut, or unambiguous prefix.
+ * Returns the full option string.
+ */
+export async function fuzzySelect(
+  ask: (question: string) => Promise<string>,
+  log: (msg: string) => void,
+  prompt: string,
+  options: string[],
+  defaultOption?: string,
+): Promise<string> {
+  while (true) {
+    const raw = await ask(prompt)
+    const input = raw.toLowerCase()
+
+    // Empty → default
+    if (!input && defaultOption) return defaultOption
+
+    // Exact match (case-insensitive)
+    const exact = options.find((o) => o.toLowerCase() === input)
+    if (exact) return exact
+
+    // Prefix match — must be unambiguous
+    const prefixMatches = options.filter((o) => o.toLowerCase().startsWith(input))
+    if (prefixMatches.length === 1) return prefixMatches[0]
+
+    if (prefixMatches.length > 1) {
+      log(warn(`  \u26a0 "${raw}" is ambiguous \u2014 could be: ${prefixMatches.join(', ')}`))
+    } else {
+      log(warn(`  \u26a0 "${raw}" is not recognised. Options: ${options.join(', ')}`))
+    }
+  }
+}
+
+/**
+ * Prompt until the user enters a non-empty value.
+ * Re-prompts with a warning on empty input; Ctrl+C propagates as UserCancelledError.
+ */
+export async function askRequired(
+  ask: (question: string) => Promise<string>,
+  log: (msg: string) => void,
+  prompt: string,
+  fieldName: string,
+): Promise<string> {
+  while (true) {
+    const value = await ask(prompt)
+    if (value) return value
+    log(warn(`  ⚠ ${fieldName} is required.`))
+  }
 }
 
 /**
@@ -39,59 +118,65 @@ export async function collectConfig(
   const environments: Record<string, EnvironmentConfig> = {}
   const envVars: Record<string, string> = {}
 
-  const mode = await ask('Setup mode — compare two environments or single database? [multi/single]: ')
-  const singleEnv = mode.toLowerCase().startsWith('s')
+  let singleEnv: boolean | null = null
+  while (singleEnv === null) {
+    const selected = await fuzzySelect(
+      ask, log,
+      'Setup mode \u2014 compare two environments or single database? [multi/single]: ',
+      ['multi', 'single'],
+      'multi',
+    )
+    singleEnv = selected === 'single'
+  }
+  log(ok(`  ✓ Mode: ${singleEnv ? 'single' : 'multi'}\n`))
 
   if (singleEnv) {
-    log('Set up your Supabase database.')
-    log('Sensitive values (DB URL, API key) will be stored as $ENV_VAR references.\n')
+    log(bold('Set up your Supabase database.'))
+    log(dim('Sensitive values (DB URL, API key) will be stored as $ENV_VAR references.\n'))
   } else {
-    log('Add your Supabase environments (at least 2).')
-    log('Sensitive values (DB URL, API key) will be stored as $ENV_VAR references.\n')
+    log(bold('Add your Supabase environments (at least 2).'))
+    log(dim('Sensitive values (DB URL, API key) will be stored as $ENV_VAR references.\n'))
   }
 
   if (singleEnv) {
     const defaultName = 'prod'
     let name = await ask(`Environment name [${defaultName}]: `)
     if (!name) name = defaultName
+    log(ok(`  ✓ Environment: ${name}`))
 
     const prefix = envPrefix(name)
     const dbUrlVar = `${prefix}_DATABASE_URL`
 
-    const dbUrl = await ask(`  Database URL for "${name}": `)
-    if (!dbUrl) {
-      log('  ⚠ Database URL is required.')
-      // Re-ask once
-      const retry = await ask(`  Database URL for "${name}": `)
-      if (!retry) {
-        log('  ✗ Cannot continue without a database URL.')
-        return { config: { environments }, envVars }
-      }
-      envVars[dbUrlVar] = retry
-    } else {
-      envVars[dbUrlVar] = dbUrl
-    }
+    INIT_HINTS.DB_URL.forEach((l) => log(dim(l)))
+    const dbUrl = await askRequired(ask, log, `  Database URL for "${name}": `, 'Database URL')
+    envVars[dbUrlVar] = dbUrl
 
-    const projectUrl = await ask(`  Supabase Project URL for "${name}" (e.g. https://xyz.supabase.co, optional): `)
+    log('')
+    printHints(INIT_HINTS.PROJECT_URL, log)
+    const projectUrl = await ask(`  Supabase Project URL or Project ID for "${name}" (e.g. https://xyz.supabase.co, optional): `)
     const projectRef = projectUrl ? parseProjectRef(projectUrl) : ''
 
-    let apiKey = ''
+    let accessToken = ''
     if (projectRef) {
-      apiKey = await ask(`  Supabase service-role key for "${name}" (Settings → API, optional): `)
+      log('')
+      printHints(INIT_HINTS.ACCESS_TOKEN, log)
+      accessToken = await ask(`  Supabase access token for "${name}" (optional): `)
     }
 
-    const apiKeyVar = `${prefix}_API_KEY`
-    if (apiKey) {
-      envVars[apiKeyVar] = apiKey
+    const accessTokenVar = `${prefix}_ACCESS_TOKEN`
+    if (accessToken) {
+      envVars[accessTokenVar] = accessToken
     }
 
     const env: EnvironmentConfig = { dbUrl: `$${dbUrlVar}` }
     if (projectRef) env.projectRef = projectRef
-    if (apiKey) env.apiKey = `$${apiKeyVar}`
+    if (accessToken) env.accessToken = `$${accessTokenVar}`
 
     environments[name] = env
 
-    const dataTables = await ask('\nReference-data tables to track (comma-separated, or Enter to skip): ')
+    log('')
+    printHints(INIT_HINTS.DATA_TABLES, log)
+    const dataTables = await ask('Reference-data tables to track (comma-separated, or Enter to skip): ')
     const checks = dataTables
       ? { data: { tables: dataTables.split(',').map((t) => t.trim()).filter(Boolean) } }
       : undefined
@@ -115,55 +200,67 @@ export async function collectConfig(
     if (!name && defaultName) name = defaultName
 
     if (!name) {
-      log('  ⚠ Name cannot be empty, try again.')
+      log(warn('  \u26a0 Name cannot be empty, try again.'))
       continue
     }
 
     if (environments[name]) {
-      log(`  ⚠ "${name}" already exists, try again.`)
+      log(warn(`  \u26a0 "${name}" already exists, try again.`))
       continue
     }
 
     const prefix = envPrefix(name)
     const dbUrlVar = `${prefix}_DATABASE_URL`
 
-    const dbUrl = await ask(`  Database URL for "${name}": `)
-    if (!dbUrl) {
-      log('  ⚠ Database URL is required, try again.')
-      continue
+    if (envCount === 0) {
+      printHints(INIT_HINTS.DB_URL, log)
     }
+    const dbUrl = await askRequired(ask, log, `  Database URL for "${name}": `, 'Database URL')
 
     envVars[dbUrlVar] = dbUrl
 
-    const projectUrl = await ask(`  Supabase Project URL for "${name}" (e.g. https://xyz.supabase.co, optional): `)
+    if (envCount === 0) {
+      log('')
+      printHints(INIT_HINTS.PROJECT_URL, log)
+    }
+    const projectUrl = await ask(`  Supabase Project URL or Project ID for "${name}" (e.g. https://xyz.supabase.co, optional): `)
     const projectRef = projectUrl ? parseProjectRef(projectUrl) : ''
 
-    let apiKey = ''
+    let accessToken = ''
     if (projectRef) {
-      apiKey = await ask(`  Supabase service-role key for "${name}" (Settings → API, optional): `)
+      if (envCount === 0) {
+        log('')
+        printHints(INIT_HINTS.ACCESS_TOKEN, log)
+      }
+      accessToken = await ask(`  Supabase access token for "${name}" (optional): `)
     }
 
-    const apiKeyVar = `${prefix}_API_KEY`
-    if (apiKey) {
-      envVars[apiKeyVar] = apiKey
+    const accessTokenVar = `${prefix}_ACCESS_TOKEN`
+    if (accessToken) {
+      envVars[accessTokenVar] = accessToken
     }
 
     const env: EnvironmentConfig = { dbUrl: `$${dbUrlVar}` }
     if (projectRef) env.projectRef = projectRef
-    if (apiKey) env.apiKey = `$${apiKeyVar}`
+    if (accessToken) env.accessToken = `$${accessTokenVar}`
 
     environments[name] = env
     envCount++
+    log(ok(`  ✓ Environment "${name}" added`))
     log('')
   }
 
   const envNames = Object.keys(environments)
 
   const source = await selectOne(ask, log, 'Source environment (truth)', envNames, envNames[0])
+  log(ok(`  ✓ Source: ${source}`))
   const remaining = envNames.filter((n) => n !== source)
   const target = await selectOne(ask, log, 'Target environment (to sync)', remaining, remaining[0])
+  log(ok(`  ✓ Target: ${target}`))
 
-  const dataTables = await ask('\nReference-data tables to track (comma-separated, or Enter to skip): ')
+  log('')
+  printHints(INIT_HINTS.DATA_TABLES, log)
+  const dataTables = await ask('Reference-data tables to track (comma-separated, or Enter to skip): ')
   const checks = dataTables
     ? { data: { tables: dataTables.split(',').map((t) => t.trim()).filter(Boolean) } }
     : undefined
@@ -193,12 +290,36 @@ async function selectOne(
   defaultOption: string,
 ): Promise<string> {
   const optList = options.map((o) => (o === defaultOption ? `[${o}]` : o)).join(' / ')
-  while (true) {
-    const answer = await ask(`${label} (${optList}): `)
-    const value = answer || defaultOption
-    if (options.includes(value)) return value
-    log(`  ⚠ Must be one of: ${options.join(', ')}`)
+  return fuzzySelect(ask, log, `${label} (${optList}): `, options, defaultOption)
+}
+
+/**
+ * Ensure required entries are present in .gitignore.
+ * Creates the file if it doesn't exist. Returns the list of entries that were added.
+ */
+export async function ensureGitignore(
+  entries: string[],
+  cwd: string = process.cwd(),
+): Promise<string[]> {
+  const gitignorePath = resolve(cwd, '.gitignore')
+  let existing = ''
+  try {
+    existing = await readFile(gitignorePath, 'utf-8')
+  } catch {
+    // file does not exist
   }
+
+  const lines = existing.split('\n').map((l) => l.trim())
+  const missing = entries.filter((e) => !lines.includes(e))
+  if (missing.length === 0) return []
+
+  const block = '\n# Added by supaforge init\n' + missing.join('\n') + '\n'
+  if (existing) {
+    await appendFile(gitignorePath, block)
+  } else {
+    await writeFile(gitignorePath, block.trimStart(), 'utf-8')
+  }
+  return missing
 }
 
 export default class Init extends Command {
@@ -222,17 +343,23 @@ export default class Init extends Command {
     const configPath = resolve(process.cwd(), CONFIG_FILENAME)
 
     if (!flags.force) {
+      let configExists = false
       try {
         await access(configPath)
-        this.error(
-          `${CONFIG_FILENAME} already exists. Use --force to overwrite.`,
-        )
+        configExists = true
       } catch {
         // File does not exist — proceed
       }
+
+      if (configExists) {
+        this.error(
+          `${CONFIG_FILENAME} already exists. Use --force to overwrite.`,
+        )
+      }
     }
 
-    this.log('\n🔧 SupaForge Init — create your config file\n')
+    printBanner((msg) => this.log(msg))
+    this.log(bold('  🔧 Init — create your config file\n'))
 
     const ask = createPrompt()
 
@@ -251,7 +378,7 @@ export default class Init extends Command {
             {
               ...env,
               dbUrl: expandEnvVars(env.dbUrl),
-              ...(env.apiKey ? { apiKey: expandEnvVars(env.apiKey) } : {}),
+              ...(env.accessToken ? { accessToken: expandEnvVars(env.accessToken) } : {}),
             },
           ]),
         ),
@@ -272,7 +399,13 @@ export default class Init extends Command {
 
       const json = JSON.stringify(config, null, 2) + '\n'
       await writeFile(configPath, json, 'utf-8')
-      this.log(`\n✅ Wrote ${CONFIG_FILENAME}`)
+      this.log(`\n${ok('✅ Wrote')} ${bold(CONFIG_FILENAME)}`)
+
+      // Ensure supaforge paths are in .gitignore
+      const added = await ensureGitignore(GITIGNORE_ENTRIES)
+      if (added.length > 0) {
+        this.log(`${ok('✅ Added to .gitignore:')} ${added.join(', ')}`)
+      }
 
       // Write .env file with the actual secrets
       if (Object.keys(envVars).length > 0) {
@@ -281,31 +414,75 @@ export default class Init extends Command {
           .map(([key, value]) => `${key}=${value}`)
           .join('\n') + '\n'
 
-        let shouldWrite = true
+        let envExists = false
         try {
           await access(envPath)
-          // .env exists — append instead of overwrite
-          const { appendFile } = await import('node:fs/promises')
-          await appendFile(envPath, '\n# Added by supaforge init\n' + envContent)
-          this.log(`📎 Appended env vars to .env`)
+          envExists = true
         } catch {
-          await writeFile(envPath, envContent, 'utf-8')
-          this.log(`📎 Wrote .env with database credentials`)
+          // does not exist
         }
 
-        this.log('\n⚠️  Add .env to .gitignore — never commit secrets to git.')
+        if (envExists) {
+          await appendFile(envPath, '\n# Added by supaforge init\n' + envContent)
+          this.log(`${ok('📎 Appended env vars to')} ${bold('.env')}`)
+        } else {
+          await writeFile(envPath, envContent, 'utf-8')
+          this.log(`${ok('📎 Wrote .env')} with database credentials`)
+        }
+
+        // Check .gitignore and offer to add .env if missing
+        const gitignorePath = resolve(process.cwd(), '.gitignore')
+        let gitignoreHasEnv = false
+        try {
+          const gitignore = await readFile(gitignorePath, 'utf-8')
+          gitignoreHasEnv = gitignore.split('\n').some((line) => {
+            const trimmed = line.trim()
+            return trimmed === '.env' || trimmed === '.env*' || trimmed === '.env.*'
+          })
+        } catch {
+          // .gitignore does not exist
+        }
+
+        if (!gitignoreHasEnv) {
+          const addIt = await confirm(ask, `${warn('⚠️  .env is not in .gitignore.')} Add it now?`, true)
+          if (addIt) {
+            let gitignoreExists = false
+            try {
+              await access(gitignorePath)
+              gitignoreExists = true
+            } catch {
+              // does not exist
+            }
+
+            if (gitignoreExists) {
+              await appendFile(gitignorePath, '\n# Secrets — added by supaforge init\n.env\n')
+            } else {
+              await writeFile(gitignorePath, '# Secrets — added by supaforge init\n.env\n', 'utf-8')
+            }
+            this.log(`${ok('✅ Added .env to .gitignore')}`)
+          } else {
+            this.log(`${warn('⚠️  Remember to add .env to .gitignore')} — never commit secrets to git.`)
+          }
+        }
       }
 
-      this.log('\nNext steps:')
+      this.log(`\n${bold('Next steps:')}`)
       if (isSingleEnv) {
         const envName = Object.keys(config.environments)[0]
-        this.log(`  supaforge snapshot --env=${envName} --apply   — capture current state`)
-        this.log(`  supaforge clone --env=${envName} --apply      — clone to local`)
-        this.log(`  supaforge backup --env=${envName} --apply     — incremental backup\n`)
+        this.log(`  ${cmd(`supaforge snapshot --env=${envName}`)}   ${dim('— capture current state')}`)
+        this.log(`  ${cmd(`supaforge clone --env=${envName} --apply`)}      ${dim('— clone to local')}`)
+        this.log(`  ${cmd(`supaforge snapshot --env=${envName} --migration`)}   ${dim('— incremental backup')}\n`)
       } else {
-        this.log('  supaforge scan     — check for drift')
-        this.log('  supaforge diff     — see detailed differences\n')
+        this.log(`  ${cmd('supaforge diff')}            ${dim('— check for drift')}`)
+        this.log(`  ${cmd('supaforge diff --detail')}    ${dim('— see detailed SQL diffs')}`)
+        this.log(`  ${cmd('supaforge diff --apply')}     ${dim('— fix the drift')}\n`)
       }
+    } catch (error) {
+      if (isUserCancelled(error)) {
+        this.log(`\n${dim('Cancelled.')}`)
+        return
+      }
+      throw error
     } finally {
       ask.close()
     }

@@ -23,8 +23,10 @@ export class AuthCheck extends Check {
   }
 
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
-    const { projectRef: sourceRef, apiKey: sourceKey } = ctx.source
-    const { projectRef: targetRef, apiKey: targetKey } = ctx.target
+    const sourceRef = ctx.source.projectRef
+    const targetRef = ctx.target.projectRef
+    const sourceKey = ctx.source.accessToken
+    const targetKey = ctx.target.accessToken
 
     if (!sourceRef || !targetRef || !sourceKey || !targetKey) {
       return []
@@ -38,10 +40,10 @@ export class AuthCheck extends Check {
     return diffAuthConfig(source, target, targetRef, targetKey)
   }
 
-  private async fetchAuthConfig(projectRef: string, apiKey: string): Promise<Record<string, unknown>> {
+  private async fetchAuthConfig(projectRef: string, accessToken: string): Promise<Record<string, unknown>> {
     const url = `${MGMT_API}/${encodeURIComponent(projectRef)}/config/auth`
     const res = await this.fetchFn(url, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { Authorization: `Bearer ${accessToken}` },
     })
     if (!res.ok) throw new Error(`Failed to fetch auth config for ${projectRef}: ${res.statusText}`)
     return res.json() as Promise<Record<string, unknown>>

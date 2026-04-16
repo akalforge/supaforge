@@ -107,6 +107,36 @@ describe('integration: full scan', () => {
     expect(modifiedSelect).toBeDefined()
   })
 
+  it.skipIf(skipIfNoContainers())('should detect extensions drift', () => {
+    const extensions = result.checks.find(l => l.check === 'extensions')!
+    expect(extensions.status).toBe('drifted')
+
+    // pg_trgm is in source but not target
+    const missingTrgm = extensions.issues.find(i => i.id === 'ext-missing-pg_trgm')
+    expect(missingTrgm).toBeDefined()
+    expect(missingTrgm!.sql?.up).toContain('CREATE EXTENSION')
+  })
+
+  it.skipIf(skipIfNoContainers())('should detect realtime drift', () => {
+    const realtime = result.checks.find(l => l.check === 'realtime')!
+    expect(realtime.status).toBe('drifted')
+
+    // supaforge_live publication is in source but not target
+    const missingPub = realtime.issues.find(i => i.id.includes('supaforge_live'))
+    expect(missingPub).toBeDefined()
+    expect(missingPub!.sql?.up).toContain('CREATE PUBLICATION')
+  })
+
+  it.skipIf(skipIfNoContainers())('should detect vault drift', () => {
+    const vault = result.checks.find(l => l.check === 'vault')!
+    expect(vault.status).toBe('drifted')
+
+    // smtp_password secret is in source but not target
+    const missingSecret = vault.issues.find(i => i.id === 'vault-missing-smtp_password')
+    expect(missingSecret).toBeDefined()
+    expect(missingSecret!.sql?.up).toContain('vault.create_secret')
+  })
+
   it.skipIf(skipIfNoContainers())('should produce a score below 100', () => {
     expect(result.score).toBeLessThan(100)
     expect(result.score).toBeGreaterThanOrEqual(0)
@@ -117,7 +147,7 @@ describe('integration: full scan', () => {
     expect(result.summary.total).toBeGreaterThanOrEqual(3)
   })
 
-  it.skipIf(skipIfNoContainers())('should include all 8 layers in results', () => {
+  it.skipIf(skipIfNoContainers())('should include all check layers in results', () => {
     const checkNames = result.checks.map(l => l.check)
     expect(checkNames).toContain('schema')
     expect(checkNames).toContain('rls')
@@ -127,6 +157,9 @@ describe('integration: full scan', () => {
     expect(checkNames).toContain('cron')
     expect(checkNames).toContain('data')
     expect(checkNames).toContain('webhooks')
+    expect(checkNames).toContain('extensions')
+    expect(checkNames).toContain('realtime')
+    expect(checkNames).toContain('vault')
   })
 
   it.skipIf(skipIfNoContainers())('should gracefully skip API-dependent layers', () => {
@@ -170,7 +203,7 @@ describe('integration: single-layer scan', () => {
       },
     })
     const registry = createDefaultRegistry()
-    const result = await scan(registry, { config, checks: ['rls', 'cron', 'webhooks', 'storage'] })
+    const result = await scan(registry, { config, checks: ['rls', 'cron', 'webhooks', 'storage', 'extensions', 'realtime', 'vault'] })
 
     for (const c of result.checks) {
       if (c.status === 'skipped') continue

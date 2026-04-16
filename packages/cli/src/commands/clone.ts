@@ -11,10 +11,18 @@ import {
   deleteBranch,
 } from '../branch.js'
 import { checkPgDumpCompat } from '../pg-tools.js'
+import { startLocalPg, DEFAULT_LOCAL_PORT, LOCAL_PG_USER, LOCAL_PG_PASSWORD } from '../local-pg.js'
+import { ok, warn, dim, cmd, bold } from '../ui.js'
+import { DEFAULT_IGNORE_SCHEMAS } from '../defaults.js'
+import { CLONE_EXTRA_EXCLUDE_SCHEMAS, SUPAFORGE_DIR, MIGRATIONS_SUBDIR } from '../constants.js'
+import { errMsg, redactUrls } from '../utils/error.js'
 import type { SupaForgeConfig } from '../types/config.js'
 
-/** Default local Supabase CLI PostgreSQL port. */
-const SUPABASE_LOCAL_PORT = '54322'
+/** Combined list of schemas to exclude from pg_dump when cloning. */
+const CLONE_EXCLUDE_SCHEMAS = [
+  ...DEFAULT_IGNORE_SCHEMAS,
+  ...CLONE_EXTRA_EXCLUDE_SCHEMAS,
+]
 
 /**
  * Clone a remote environment to a local database and manage clones.
@@ -31,7 +39,9 @@ export default class Clone extends BaseCommand {
   static override examples = [
     '<%= config.bin %> clone --env=production',
     '<%= config.bin %> clone --env=production --apply',
+    '<%= config.bin %> clone --env=production --force --apply',
     '<%= config.bin %> clone --env=production --schema-only --apply',
+    '<%= config.bin %> clone --env=production --start-local --apply',
     '<%= config.bin %> clone --list',
     '<%= config.bin %> clone --delete=my-clone --apply',
   ]
@@ -46,11 +56,20 @@ export default class Clone extends BaseCommand {
       default: 'supaforge_local',
     }),
     'local-url': Flags.string({
-      description: 'Local PostgreSQL URL (default: postgres://postgres:postgres@localhost:54322/postgres)',
-      default: 'postgres://postgres:postgres@localhost:54322/postgres',
+      description: 'Local PostgreSQL URL (default: postgres://postgres:postgres@localhost:5432/postgres)',
+      default: `postgres://${LOCAL_PG_USER}:${LOCAL_PG_PASSWORD}@localhost:${DEFAULT_LOCAL_PORT}/postgres`,
+    }),
+    'start-local': Flags.boolean({
+      description: 'Auto-start a local PostgreSQL container via Podman or Docker',
+      default: false,
     }),
     'schema-only': Flags.boolean({
       description: 'Copy schema only, no data',
+      default: false,
+    }),
+    force: Flags.boolean({
+      char: 'f',
+      description: 'Drop and recreate the target database if it already exists',
       default: false,
     }),
     apply: Flags.boolean({
@@ -77,7 +96,7 @@ export default class Clone extends BaseCommand {
       const branches = await listBranches()
 
       if (branches.length === 0) {
-        this.log('\nNo clones found. Create one with: supaforge clone --env=<name> --apply\n')
+        this.log(`\n  No clones found. Create one with: ${cmd('supaforge clone --env=<name> --apply')}\n`)
         return
       }
 
@@ -86,13 +105,13 @@ export default class Clone extends BaseCommand {
         return
       }
 
-      this.log(`\n${branches.length} clone(s):\n`)
+      this.log(`\n  ${bold(`${branches.length} clone(s):`)}\n`)
       for (const b of branches) {
-        this.log(`  ${b.name}`)
-        this.log(`    Database: ${b.dbName}`)
-        this.log(`    From:     ${b.createdFrom}`)
-        this.log(`    Created:  ${b.createdAt}`)
-        this.log(`    Schema:   ${b.schemaOnly ? 'only' : 'full'}`)
+        this.log(`    ${bold(b.name)}`)
+        this.log(`      Database: ${b.dbName}`)
+        this.log(`      From:     ${b.createdFrom}`)
+        this.log(`      Created:  ${b.createdAt}`)
+        this.log(`      Schema:   ${b.schemaOnly ? 'only' : 'full'}`)
         this.log('')
       }
       return
@@ -109,60 +128,148 @@ export default class Clone extends BaseCommand {
       }
 
       if (!flags.apply) {
-        this.log(`\nDelete clone preview (dry-run)\n`)
-        this.log(`  Clone:    ${branch.name}`)
-        this.log(`  Database: ${branch.dbName}`)
-        this.log(`  Created:  ${branch.createdAt}`)
-        this.log(`  From:     ${branch.createdFrom}`)
+        this.log(`\n  ${bold('Delete clone preview')} ${dim('(dry-run)')}\n`)
+        this.log(`    Clone:    ${branch.name}`)
+        this.log(`    Database: ${branch.dbName}`)
+        this.log(`    Created:  ${branch.createdAt}`)
+        this.log(`    From:     ${branch.createdFrom}`)
         this.log('')
-        this.log('  This would:')
-        this.log(`    1. Terminate connections to "${branch.dbName}"`)
-        this.log(`    2. DROP DATABASE "${branch.dbName}"`)
-        this.log('    3. Remove clone from .supaforge/branches.json')
-        this.log('\n  → Add --apply to delete the clone.\n')
+        this.log('    This would:')
+        this.log(`      1. Terminate connections to "${branch.dbName}"`)
+        this.log(`      2. DROP DATABASE "${branch.dbName}"`)
+        this.log('      3. Remove clone from .supaforge/branches.json')
+        this.log(`\n    → Add ${cmd('--apply')} to delete the clone.\n`)
         return
       }
 
-      this.log(`\nDeleting clone "${flags.delete}"...\n`)
+      this.log(`\n  Deleting clone "${branch.name}"...\n`)
       await deleteBranch(flags.delete, env.dbUrl)
-      this.log(`  Clone "${flags.delete}" deleted.\n`)
+      this.log(`  ${ok('✓')} Clone "${branch.name}" deleted.\n`)
       return
     }
 
     // ── Clone: preflight + execute ───────────────────────────────────────────
     const { envName, env } = this.resolveEnv(config, flags.env)
     const localDbName = flags['local-db']
-    const localBaseUrl = flags['local-url']
+    let localBaseUrl = flags['local-url']
+    let startedContainer = false
+
+    // Auto-start a local PostgreSQL container if requested
+    if (flags['start-local']) {
+      this.log(`\n  ${bold('Starting local PostgreSQL container...')}\n`)
+      const info = await startLocalPg()
+      localBaseUrl = info.url
+      startedContainer = true
+      this.log(`    ${ok('✓')} PostgreSQL running via ${bold(info.runtime)} on port ${info.port}\n`)
+    }
+
     const localDbUrl = replaceDbName(localBaseUrl, localDbName)
 
+    // Always run preflight checks — even with --apply
+    const pre = this.createPreflight('Clone preflight checks')
+      .addDatabase('Remote', envName, env.dbUrl)
+      .addInfo('Local DB', localDbName)
+      .addInfo('Local URL', dim(redactUrls(localDbUrl)))
+      .addInfo('Schema only', String(flags['schema-only']))
+
+    if (flags['start-local']) {
+      pre.addCheck('Local PostgreSQL', async () => ({
+        detail: `auto-started via --start-local`,
+      }))
+    } else {
+      pre.addDatabase('Local', 'local', localBaseUrl)
+    }
+
+    pre.addCheck('pg_dump compatibility', async () => {
+      try {
+        const compat = await checkPgDumpCompat(env.dbUrl)
+        if (compat.compatible) {
+          const pathNote = compat.pgDumpPath === 'pg_dump' ? '' : ` (${compat.pgDumpPath})`
+          return { detail: `v${compat.localMajor} ↔ server v${compat.serverMajor}${pathNote}` }
+        }
+        return { error: compat.message }
+      } catch (err) {
+        return { error: `pg_dump check failed: ${(err as Error).message}` }
+      }
+    })
+
+    pre.addCheck('Target database', async () => {
+      try {
+        const client = new pg.Client({ connectionString: localBaseUrl })
+        await client.connect()
+        const { rows } = await client.query(
+          'SELECT 1 FROM pg_database WHERE datname = $1',
+          [localDbName],
+        )
+        await client.end()
+        if (rows.length > 0) {
+          if (flags.force) {
+            return { detail: `"${localDbName}" exists — will be dropped (--force)` }
+          }
+          return {
+            error: `"${localDbName}" already exists on local server`,
+            hints: [`Use ${cmd('--force')} to drop and recreate it.`],
+          }
+        }
+        return { detail: `"${localDbName}" does not exist yet` }
+      } catch {
+        return {} // Can't check — let the apply step handle it
+      }
+    })
+
+    const report = await pre.run()
+
     if (!flags.apply) {
-      await this.runPreflightChecks(envName, env.dbUrl, localDbName, localBaseUrl, localDbUrl, flags['schema-only'])
+      if (report.passed) {
+        this.log(`    Steps that will be performed:`)
+        this.log('      1. Create local database via pg_dump | pg_restore')
+        this.log('      2. Capture full snapshot of remote environment')
+        this.log('      3. Store snapshot as baseline migration')
+        this.log('      4. Update supaforge.config.json with local + remote environments')
+        this.log('')
+        this.log(`    → Add ${cmd('--apply')} to execute the clone.\n`)
+      }
       return
     }
 
-    // Execute clone
-    this.log(`\nCloning "${envName}" to local database "${localDbName}"...\n`)
+    if (!report.passed) {
+      this.error('Clone aborted — fix the issues above first.', { exit: 1 })
+    }
 
-    this.log('  [1/4] Creating local database...')
+    // Execute clone
+    this.log(`\n  ${bold(`Cloning "${envName}" to local database "${localDbName}"...`)}\n`)
+
+    this.log('    [1/4] Creating local database...')
     try {
       await cloneRemoteToLocal({
         remoteUrl: env.dbUrl,
         localBaseUrl,
         localDbName,
         schemaOnly: flags['schema-only'],
+        force: flags.force,
+        excludeSchemas: CLONE_EXCLUDE_SCHEMAS,
+        onProgress: (p) => {
+          const mb = (p.bytesTransferred / 1024 / 1024).toFixed(1)
+          const sec = Math.round(p.elapsedMs / 1000)
+          process.stdout.write(`\r      ${dim(`pg_dump → pg_restore: ${mb} MB transferred (${sec}s)`)}    `)
+        },
       })
-      this.log(`    + Database created: ${localDbName}`)
+      process.stdout.write('\n')
+      this.log(`      ${ok('✓')} Database created: ${bold(localDbName)}`)
     } catch (err) {
-      this.error(`Failed to create local database: ${(err as Error).message}`)
+      process.stdout.write('\n')
+      const msg = errMsg(err)
+      this.log(`      ${warn('✗')} Failed: ${msg}`)
+      this.error('Clone aborted at step 1/4.', { exit: 1 })
     }
 
-    this.log('  [2/4] Capturing remote snapshot...')
+    this.log('    [2/4] Capturing remote snapshot...')
     const snapshot = await captureSnapshot({ envName, env, config })
     const capturedCount = Object.values(snapshot.manifest.layers).filter(l => l.captured).length
-    this.log(`    ✓ Snapshot captured: ${capturedCount} layers`)
+    this.log(`      ${ok('✓')} Snapshot captured: ${capturedCount} layers`)
 
-    this.log('  [3/4] Storing baseline migration...')
-    const migrationsDir = resolve('.supaforge', 'migrations')
+    this.log('    [3/4] Storing baseline migration...')
+    const migrationsDir = resolve(SUPAFORGE_DIR, MIGRATIONS_SUBDIR)
     await mkdir(migrationsDir, { recursive: true })
     const migrationFile = resolve(migrationsDir, `${snapshot.timestamp}_clone-baseline.json`)
     const migration = {
@@ -176,9 +283,9 @@ export default class Clone extends BaseCommand {
       down: { sql: [], api: [] },
     }
     await writeFile(migrationFile, JSON.stringify(migration, null, 2) + '\n')
-    this.log(`    ✓ Baseline stored: ${migrationFile}`)
+    this.log(`      ${ok('✓')} Baseline stored: ${migrationFile}`)
 
-    this.log('  [4/4] Updating config...')
+    this.log('    [4/4] Updating config...')
     const newConfig: SupaForgeConfig = {
       ...config,
       environments: {
@@ -190,121 +297,19 @@ export default class Clone extends BaseCommand {
     }
     const configPath = resolve('supaforge.config.json')
     await writeFile(configPath, JSON.stringify(newConfig, null, 2) + '\n')
-    this.log(`    ✓ Config updated: ${configPath}`)
+    this.log(`      ${ok('✓')} Config updated: ${configPath}`)
 
     if (flags.json) {
       this.log(JSON.stringify({ snapshot: snapshot.manifest, config: newConfig }, null, 2))
       return
     }
 
-    this.log('\n  Clone complete!\n')
-    this.log('  Your workflow is now:')
-    this.log('    1. Develop against the local database')
-    this.log('    2. supaforge diff            — see what drifted')
-    this.log('    3. supaforge diff --apply     — push changes to remote')
-    this.log('    4. supaforge snapshot          — capture the current state')
+    this.log(`\n  ${ok('Clone complete!')}\n`)
+    this.log(`  ${bold('Your workflow is now:')}`)
+    this.log(`    1. Develop against the local database`)
+    this.log(`    2. ${cmd('supaforge diff')}            ${dim('— see what drifted')}`)
+    this.log(`    3. ${cmd('supaforge diff --apply')}     ${dim('— push changes to remote')}`)
+    this.log(`    4. ${cmd('supaforge snapshot')}          ${dim('— capture the current state')}`)
     this.log('')
-  }
-
-  /** Validate that cloning is possible before the user commits with --apply. */
-  private async runPreflightChecks(
-    envName: string,
-    remoteUrl: string,
-    localDbName: string,
-    localBaseUrl: string,
-    localDbUrl: string,
-    schemaOnly: boolean,
-  ): Promise<void> {
-    this.log('\nClone preflight checks\n')
-    this.log(`  Source:      ${envName} (${this.redactUrl(remoteUrl)})`)
-    this.log(`  Local DB:    ${localDbName}`)
-    this.log(`  Local URL:   ${this.redactUrl(localDbUrl)}`)
-    this.log(`  Schema only: ${schemaOnly}`)
-    this.log('')
-
-    let failed = false
-
-    this.log('  Checks:')
-
-    // Check 1: Remote DB reachable
-    try {
-      const client = new pg.Client({ connectionString: remoteUrl })
-      await client.connect()
-      const { rows } = await client.query('SHOW server_version')
-      const serverVersion = (rows[0] as Record<string, string>).server_version
-      await client.end()
-      this.log(`    ✓ Remote database reachable (PostgreSQL ${serverVersion})`)
-    } catch (err) {
-      this.log(`    ✗ Remote database not reachable: ${(err as Error).message}`)
-      failed = true
-    }
-
-    // Check 2: pg_dump compatibility
-    if (!failed) {
-      try {
-        const compat = await checkPgDumpCompat(remoteUrl)
-        if (compat.compatible) {
-          const pathNote = compat.pgDumpPath === 'pg_dump' ? '' : ` (${compat.pgDumpPath})`
-          this.log(`    ✓ pg_dump v${compat.localMajor} compatible with server v${compat.serverMajor}${pathNote}`)
-        } else {
-          this.log(`    ✗ ${compat.message}`)
-          failed = true
-        }
-      } catch (err) {
-        this.log(`    ✗ pg_dump check failed: ${(err as Error).message}`)
-        failed = true
-      }
-    }
-
-    // Check 3: Local PostgreSQL reachable (with Supabase CLI hint)
-    try {
-      const client = new pg.Client({ connectionString: localBaseUrl })
-      await client.connect()
-      await client.end()
-      this.log('    ✓ Local PostgreSQL reachable')
-    } catch (err) {
-      const urlObj = new URL(localBaseUrl)
-      const isSupabasePort = urlObj.port === SUPABASE_LOCAL_PORT
-      const hint = isSupabasePort
-        ? `\n\n  Hint: Port ${SUPABASE_LOCAL_PORT} is the Supabase CLI default. Run "supabase start" to start your local Supabase instance.`
-        : ''
-      this.log(`    ✗ Local PostgreSQL not reachable at ${this.redactUrl(localBaseUrl)}: ${(err as Error).message}${hint}`)
-      failed = true
-    }
-
-    // Check 4: Target database doesn't already exist
-    if (!failed) {
-      try {
-        const client = new pg.Client({ connectionString: localBaseUrl })
-        await client.connect()
-        const { rows } = await client.query(
-          'SELECT 1 FROM pg_database WHERE datname = $1',
-          [localDbName],
-        )
-        await client.end()
-        if (rows.length > 0) {
-          this.log(`    ✗ Database "${localDbName}" already exists on local server`)
-          failed = true
-        } else {
-          this.log(`    ✓ Database "${localDbName}" does not exist yet`)
-        }
-      } catch {
-        // If we can't check, let the apply step handle it
-      }
-    }
-
-    this.log('')
-    if (failed) {
-      this.log('  Some checks failed. Fix the issues above before cloning.\n')
-      return
-    }
-
-    this.log('  All checks passed. Steps that will be performed:')
-    this.log('    1. Create local database via pg_dump | pg_restore')
-    this.log('    2. Capture full snapshot of remote environment')
-    this.log('    3. Store snapshot as baseline migration')
-    this.log('    4. Update supaforge.config.json with local + remote environments')
-    this.log('')
-    this.log('  → Add --apply to execute the clone.\n')
   }
 }

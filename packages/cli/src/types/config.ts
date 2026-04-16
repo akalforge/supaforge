@@ -9,6 +9,7 @@ export interface EnvironmentConfig {
 
 export interface ChecksConfig {
   data?: { tables: string[] }
+  migrations?: { dir?: string }
 }
 
 export interface SupaForgeConfig {

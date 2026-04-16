@@ -1,6 +1,7 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
+import { quoteLiteral } from '../utils/sql'
 import { Check, type CheckContext } from './base'
 
 /**
@@ -98,7 +99,7 @@ export function diffVaultSecrets(source: VaultSecret[], target: VaultSecret[]): 
         description: `Secret "${key}" exists in source but not in target. The secret value cannot be auto-synced — it must be recreated manually in the target environment.`,
         sourceValue: { name: s.name, description: s.description, unique_name: s.unique_name },
         sql: {
-          up: `SELECT vault.create_secret('PLACEHOLDER_VALUE', '${escapeSql(s.unique_name ?? s.name)}'${s.description ? `, '${escapeSql(s.description)}'` : ''});`,
+          up: `SELECT vault.create_secret('PLACEHOLDER_VALUE', ${quoteLiteral(s.unique_name ?? s.name)}${s.description ? `, ${quoteLiteral(s.description)}` : ''});`,
           down: `-- Remove secret "${key}" from target (manual action required)`,
         },
       })
@@ -152,8 +153,8 @@ export function diffVaultSecrets(source: VaultSecret[], target: VaultSecret[]): 
         targetValue: { name: ts.name, description: ts.description, unique_name: ts.unique_name },
         sql: hasStructuralDiff
           ? {
-              up: `SELECT vault.update_secret('${ts.id}'${ss.unique_name !== ts.unique_name ? `, NULL, '${escapeSql(ss.unique_name ?? '')}'` : ''}${ss.description !== ts.description ? `, NULL, NULL, '${escapeSql(ss.description ?? '')}'` : ''});`,
-              down: `SELECT vault.update_secret('${ts.id}'${ts.unique_name !== ss.unique_name ? `, NULL, '${escapeSql(ts.unique_name ?? '')}'` : ''}${ts.description !== ss.description ? `, NULL, NULL, '${escapeSql(ts.description ?? '')}'` : ''});`,
+              up: `SELECT vault.update_secret('${ts.id}'${ss.unique_name !== ts.unique_name ? `, NULL, ${quoteLiteral(ss.unique_name ?? '')}` : ''}${ss.description !== ts.description ? `, NULL, NULL, ${quoteLiteral(ss.description ?? '')}` : ''});`,
+              down: `SELECT vault.update_secret('${ts.id}'${ts.unique_name !== ss.unique_name ? `, NULL, ${quoteLiteral(ts.unique_name ?? '')}` : ''}${ts.description !== ss.description ? `, NULL, NULL, ${quoteLiteral(ts.description ?? '')}` : ''});`,
             }
           : undefined,
       })
@@ -163,6 +164,3 @@ export function diffVaultSecrets(source: VaultSecret[], target: VaultSecret[]): 
   return issues
 }
 
-function escapeSql(value: string): string {
-  return value.replace(/'/g, "''")
-}

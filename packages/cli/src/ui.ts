@@ -38,8 +38,16 @@ const BANNER = `
 const TAGLINE = '  precision developer tools, forged to last'
 const CREDIT = 'by Akal Forge'
 
-/** Print the SupaForge ASCII banner. */
+/** Minimum terminal width needed to render the full ASCII banner without wrapping. */
+const BANNER_MIN_WIDTH = 80
+
+/** Print the SupaForge ASCII banner. Falls back to a compact header on narrow terminals. */
 export function printBanner(log: (msg: string) => void): void {
-  log(c('greenBright', BANNER))
+  const cols = process.stdout.columns ?? BANNER_MIN_WIDTH
+  if (cols >= BANNER_MIN_WIDTH) {
+    log(c('greenBright', BANNER))
+  } else {
+    log(c('greenBright', '\n  ⚒  SupaForge'))
+  }
   log(`  ${dim(TAGLINE)}  ${dim('·')}  ${dim(CREDIT)}\n`)
 }

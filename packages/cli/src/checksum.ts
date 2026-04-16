@@ -1,5 +1,6 @@
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
+import { quoteIdent, quoteLiteral } from './utils/sql'
 
 /**
  * Quick table-level checksum using PostgreSQL's built-in hash functions.
@@ -91,14 +92,4 @@ export async function filterChangedTables(
   }
 
   return { changed, skipped }
-}
-
-/** Quote a schema-qualified or bare table name for safe inclusion in SQL. */
-function quoteIdent(table: string): string {
-  return table.split('.').map(p => `"${p.replace(/"/g, '""')}"`).join('.')
-}
-
-/** Quote a string literal for SQL. */
-function quoteLiteral(value: string): string {
-  return `'${value.replace(/'/g, "''")}'`
 }

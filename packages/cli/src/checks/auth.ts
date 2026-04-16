@@ -1,10 +1,8 @@
 import type { DriftIssue, SyncAction } from '../types/drift'
 import { Check, type CheckContext } from './base'
+import { SUPABASE_MGMT_API } from '../constants'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
-
-/** Supabase Management API base URL */
-const MGMT_API = 'https://api.supabase.com/v1/projects'
 
 const CRITICAL_KEYS = [
   'EXTERNAL_EMAIL_ENABLED',
@@ -41,7 +39,7 @@ export class AuthCheck extends Check {
   }
 
   private async fetchAuthConfig(projectRef: string, accessToken: string): Promise<Record<string, unknown>> {
-    const url = `${MGMT_API}/${encodeURIComponent(projectRef)}/config/auth`
+    const url = `${SUPABASE_MGMT_API}/${encodeURIComponent(projectRef)}/config/auth`
     const res = await this.fetchFn(url, {
       headers: { Authorization: `Bearer ${accessToken}` },
     })
@@ -69,7 +67,7 @@ function diffAuthConfig(
       // Build a PATCH action to sync this specific key to the target
       const action: SyncAction = {
         method: 'PATCH',
-        url: `${MGMT_API}/${encodeURIComponent(targetRef)}/config/auth`,
+        url: `${SUPABASE_MGMT_API}/${encodeURIComponent(targetRef)}/config/auth`,
         headers: { Authorization: `Bearer ${targetKey}` },
         body: { [key]: sv },
         label: `Set auth config "${key}" to ${JSON.stringify(sv)} in target`,

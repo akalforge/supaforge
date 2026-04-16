@@ -69,6 +69,7 @@ describe('SchemaCheck', () => {
       type: 'schema',
       sourceUrl: 'postgres://source',
       targetUrl: 'postgres://target',
+      ignoreSchemas: ['auth', 'storage'],
     })
   })
 
@@ -87,6 +88,24 @@ describe('SchemaCheck', () => {
     }
     const check = new SchemaCheck(runFn)
     await expect(check.scan(mockContext())).rejects.toThrow('Connection refused')
+  })
+
+  it('uses DEFAULT_IGNORE_SCHEMAS when config has no ignoreSchemas', async () => {
+    let capturedOptions: unknown
+    const runFn: RunDbDiffFn = async (opts) => {
+      capturedOptions = opts
+      return { up: '', down: '' }
+    }
+    const check = new SchemaCheck(runFn)
+    const ctx = mockContext()
+    delete ctx.config.ignoreSchemas
+    await check.scan(ctx)
+
+    const opts = capturedOptions as { ignoreSchemas?: string[] }
+    expect(opts.ignoreSchemas).toBeDefined()
+    expect(opts.ignoreSchemas!.length).toBeGreaterThan(0)
+    expect(opts.ignoreSchemas).toContain('auth')
+    expect(opts.ignoreSchemas).toContain('storage')
   })
 
   it('handles multiple statements', async () => {

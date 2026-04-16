@@ -72,4 +72,49 @@ describe('computeScore', () => {
     }
     expect(computeScore([infoOnly])).toBe(99)
   })
+
+  it('penalises errored checks', () => {
+    const errored: CheckResult = {
+      check: 'schema',
+      status: 'error',
+      issues: [],
+      error: 'connection refused',
+      durationMs: 10,
+    }
+    expect(computeScore([errored])).toBe(97) // 100 - 3
+  })
+
+  it('does not return 100 when all checks errored', () => {
+    const errored: CheckResult = {
+      check: 'schema',
+      status: 'error',
+      issues: [],
+      error: 'connection refused',
+      durationMs: 10,
+    }
+    const errored2: CheckResult = {
+      check: 'rls',
+      status: 'error',
+      issues: [],
+      error: 'timeout',
+      durationMs: 10,
+    }
+    const score = computeScore([errored, errored2])
+    expect(score).toBe(94) // 100 - 3 - 3
+    expect(score).toBeLessThan(100)
+  })
+
+  it('combines error and drift penalties', () => {
+    const errored: CheckResult = {
+      check: 'schema',
+      status: 'error',
+      issues: [],
+      error: 'connection refused',
+      durationMs: 10,
+    }
+    const score = computeScore([drifted, errored])
+    // drifted: 1 critical (15) + 1 warning (5) = 20
+    // errored: 1 error (3) = 3
+    expect(score).toBe(77) // 100 - 20 - 3
+  })
 })

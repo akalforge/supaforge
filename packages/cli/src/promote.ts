@@ -1,5 +1,6 @@
 import pg from 'pg'
 import type { ScanResult, SyncAction } from './types/drift'
+import { errMsg } from './utils/error'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
@@ -72,7 +73,7 @@ export async function promote(options: PromoteOptions): Promise<PromoteResult> {
           result.errors.push({
             check: stmt.check,
             issueId: stmt.issueId,
-            error: err instanceof Error ? err.message : String(err),
+            error: errMsg(err),
           })
         }
       }
@@ -106,7 +107,7 @@ export async function promote(options: PromoteOptions): Promise<PromoteResult> {
       result.errors.push({
         check: act.check,
         issueId: act.issueId,
-        error: err instanceof Error ? err.message : String(err),
+        error: errMsg(err),
       })
     }
   }

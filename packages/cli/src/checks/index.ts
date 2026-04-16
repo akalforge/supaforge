@@ -10,6 +10,7 @@ import { WebhooksCheck } from './webhooks'
 import { RealtimeCheck } from './realtime'
 import { VaultCheck } from './vault'
 import { ExtensionsCheck } from './extensions'
+import { MigrationsCheck } from './migrations'
 
 export interface RegistryOptions {
   /** Enable file-level drift detection in the storage check. */
@@ -29,6 +30,7 @@ export function createDefaultRegistry(options: RegistryOptions = {}): CheckRegis
   registry.register(new RealtimeCheck())
   registry.register(new VaultCheck())
   registry.register(new ExtensionsCheck())
+  registry.register(new MigrationsCheck())
   return registry
 }
 
@@ -45,3 +47,4 @@ export { WebhooksCheck } from './webhooks'
 export { RealtimeCheck } from './realtime'
 export { VaultCheck } from './vault'
 export { ExtensionsCheck } from './extensions'
+export { MigrationsCheck } from './migrations'

@@ -93,6 +93,7 @@ describe('CLI e2e: snapshot', () => {
     expect(stdout).toContain('--env')
     expect(stdout).toContain('--description')
     expect(stdout).toContain('--keep')
+    expect(stdout).toContain('--output')
   })
 
   it('should error without config file', async () => {
@@ -144,6 +145,7 @@ describe('CLI e2e: restore', () => {
     expect(stdout).toContain('--from-snapshot')
     expect(stdout).toContain('--from-migrations')
     expect(stdout).toContain('--apply')
+    expect(stdout).toContain('--force')
   })
 
   it('should error without config file', async () => {
@@ -187,6 +189,33 @@ describe('CLI e2e: init', () => {
   })
 })
 
+describe('CLI e2e: sync', () => {
+  it('should show help', async () => {
+    const { stdout } = await run(['sync', '--help'])
+    expect(stdout).toContain('diff --apply')
+  })
+
+  it('should accept the same flags as diff', async () => {
+    const { stdout } = await run(['sync', '--help'])
+    expect(stdout).toContain('--check')
+    expect(stdout).toContain('--source')
+    expect(stdout).toContain('--target')
+    expect(stdout).toContain('--json')
+  })
+
+  it('should error without config file', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-sync-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+
+    try {
+      await run(['sync'], { cwd: tmpDir })
+      expect.unreachable('Should have thrown')
+    } catch (err: any) {
+      expect(err.stderr || err.stdout || '').toContain('supaforge.config.json')
+    }
+  })
+})
+
 describe('CLI e2e: config validation', () => {
   let configDir: string
 
@@ -218,6 +247,86 @@ describe('CLI e2e: config validation', () => {
     } catch (err: any) {
       const output = (err.stderr || '') + (err.stdout || '')
       expect(output).toContain('Source and target must be different')
+    }
+  })
+})
+
+// ─── migrate run ─────────────────────────────────────────────────────────────
+
+describe('CLI e2e: migrate run', () => {
+  it('should show help', async () => {
+    const { stdout } = await run(['migrate', 'run', '--help'])
+    expect(stdout).toContain('Execute pending migrations')
+    expect(stdout).toContain('--env')
+    expect(stdout).toContain('--dry-run')
+    expect(stdout).toContain('--up-to')
+  })
+
+  it('should error without config file', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-migrate-run-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+
+    try {
+      await run(['migrate', 'run'], { cwd: tmpDir })
+      expect.unreachable('Should have thrown')
+    } catch (err: any) {
+      expect(err.stderr || err.stdout || '').toContain('supaforge.config.json')
+    }
+  })
+})
+
+// ─── migrate baseline ────────────────────────────────────────────────────────
+
+describe('CLI e2e: migrate baseline', () => {
+  it('should show help', async () => {
+    const { stdout } = await run(['migrate', 'baseline', '--help'])
+    expect(stdout).toContain('Mark all local migrations as applied')
+    expect(stdout).toContain('--env')
+  })
+
+  it('should error without config file', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-migrate-baseline-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+
+    try {
+      await run(['migrate', 'baseline'], { cwd: tmpDir })
+      expect.unreachable('Should have thrown')
+    } catch (err: any) {
+      expect(err.stderr || err.stdout || '').toContain('supaforge.config.json')
+    }
+  })
+})
+
+// ─── migrate create ──────────────────────────────────────────────────────────
+
+describe('CLI e2e: migrate create', () => {
+  it('should show help', async () => {
+    const { stdout } = await run(['migrate', 'create', '--help'])
+    expect(stdout).toContain('Generate a new migration file')
+    expect(stdout).toContain('--name')
+    expect(stdout).toContain('--source')
+    expect(stdout).toContain('--target')
+  })
+
+  it('should require --name flag', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-migrate-create-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const config = {
+      environments: {
+        dev: { dbUrl: 'postgresql://localhost/dev' },
+        prod: { dbUrl: 'postgresql://localhost/prod' },
+      },
+      source: 'dev',
+      target: 'prod',
+    }
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
+
+    try {
+      await run(['migrate', 'create'], { cwd: tmpDir })
+      expect.unreachable('Should have thrown')
+    } catch (err: any) {
+      const output = (err.stderr || '') + (err.stdout || '')
+      expect(output).toMatch(/--name|Missing required flag/i)
     }
   })
 })

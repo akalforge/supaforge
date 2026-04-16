@@ -74,6 +74,8 @@ supaforge snapshot --prune --keep=5     Keep last 5 instead of 7
 
 supaforge clone --env=prod              Preflight checks (validates connectivity)
 supaforge clone --env=prod --apply      Clone remote to local (snapshot + baseline)
+supaforge clone --env=prod --force      Force re-clone (drop existing DB)
+supaforge clone --env=prod --start-local  Auto-start a local PostgreSQL container
 supaforge clone --schema-only --apply   Clone schema only, no data
 supaforge clone --list                  List existing clones
 supaforge clone --delete=<name>         Preview clone deletion

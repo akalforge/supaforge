@@ -6,12 +6,13 @@ import { validateConfig, validateSingleEnvConfig, expandEnvVars, parseProjectRef
 import { INIT_HINTS } from '../defaults'
 import { UserCancelledError, isUserCancelled, ISSUES_URL } from '../errors'
 import { printBanner, printHints, ok, warn, dim, cmd, bold } from '../ui'
+import { SUPAFORGE_DIR } from '../constants'
 import type { SupaForgeConfig, EnvironmentConfig } from '../types/config'
 
 const CONFIG_FILENAME = 'supaforge.config.json'
 
 /** Entries that supaforge init ensures are present in .gitignore. */
-const GITIGNORE_ENTRIES = [CONFIG_FILENAME, '.supaforge/']
+const GITIGNORE_ENTRIES = [CONFIG_FILENAME, `${SUPAFORGE_DIR}/`]
 
 export type AskFn = ((question: string) => Promise<string>) & { close: () => void }
 

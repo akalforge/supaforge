@@ -136,6 +136,8 @@ supaforge snapshot --prune --apply        Delete old snapshots
 
 supaforge clone --env=prod                Preflight checks
 supaforge clone --env=prod --apply        Clone remote to local
+supaforge clone --env=prod --force        Force re-clone (drop existing DB)
+supaforge clone --env=prod --start-local  Auto-start a local PostgreSQL container
 supaforge clone --list                    List existing clones
 supaforge clone --delete=<name> --apply   Remove a clone
 
@@ -213,12 +215,14 @@ packages/cli/
 │   │   ├── cron.ts      # Cron job diffing
 │   │   └── ...          # edge-functions, storage, auth, webhooks, schema, data
 │   ├── types/           # TypeScript interfaces
+│   ├── utils/           # Shared utilities (error handling)
+│   ├── constants.ts     # Centralised config values, timeouts, paths
 │   ├── config.ts        # Config loader + validator
 │   ├── hooks.ts         # HookBus (actions + filters)
 │   ├── scanner.ts       # Scan orchestrator
 │   ├── scoring.ts       # Health score (0–100)
 │   └── render.ts        # Terminal output
-└── test/                # 366 tests across 30 files
+└── test/                # 434 tests across 35 files
 ```
 
 ## Development
@@ -227,7 +231,7 @@ packages/cli/
 git clone https://github.com/akalforge/supaforge.git
 cd supaforge/packages/cli
 npm install
-npm test       # Run all tests (366 across 30 files)
+npm test       # Run all tests (434 across 35 files)
 npm run lint   # Type-check
 npm run build  # Build with tsup
 

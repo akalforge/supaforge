@@ -6,7 +6,9 @@ import {
   restoreFromMigrations,
   previewSnapshotRestore,
   previewMigrationRestore,
+  getPublicTables,
 } from '../restore'
+import { warn, cmd } from '../ui.js'
 
 export default class Restore extends BaseCommand {
   static override description = 'Restore a Supabase environment from a snapshot or migration history'
@@ -16,6 +18,7 @@ export default class Restore extends BaseCommand {
     '<%= config.bin %> restore --env=local --from-snapshot=latest --apply',
     '<%= config.bin %> restore --env=local --from-migrations --apply',
     '<%= config.bin %> restore --env=local --from-migrations --to=20260407T120000Z --apply',
+    '<%= config.bin %> restore --env=local --from-snapshot=latest --apply --force',
   ]
 
   static override flags = {
@@ -42,6 +45,10 @@ export default class Restore extends BaseCommand {
       description: 'Actually execute the restore (default: dry-run preview)',
       default: false,
     }),
+    force: Flags.boolean({
+      description: 'Allow restore into a non-empty database (destructive)',
+      default: false,
+    }),
     json: Flags.boolean({ description: 'Output results as JSON' }),
   }
 
@@ -56,6 +63,31 @@ export default class Restore extends BaseCommand {
 
     const envName = flags.env
     const { env } = this.resolveEnv(config, envName)
+
+    // Preflight: verify database is reachable
+    if (!flags.json) {
+      const pre = this.createPreflight('Restore preflight checks')
+        .addDatabase('Target', envName, env.dbUrl)
+      await this.runPreflight(pre, 'Restore')
+    }
+
+    // Safety: check if target DB has existing tables before destructive restore
+    if (flags.apply) {
+      const tables = await getPublicTables(env.dbUrl)
+      if (tables.length > 0 && !flags.force) {
+        this.log(`\n${warn('Target database is not empty.')} Found ${tables.length} table(s) in public schema:`)
+        for (const t of tables.slice(0, 10)) {
+          this.log(`  • ${t}`)
+        }
+        if (tables.length > 10) {
+          this.log(`  ... and ${tables.length - 10} more`)
+        }
+        this.log(`\n  Restore replays SQL into the target and may conflict with existing data.`)
+        this.log(`  → Use ${cmd('supaforge sync')} to apply only the differences instead.`)
+        this.log(`  → Add ${cmd('--force')} to proceed anyway.\n`)
+        return
+      }
+    }
 
     if (flags['from-snapshot']) {
       await this.handleSnapshotRestore(flags, env.dbUrl)

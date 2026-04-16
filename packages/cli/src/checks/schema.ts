@@ -1,6 +1,7 @@
 import type { DriftIssue } from '../types/drift'
 import { runDbDiff, sqlToIssues, type DbDiffOptions } from '../dbdiff'
 import { Check, type CheckContext } from './base'
+import { DEFAULT_IGNORE_SCHEMAS } from '../defaults'
 
 export type RunDbDiffFn = (options: DbDiffOptions) => ReturnType<typeof runDbDiff>
 
@@ -21,13 +22,15 @@ export class SchemaCheck extends Check {
 
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     try {
+      const ignoreSchemas = ctx.config.ignoreSchemas ?? DEFAULT_IGNORE_SCHEMAS
       const result = await this.runFn({
         sourceUrl: ctx.source.dbUrl,
         targetUrl: ctx.target.dbUrl,
         type: 'schema',
         include: 'both',
+        ignoreSchemas,
       })
-      return sqlToIssues(result, 'schema')
+      return sqlToIssues(result, 'schema', ignoreSchemas)
     } catch (err) {
       if (err instanceof Error && err.message.includes('@dbdiff/cli is not installed')) {
         return []

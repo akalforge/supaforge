@@ -2,23 +2,15 @@ import { mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
+import { quoteIdent } from './utils/sql'
+import { normalizeRoles } from './utils/strings'
 import type { EnvironmentConfig, SupaForgeConfig, SnapshotManifest, SnapshotLayerInfo } from './types/config'
 import { DEFAULT_IGNORE_SCHEMAS, RELATION_NOT_FOUND } from './defaults'
 import { introspectSchema } from './schema-introspect'
+import { errMsg } from './utils/error'
+import { SUPABASE_MGMT_API, SUPAFORGE_DIR, SNAPSHOTS_SUBDIR } from './constants'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
-
-/** Extract a concise error message from an unknown caught value. */
-function errMsg(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
-
-/** Supabase Management API base URL */
-const MGMT_API = 'https://api.supabase.com/v1/projects'
-
-/** Directory structure */
-const SUPAFORGE_DIR = '.supaforge'
-const SNAPSHOTS_DIR = 'snapshots'
 
 export interface SnapshotOptions {
   envName: string
@@ -26,6 +18,8 @@ export interface SnapshotOptions {
   config: SupaForgeConfig
   /** Base output directory (defaults to cwd) */
   cwd?: string
+  /** Custom output directory — snapshot files are written here directly (with timestamp subfolder). */
+  outputDir?: string
   queryFn?: QueryFn
   fetchFn?: FetchFn
 }
@@ -43,7 +37,7 @@ export function generateTimestamp(): string {
 }
 
 function snapshotsBaseDir(cwd: string): string {
-  return resolve(cwd, SUPAFORGE_DIR, SNAPSHOTS_DIR)
+  return resolve(cwd, SUPAFORGE_DIR, SNAPSHOTS_SUBDIR)
 }
 
 export function snapshotDir(cwd: string, timestamp: string): string {
@@ -59,7 +53,9 @@ export function snapshotDir(cwd: string, timestamp: string): string {
 export async function captureSnapshot(options: SnapshotOptions): Promise<SnapshotResult> {
   const cwd = options.cwd ?? process.cwd()
   const timestamp = generateTimestamp()
-  const dir = snapshotDir(cwd, timestamp)
+  const dir = options.outputDir
+    ? join(resolve(options.outputDir), timestamp)
+    : snapshotDir(cwd, timestamp)
   await mkdir(dir, { recursive: true })
 
   const queryFn = options.queryFn ?? pgQuery
@@ -166,7 +162,7 @@ async function captureEdgeFunctions(
   }
 
   try {
-    const url = `${MGMT_API}/${encodeURIComponent(env.projectRef)}/functions`
+    const url = `${SUPABASE_MGMT_API}/${encodeURIComponent(env.projectRef)}/functions`
     const res = await fetchFn(url, {
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -241,7 +237,7 @@ async function captureAuthConfig(
   }
 
   try {
-    const url = `${MGMT_API}/${encodeURIComponent(env.projectRef)}/config/auth`
+    const url = `${SUPABASE_MGMT_API}/${encodeURIComponent(env.projectRef)}/config/auth`
     const res = await fetchFn(url, {
       headers: { Authorization: `Bearer ${token}` },
     })
@@ -317,10 +313,6 @@ async function captureData(
   }
 }
 
-/** Quote a schema-qualified or bare table name for safe inclusion in SQL. */
-function quoteIdent(table: string): string {
-  return table.split('.').map(p => `"${p.replace(/"/g, '""')}"`).join('.')
-}
 
 async function captureWebhooks(
   dir: string,
@@ -504,16 +496,8 @@ interface RlsRow {
   with_check: string | null
 }
 
-function normalizeRoles(roles: string[] | string): string {
-  if (Array.isArray(roles)) return roles.join(', ')
-  if (typeof roles === 'string' && roles.startsWith('{') && roles.endsWith('}')) {
-    return roles.slice(1, -1).split(',').join(', ')
-  }
-  return String(roles)
-}
-
 function generateCreatePolicySql(p: RlsRow): string {
-  const roles = normalizeRoles(p.roles)
+  const roles = normalizeRoles(p.roles).join(', ')
   const lines = [
     `CREATE POLICY "${p.policyname}"`,
     `  ON "${p.schemaname}"."${p.tablename}"`,
@@ -538,7 +522,7 @@ interface StoragePolicyRow {
 }
 
 function generateStorageCreatePolicySql(p: StoragePolicyRow): string {
-  const roles = normalizeRoles(p.roles)
+  const roles = normalizeRoles(p.roles).join(', ')
   const lines = [
     `CREATE POLICY "${p.policyname}"`,
     `  ON "storage"."${p.tablename}"`,

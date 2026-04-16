@@ -1,6 +1,9 @@
 import { Command } from '@oclif/core'
 import { loadConfig, validateConfig, validateSingleEnvConfig } from './config.js'
+import { Preflight } from './preflight.js'
+import { DEFAULT_MIGRATIONS_DIR } from './checks/migrations.js'
 import type { SupaForgeConfig, EnvironmentConfig } from './types/config.js'
+import type { PreflightReport } from './preflight.js'
 
 /**
  * Shared base for all supaforge commands.
@@ -61,5 +64,31 @@ export abstract class BaseCommand extends Command {
   /** Redact password from a database URL for display. */
   protected redactUrl(url: string): string {
     return url.replace(/:([^@/]{1,})@/, ':***@')
+  }
+
+  /** Resolve the migrations directory from config (with default fallback). */
+  protected resolveMigrationsDir(config: SupaForgeConfig): string {
+    return config.checks?.migrations?.dir ?? DEFAULT_MIGRATIONS_DIR
+  }
+
+  /**
+   * Create, run, and enforce a preflight check.
+   * Returns the Preflight instance for commands that need to add custom checks.
+   * When `abortMessage` is provided, exits with an error if checks fail.
+   */
+  protected createPreflight(title: string): Preflight {
+    return new Preflight(title, (m) => this.log(m))
+  }
+
+  /**
+   * Run a preflight and abort with a user-friendly message if it fails.
+   * Returns the report for commands that inspect individual check results.
+   */
+  protected async runPreflight(preflight: Preflight, commandName: string): Promise<PreflightReport> {
+    const report = await preflight.run()
+    if (!report.passed) {
+      this.error(`${commandName} aborted — fix the issues above first.`, { exit: 1 })
+    }
+    return report
   }
 }

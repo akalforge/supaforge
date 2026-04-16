@@ -1,0 +1,228 @@
+import pg from 'pg'
+import { detectRuntime } from './local-pg.js'
+import { ok, warn, dim, cmd, bold } from './ui.js'
+import { redactUrls } from './utils/error.js'
+
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+/** Result of a single connectivity check. */
+export interface ConnCheckResult {
+  reachable: boolean
+  version?: string
+  error?: string
+}
+
+/** Outcome of a single preflight check (DB connectivity or custom). */
+export interface CheckEntry {
+  label: string
+  passed: boolean
+  detail?: string
+  error?: string
+  hints?: string[]
+}
+
+/** Full report returned by Preflight.run(). */
+export interface PreflightReport {
+  passed: boolean
+  checks: CheckEntry[]
+}
+
+/** Supabase CLI default PostgreSQL port. */
+const SUPABASE_LOCAL_PORT = '54322'
+
+/** Standard PostgreSQL port. */
+const DEFAULT_PG_PORT = '5432'
+
+// ─── Standalone helpers (remain exported for direct use / tests) ─────────────
+
+/**
+ * Test that a PostgreSQL database is reachable and return the server version.
+ */
+export async function checkConnection(dbUrl: string): Promise<ConnCheckResult> {
+  try {
+    const client = new pg.Client({ connectionString: dbUrl })
+    await client.connect()
+    const { rows } = await client.query('SHOW server_version')
+    const version = (rows[0] as Record<string, string>).server_version
+    await client.end()
+    return { reachable: true, version }
+  } catch (err) {
+    return { reachable: false, error: (err as Error).message }
+  }
+}
+
+/** Errors that indicate the server IS running but rejecting the connection. */
+const SERVER_REACHABLE_RE = /password authentication failed|does not exist|database .* does not exist|SSL.*required|no pg_hba\.conf entry/i
+
+/**
+ * Build context-aware hints when a local PostgreSQL is not reachable.
+ * Detects Supabase CLI port, available container runtimes, etc.
+ *
+ * When `error` is provided and indicates the server IS running (auth failure,
+ * missing database, SSL rejection), startup hints are suppressed in favour of
+ * configuration hints.
+ */
+export async function buildLocalHints(dbUrl: string, error?: string): Promise<string[]> {
+  const hints: string[] = []
+  try {
+    const urlObj = new URL(dbUrl)
+    const isSupabasePort = urlObj.port === SUPABASE_LOCAL_PORT
+    const isLocal = ['localhost', '127.0.0.1', '::1', ''].includes(urlObj.hostname)
+
+    if (!isLocal) return hints
+
+    // Server is reachable but rejecting — suggest config fixes, not startup.
+    if (error && SERVER_REACHABLE_RE.test(error)) {
+      hints.push(`Check the username and password in your database URL.`)
+      if (isSupabasePort) {
+        hints.push(`Port ${SUPABASE_LOCAL_PORT} is the Supabase CLI default. The default password is "postgres".`)
+      }
+      return hints
+    }
+
+    if (isSupabasePort) {
+      hints.push(`Port ${SUPABASE_LOCAL_PORT} is the Supabase CLI default. Run ${cmd('"supabase start"')} to start your local Supabase instance.`)
+    }
+
+    const runtime = await detectRuntime()
+    if (runtime) {
+      hints.push(`${bold(runtime)} detected — you can start a PostgreSQL container manually.`)
+    }
+
+    if (!isSupabasePort) {
+      hints.push(`Start PostgreSQL manually on port ${urlObj.port || DEFAULT_PG_PORT}.`)
+    }
+  } catch {
+    // Invalid URL — no hints
+  }
+  return hints
+}
+
+// ─── Preflight class ─────────────────────────────────────────────────────────
+
+type LogFn = (msg: string) => void
+
+/** Queued database to check during run(). */
+interface DbEntry {
+  label: string
+  envName: string
+  dbUrl: string
+}
+
+/** Custom check callback. Return null on success, or an error string on failure. */
+export type CustomCheckFn = () => Promise<{ error?: string; detail?: string; hints?: string[] }>
+
+/** Queued custom check. */
+interface CustomEntry {
+  label: string
+  fn: CustomCheckFn
+}
+
+/**
+ * Composable preflight check runner.
+ *
+ * Usage:
+ * ```ts
+ * const pre = new Preflight('Diff preflight checks', (m) => this.log(m))
+ * pre.addDatabase('Source', 'local', sourceUrl)
+ * pre.addDatabase('Target', 'prod', targetUrl)
+ * const report = await pre.run()
+ * if (!report.passed) this.error('Aborted.', { exit: 1 })
+ * ```
+ *
+ * For commands with extra checks (e.g. clone's pg_dump compat):
+ * ```ts
+ * pre.addCheck('pg_dump compatibility', async () => { ... })
+ * ```
+ */
+export class Preflight {
+  private readonly title: string
+  private readonly log: LogFn
+  private readonly databases: DbEntry[] = []
+  private readonly customs: CustomEntry[] = []
+  private readonly infoLines: Array<{ label: string; value: string }> = []
+
+  constructor(title: string, log: LogFn) {
+    this.title = title
+    this.log = log
+  }
+
+  /** Register a database connectivity check. */
+  addDatabase(label: string, envName: string, dbUrl: string): this {
+    this.databases.push({ label, envName, dbUrl })
+    return this
+  }
+
+  /** Add an informational line to the header (displayed after database lines). */
+  addInfo(label: string, value: string): this {
+    this.infoLines.push({ label, value })
+    return this
+  }
+
+  /** Register a custom check (runs after all DB connectivity checks). */
+  addCheck(label: string, fn: CustomCheckFn): this {
+    this.customs.push({ label, fn })
+    return this
+  }
+
+  /** Execute all registered checks, render results, and return the report. */
+  async run(): Promise<PreflightReport> {
+    const entries: CheckEntry[] = []
+    const log = this.log
+
+    // Header
+    log(`\n  ${bold(this.title)}\n`)
+    for (const db of this.databases) {
+      log(`    ${db.label}: ${db.envName} ${dim(`(${redactUrls(db.dbUrl)})`)}`)
+    }
+    for (const info of this.infoLines) {
+      log(`    ${info.label}: ${info.value}`)
+    }
+    log('')
+    log('    Checks:')
+
+    // Database connectivity checks
+    for (const db of this.databases) {
+      const result = await checkConnection(db.dbUrl)
+      if (result.reachable) {
+        log(`      ${ok('✓')} ${db.label} database reachable ${dim(`(PostgreSQL ${result.version})`)}`)
+        entries.push({ label: db.label, passed: true, detail: `PostgreSQL ${result.version}` })
+      } else {
+        log(`      ${warn('✗')} ${db.label} database not reachable: ${redactUrls(result.error!)}`)
+        const hints = await buildLocalHints(db.dbUrl, result.error)
+        if (hints.length > 0) {
+          log(`\n      ${dim('Hints:')}`)
+          for (const h of hints) log(`        ${dim('•')} ${h}`)
+        }
+        entries.push({ label: db.label, passed: false, error: result.error, hints })
+      }
+    }
+
+    // Custom checks
+    for (const custom of this.customs) {
+      const result = await custom.fn()
+      if (!result.error) {
+        const suffix = result.detail ? ` ${dim(result.detail)}` : ''
+        log(`      ${ok('✓')} ${custom.label}${suffix}`)
+        entries.push({ label: custom.label, passed: true, detail: result.detail })
+      } else {
+        log(`      ${warn('✗')} ${custom.label}: ${redactUrls(result.error)}`)
+        if (result.hints?.length) {
+          log(`\n      ${dim('Hints:')}`)
+          for (const h of result.hints) log(`        ${dim('•')} ${h}`)
+        }
+        entries.push({ label: custom.label, passed: false, error: result.error, hints: result.hints })
+      }
+    }
+
+    const passed = entries.every(e => e.passed)
+    log('')
+    if (!passed) {
+      log(`    ${warn('Some checks failed.')} Fix the issues above first.\n`)
+    } else {
+      log(`    ${ok('All checks passed.')}\n`)
+    }
+
+    return { passed, checks: entries }
+  }
+}

@@ -7,6 +7,7 @@ import { Help, type Command, type Interfaces } from '@oclif/core'
 const ORDER = [
   'init',
   'diff',
+  'sync',
   'snapshot',
   'clone',
   'restore',

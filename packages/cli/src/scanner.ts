@@ -4,6 +4,7 @@ import type { SupaForgeConfig } from './types/config'
 import type { CheckName, CheckResult, ScanResult } from './types/drift'
 import { CHECK_NAMES } from './types/drift'
 import { computeScore, summarize } from './scoring'
+import { errMsg, friendlyDbError } from './utils/error'
 
 export interface ScanOptions {
   config: SupaForgeConfig
@@ -47,7 +48,7 @@ export async function scan(
         check: name,
         status: 'error',
         issues: [],
-        error: err instanceof Error ? err.message : String(err),
+        error: friendlyDbError(err, source.dbUrl),
         durationMs,
       })
     }

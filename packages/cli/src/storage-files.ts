@@ -1,10 +1,10 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { createHash } from 'node:crypto'
 import type { DriftIssue } from './types/drift'
+import { STORAGE_LIST_LIMIT } from './constants'
 
-// ─── Constants ───────────────────────────────────────────────────────────────
+// ─── Constants ──────────────────────────────────────────────────────────
 
-const LIST_LIMIT = 1000
 const JSON_MIME_TYPES = ['application/json', 'text/json']
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -61,7 +61,7 @@ async function listBucketFiles(
   const results: Array<{ name: string; path: string; metadata: Record<string, unknown> | null }> = []
 
   const { data, error } = await client.storage.from(bucket).list(folder, {
-    limit: LIST_LIMIT,
+    limit: STORAGE_LIST_LIMIT,
     sortBy: { column: 'name', order: 'asc' },
   })
 

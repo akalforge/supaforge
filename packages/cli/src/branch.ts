@@ -5,12 +5,11 @@ import pg from 'pg'
 import { captureSnapshot, type SnapshotResult } from './snapshot'
 import type { EnvironmentConfig, SupaForgeConfig } from './types/config'
 import { checkPgDumpCompat } from './pg-tools'
+import { BRANCHES_FILE, PG_PIPELINE_TIMEOUT_MS, CLONE_PROGRESS_INTERVAL_MS } from './constants'
+import { CLONE_STUBS_SQL } from './stubs'
 
 /** Prefix for branch database names created by SupaForge. */
 export const BRANCH_DB_PREFIX = 'supaforge_branch_'
-
-/** Metadata file for tracking branches locally. */
-const BRANCHES_FILE = '.supaforge/branches.json'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -312,15 +311,30 @@ export async function deleteBranch(
 
 // ─── Remote → Local Clone ────────────────────────────────────────────────────
 
+export interface CloneProgress {
+  /** Bytes transferred through the pg_dump → pg_restore pipe. */
+  bytesTransferred: number
+  /** Milliseconds elapsed since the pipeline started. */
+  elapsedMs: number
+  /** Most recent pg_restore status message (if any). */
+  lastRestoreMessage?: string
+}
+
 export interface CloneRemoteOptions {
   /** Remote (source) database connection URL. */
   remoteUrl: string
-  /** Local PostgreSQL base URL (e.g. postgres://postgres:postgres@localhost:54322/postgres). */
+  /** Local PostgreSQL base URL (e.g. postgres://postgres:postgres@localhost:5432/postgres). */
   localBaseUrl: string
   /** Database name to create locally. */
   localDbName: string
   /** Copy schema only (no data). */
   schemaOnly?: boolean
+  /** Drop and recreate the target database if it already exists. */
+  force?: boolean
+  /** Called periodically with pipeline progress. */
+  onProgress?: (info: CloneProgress) => void
+  /** Schemas to exclude from pg_dump (e.g. Supabase internals). */
+  excludeSchemas?: string[]
 }
 
 /**
@@ -344,6 +358,16 @@ export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<stri
   const client = new pg.Client({ connectionString: localMaintenanceUrl })
   try {
     await client.connect()
+
+    // If --force, drop the existing database first
+    if (opts.force) {
+      await client.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
+        [opts.localDbName],
+      )
+      await client.query(`DROP DATABASE IF EXISTS "${opts.localDbName}"`)
+    }
+
     await client.query(`CREATE DATABASE "${opts.localDbName}"`)
   } catch (err) {
     const msg = (err as Error).message ?? ''
@@ -358,9 +382,32 @@ export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<stri
     await client.end()
   }
 
+  // Create Supabase auth + storage stubs BEFORE pg_restore.
+  // Without these, pg_restore silently skips FK constraints referencing
+  // auth.users and RLS policies referencing auth.uid() — causing false
+  // drift on the very first `supaforge diff` after clone.
+  if (opts.excludeSchemas?.length) {
+    const stubClient = new pg.Client({ connectionString: localDbUrl })
+    try {
+      await stubClient.connect()
+      await stubClient.query(CLONE_STUBS_SQL)
+    } finally {
+      await stubClient.end()
+    }
+  }
+
   // pg_dump from remote | pg_restore to local
-  const dumpArgs = ['--format=custom', '--no-owner', '--no-acl', opts.remoteUrl]
-  if (opts.schemaOnly) dumpArgs.unshift('--schema-only')
+  const dumpArgs = ['--format=custom', '--no-owner', '--no-acl']
+  if (opts.schemaOnly) dumpArgs.push('--schema-only')
+
+  // Exclude Supabase-internal schemas that reference extensions unavailable on vanilla Postgres
+  if (opts.excludeSchemas?.length) {
+    for (const schema of opts.excludeSchemas) {
+      dumpArgs.push(`--exclude-schema=${schema}`)
+    }
+  }
+
+  dumpArgs.push(opts.remoteUrl)
 
   const restoreArgs = [
     '--format=custom',
@@ -372,24 +419,62 @@ export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<stri
   try {
     await new Promise<void>((resolve, reject) => {
       const dump = spawn(compat.pgDumpPath, dumpArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
-      const restore = spawn(compat.pgRestorePath, restoreArgs, { stdio: [dump.stdout, 'pipe', 'pipe'] })
+      const restore = spawn(compat.pgRestorePath, restoreArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
+
+      // Manual pipe so we can count bytes flowing through
+      let bytesTransferred = 0
+      dump.stdout.on('data', (chunk: Buffer) => { bytesTransferred += chunk.length })
+      dump.stdout.pipe(restore.stdin)
 
       let restoreStderr = ''
-      restore.stderr?.on('data', (chunk: Buffer) => { restoreStderr += chunk.toString() })
+      let lastRestoreMessage = ''
+      restore.stderr?.on('data', (chunk: Buffer) => {
+        restoreStderr += chunk.toString()
+        // Extract last meaningful line for progress display
+        const lines = chunk.toString().split('\n').filter(Boolean)
+        if (lines.length > 0) {
+          lastRestoreMessage = lines[lines.length - 1].trim().slice(0, 120)
+        }
+      })
 
       let dumpError = ''
       dump.stderr?.on('data', (chunk: Buffer) => { dumpError += chunk.toString() })
+
+      // Progress reporting
+      const startTime = Date.now()
+      const progressInterval = opts.onProgress
+        ? setInterval(() => {
+            opts.onProgress!({
+              bytesTransferred,
+              elapsedMs: Date.now() - startTime,
+              lastRestoreMessage: lastRestoreMessage || undefined,
+            })
+          }, CLONE_PROGRESS_INTERVAL_MS)
+        : null
 
       let dumpExit: number | null = null
       let restoreExit: number | null = null
       let settled = false
 
-      function trySettle() {
+      const cleanup = () => {
+        if (progressInterval) clearInterval(progressInterval)
+        clearTimeout(timeout)
+      }
+
+      const trySettle = () => {
         if (settled || dumpExit === null || restoreExit === null) return
         settled = true
+        cleanup()
+        // Final progress update
+        opts.onProgress?.({
+          bytesTransferred,
+          elapsedMs: Date.now() - startTime,
+          lastRestoreMessage: undefined,
+        })
         if (dumpExit !== 0) {
           reject(new Error(`pg_dump failed (exit ${dumpExit}): ${dumpError}`))
         } else if (restoreExit !== 0 && restoreExit !== 1) {
+          // exit 1 = warnings (expected with extensions) — treat as success
           reject(new Error(`pg_restore failed (exit ${restoreExit}): ${restoreStderr}`))
         } else {
           resolve()
@@ -398,8 +483,23 @@ export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<stri
 
       dump.on('close', (code) => { dumpExit = code ?? 1; trySettle() })
       restore.on('close', (code) => { restoreExit = code ?? 1; trySettle() })
-      dump.on('error', (err) => { if (!settled) { settled = true; reject(err) } })
-      restore.on('error', (err) => { if (!settled) { settled = true; reject(err) } })
+      dump.on('error', (err) => { if (!settled) { settled = true; cleanup(); reject(err) } })
+      restore.on('error', (err) => { if (!settled) { settled = true; cleanup(); reject(err) } })
+
+      // Safety timeout — 30 minutes for large databases
+      const timeout = setTimeout(() => {
+        if (!settled) {
+          settled = true
+          cleanup()
+          dump.kill()
+          restore.kill()
+          reject(new Error(
+            'pg_dump | pg_restore timed out after 30 minutes.\n' +
+            (dumpError ? `  pg_dump stderr: ${dumpError.slice(0, 500)}\n` : '') +
+            (restoreStderr ? `  pg_restore stderr: ${restoreStderr.slice(0, 500)}` : ''),
+          ))
+        }
+      }, PG_PIPELINE_TIMEOUT_MS)
     })
   } catch (err) {
     // Clean up the empty database on failure

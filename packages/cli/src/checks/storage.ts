@@ -1,6 +1,8 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
+import { sqlLiteral } from '../utils/sql'
+import { normalizeRoles } from '../utils/strings'
 import { scanStorageFiles, type ScanFilesOptions } from '../storage-files'
 import { Check, type CheckContext } from './base'
 
@@ -108,13 +110,6 @@ const STORAGE_POLICY_SQL = `
 
 // ─── Bucket diffing ──────────────────────────────────────────────────────────
 
-function sqlLiteral(val: unknown): string {
-  if (val === null || val === undefined) return 'NULL'
-  if (typeof val === 'boolean') return val ? 'true' : 'false'
-  if (typeof val === 'number') return String(val)
-  if (Array.isArray(val)) return `ARRAY[${val.map(v => `'${String(v).replace(/'/g, "''")}'`).join(', ')}]`
-  return `'${String(val).replace(/'/g, "''")}'`
-}
 
 function diffBuckets(
   source: StorageBucket[],
@@ -244,15 +239,7 @@ function storagePoliciesEqual(a: StoragePolicy, b: StoragePolicy): boolean {
   )
 }
 
-function normalizeRoles(roles: string[] | string): string[] {
-  const arr = Array.isArray(roles) ? roles : [roles]
-  return arr
-    .map(r => r.replace(/^\{|\}$/g, ''))
-    .flatMap(r => r.split(','))
-    .map(r => r.trim())
-    .filter(Boolean)
-    .sort()
-}
+// normalizeRoles imported from utils/strings
 
 function generateStorageCreatePolicySql(p: StoragePolicy): string {
   const roles = normalizeRoles(p.roles).join(', ')

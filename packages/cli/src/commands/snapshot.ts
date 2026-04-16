@@ -3,6 +3,7 @@ import { BaseCommand } from '../base-command.js'
 import { captureSnapshot, listSnapshots, pruneSnapshots, DEFAULT_KEEP_COUNT } from '../snapshot.js'
 import { backup, listMigrationFiles } from '../migration.js'
 import type { SnapshotManifest } from '../types/config.js'
+import { ok, warn, dim, cmd, bold } from '../ui.js'
 
 /**
  * Capture and manage environment state snapshots.
@@ -23,6 +24,7 @@ export default class Snapshot extends BaseCommand {
     '<%= config.bin %> snapshot --list',
     '<%= config.bin %> snapshot --prune',
     '<%= config.bin %> snapshot --prune --keep=5 --apply',
+    '<%= config.bin %> snapshot --output=./backups',
   ]
 
   static override flags = {
@@ -57,6 +59,10 @@ export default class Snapshot extends BaseCommand {
       default: false,
     }),
     json: Flags.boolean({ description: 'Output results as JSON' }),
+    output: Flags.string({
+      char: 'o',
+      description: 'Custom output directory for snapshot files (timestamp subfolder is created inside)',
+    }),
   }
 
   async run(): Promise<void> {
@@ -75,11 +81,11 @@ export default class Snapshot extends BaseCommand {
         this.log(JSON.stringify(snapshots.map(s => s.manifest), null, 2))
         return
       }
-      this.log(`\n${snapshots.length} snapshot(s):\n`)
+      this.log(`\n${bold(`${snapshots.length} snapshot(s):`)}\n`)
       for (const { manifest } of snapshots) {
         const layerCount = Object.values(manifest.layers).filter(l => l.captured).length
         const itemCount = Object.values(manifest.layers).reduce((sum, l) => sum + l.itemCount, 0)
-        this.log(`  ${manifest.timestamp}  env=${manifest.environment}  layers=${layerCount}  items=${itemCount}`)
+        this.log(`  ${bold(manifest.timestamp)}  ${dim('env=')}${manifest.environment}  ${dim('layers=')}${layerCount}  ${dim('items=')}${itemCount}`)
       }
       this.log('')
       return
@@ -101,12 +107,12 @@ export default class Snapshot extends BaseCommand {
 
       const toDelete = snapshots.slice(0, deleteCount)
       for (const { manifest } of toDelete) {
-        this.log(`  ✗ ${manifest.timestamp}  env=${manifest.environment}`)
+        this.log(`  ${warn('✗')} ${manifest.timestamp}  ${dim('env=')}${manifest.environment}`)
       }
       this.log('')
 
       if (!flags.apply) {
-        this.log('  → Add --apply to delete these snapshots.\n')
+        this.log(`  → Add ${cmd('--apply')} to delete these snapshots.\n`)
         return
       }
 
@@ -124,6 +130,13 @@ export default class Snapshot extends BaseCommand {
     // ── Capture snapshot (with optional migration) ───────────────────────────
     const { envName, env } = this.resolveEnv(config, flags.env)
 
+    // Preflight: verify database is reachable
+    if (!flags.json) {
+      const pre = this.createPreflight('Snapshot preflight checks')
+        .addDatabase('Database', envName, env.dbUrl)
+      await this.runPreflight(pre, 'Snapshot')
+    }
+
     if (flags.migration) {
       // Capture + generate migration (was: backup command)
       this.log(`\nCapturing snapshot of "${envName}" with migration...\n`)
@@ -133,6 +146,7 @@ export default class Snapshot extends BaseCommand {
         env,
         config,
         description: flags.description,
+        outputDir: flags.output,
       })
 
       if (flags.json) {
@@ -146,30 +160,31 @@ export default class Snapshot extends BaseCommand {
       }
 
       this.logSnapshotResult(result.snapshot.manifest)
+      this.log(`  ${dim('Snapshot:')}  ${result.snapshot.dir}`)
 
       if (result.isBaseline) {
-        this.log('  Type:      baseline (first snapshot)')
+        this.log(`  ${dim('Type:')}      baseline (first snapshot)`)
       } else {
-        this.log('  Type:      incremental diff')
+        this.log(`  ${dim('Type:')}      incremental diff`)
       }
 
       if (result.migration) {
-        this.log(`  Migration: ${result.migrationFile}`)
-        this.log(`  Layers:    ${result.migration.layers.join(', ')}`)
-        this.log(`  SQL up:    ${result.migration.up.sql.length} statement(s)`)
-        this.log(`  API up:    ${result.migration.up.api.length} action(s)`)
+        this.log(`  ${dim('Migration:')} ${result.migrationFile}`)
+        this.log(`  ${dim('Layers:')}    ${result.migration.layers.join(', ')}`)
+        this.log(`  ${dim('SQL up:')}    ${result.migration.up.sql.length} statement(s)`)
+        this.log(`  ${dim('API up:')}    ${result.migration.up.api.length} action(s)`)
       } else {
-        this.log('  Migration: none (no changes detected)')
+        this.log(`  ${dim('Migration:')} none (no changes detected)`)
       }
 
-      this.log('\n  Snapshot + migration complete.\n')
+      this.log(`\n  ${ok('Snapshot + migration complete.')}\n`)
       return
     }
 
     // Plain snapshot — just capture, no dry-run gate
     this.log(`\nCapturing snapshot of "${envName}"...\n`)
 
-    const snapshot = await captureSnapshot({ envName, env, config })
+    const snapshot = await captureSnapshot({ envName, env, config, outputDir: flags.output })
 
     if (flags.json) {
       this.log(JSON.stringify(snapshot.manifest, null, 2))
@@ -177,13 +192,14 @@ export default class Snapshot extends BaseCommand {
     }
 
     this.logSnapshotResult(snapshot.manifest)
+    this.log(`\n  ${dim('Snapshot saved to:')} ${snapshot.dir}`)
 
     // Show migration hint
     const existing = await listMigrationFiles()
     if (existing.length > 0) {
-      this.log(`\n  → Run with --migration to also generate an incremental diff.`)
+      this.log(`  → Run with ${cmd('--migration')} to also generate an incremental diff.`)
     } else {
-      this.log(`\n  → Run with --migration to save a baseline migration.`)
+      this.log(`  → Run with ${cmd('--migration')} to save a baseline migration.`)
     }
     this.log('')
   }
@@ -198,12 +214,12 @@ export default class Snapshot extends BaseCommand {
 
     for (const [name, info] of Object.entries(layers)) {
       if (info.captured) {
-        this.log(`  ✓ ${name.padEnd(16)} ${info.itemCount} item(s)`)
+        this.log(`  ${ok('✓')} ${name.padEnd(16)} ${info.itemCount} item(s)`)
       } else if (info.error) {
-        this.log(`  ✗ ${name.padEnd(16)} error: ${info.error}`)
+        this.log(`  ${warn('✗')} ${name.padEnd(16)} ${warn(`error: ${info.error}`)}`)
       } else {
         const skipSuffix = info.skipReason ? ` — ${info.skipReason}` : ''
-        this.log(`  ○ ${name.padEnd(16)} skipped${skipSuffix}`)
+        this.log(`  ${dim('○')} ${name.padEnd(16)} ${dim(`skipped${skipSuffix}`)}`)
       }
     }
   }

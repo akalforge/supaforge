@@ -6,6 +6,7 @@ import { renderSummary, renderDetailed } from '../render.js'
 import { promote } from '../promote.js'
 import type { CheckName } from '../types/drift.js'
 import { CHECK_NAMES } from '../types/drift.js'
+import { ok, warn, dim, cmd } from '../ui.js'
 
 /**
  * Unified drift detection & resolution command.
@@ -58,13 +59,23 @@ export default class Diff extends BaseCommand {
     const registry = createDefaultRegistry({ includeFiles: flags['include-files'] })
     const checks = flags.check ? [flags.check as CheckName] : undefined
 
+    // ── Preflight: verify both databases are reachable ───────────────────────
+    if (!flags.json) {
+      const sourceEnv = config.environments[config.source!]
+      const targetEnv = config.environments[config.target!]
+      const pre = this.createPreflight('Diff preflight checks')
+        .addDatabase('Source', config.source!, sourceEnv.dbUrl)
+        .addDatabase('Target', config.target!, targetEnv.dbUrl)
+      await this.runPreflight(pre, 'Diff')
+    }
+
     // ── Apply mode (was: promote) ────────────────────────────────────────────
     if (flags.apply) {
       this.log('\nScanning for drift...\n')
       const scanResult = await scan(registry, { config, checks })
 
       if (scanResult.summary.total === 0) {
-        this.log('No drift detected. Nothing to apply. ✓')
+        this.log(`${ok('No drift detected.')} Nothing to apply. \u2713`)
         return
       }
 
@@ -82,23 +93,23 @@ export default class Diff extends BaseCommand {
       }
 
       if (result.applied.length > 0) {
-        this.log(`Applied ${result.applied.length} fix(es):`)
+        this.log(`${ok(`Applied ${result.applied.length} fix(es):`)}`) 
         for (const stmt of result.applied) {
-          this.log(`  ✓ [${stmt.check}] ${stmt.issueId}`)
+          this.log(`  ${ok('✓')} ${dim(`[${stmt.check}]`)} ${stmt.issueId}`)
         }
       }
 
       if (result.skipped.length > 0) {
-        this.log(`\nSkipped ${result.skipped.length} issue(s):`)
+        this.log(`\n${dim(`Skipped ${result.skipped.length} issue(s):`)}`) 
         for (const item of result.skipped) {
-          this.log(`  ○ [${item.check}] ${item.issueId}: ${item.reason}`)
+          this.log(`  ${dim('○')} ${dim(`[${item.check}]`)} ${item.issueId}: ${item.reason}`)
         }
       }
 
       if (result.errors.length > 0) {
-        this.log(`\n${result.errors.length} error(s):`)
+        this.log(`\n${warn(`${result.errors.length} error(s):`)}`) 
         for (const item of result.errors) {
-          this.log(`  ✗ [${item.check}] ${item.issueId}: ${item.error}`)
+          this.log(`  ${warn('✗')} ${dim(`[${item.check}]`)} ${item.issueId}: ${item.error}`)
         }
         this.exit(1)
       }
@@ -117,8 +128,8 @@ export default class Diff extends BaseCommand {
       this.log(renderSummary(result))
 
       if (result.summary.total > 0) {
-        this.log('  → Run with --detail to see SQL diffs')
-        this.log('  → Run with --apply to fix drift\n')
+        this.log(`  → Run with ${cmd('--detail')} to see SQL diffs`)
+        this.log(`  → Run with ${cmd('--apply')} to fix drift\n`)
       }
     }
 

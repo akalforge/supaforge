@@ -1,6 +1,6 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
-import type { DriftIssue } from '../types/drift'
+import type { DriftIssue, SyncAction } from '../types/drift'
 import { sqlLiteral } from '../utils/sql'
 import { normalizeRoles } from '../utils/strings'
 import { scanStorageFiles, type ScanFilesOptions } from '../storage-files'
@@ -52,7 +52,10 @@ export class StorageCheck extends Check {
       this.listBuckets(ctx.target.dbUrl),
     ])
 
-    return diffBuckets(source, target)
+    return diffBuckets(source, target, {
+      apiUrl: ctx.target.apiUrl,
+      accessToken: ctx.target.accessToken,
+    })
   }
 
   private async scanPolicies(ctx: CheckContext): Promise<DriftIssue[]> {
@@ -110,46 +113,93 @@ const STORAGE_POLICY_SQL = `
 
 // ─── Bucket diffing ──────────────────────────────────────────────────────────
 
+interface BucketDiffConfig {
+  apiUrl?: string
+  accessToken?: string
+}
+
+function bucketApiHeaders(accessToken?: string): Record<string, string> {
+  if (!accessToken) return {}
+  return { apikey: accessToken, Authorization: `Bearer ${accessToken}` }
+}
+
+function bucketAction(
+  config: BucketDiffConfig,
+  method: SyncAction['method'],
+  path: string,
+  label: string,
+  body?: unknown,
+): SyncAction {
+  return {
+    method,
+    url: `${config.apiUrl}/storage/v1/bucket${path}`,
+    headers: bucketApiHeaders(config.accessToken),
+    label,
+    ...(body !== undefined && { body }),
+  }
+}
 
 function diffBuckets(
   source: StorageBucket[],
   target: StorageBucket[],
+  config?: BucketDiffConfig,
 ): DriftIssue[] {
   const issues: DriftIssue[] = []
   const sourceMap = new Map(source.map(b => [b.id, b]))
   const targetMap = new Map(target.map(b => [b.id, b]))
+  const useApi = !!config?.apiUrl
 
   for (const [id, b] of sourceMap) {
     if (!targetMap.has(id)) {
-      issues.push({
+      const issue: DriftIssue = {
         id: `storage-missing-${id}`,
         check: 'storage',
         severity: 'warning',
         title: `Missing bucket: ${b.name}`,
         description: `Bucket "${b.name}" exists in source but not in target.`,
         sourceValue: b,
-        sql: {
+      }
+
+      if (useApi) {
+        issue.action = bucketAction(config!, 'POST', '', `Create bucket "${b.name}"`, {
+          id: b.id,
+          name: b.name,
+          public: b.public,
+          file_size_limit: b.file_size_limit,
+          allowed_mime_types: b.allowed_mime_types,
+        })
+      } else {
+        issue.sql = {
           up: `INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types) VALUES (${sqlLiteral(b.id)}, ${sqlLiteral(b.name)}, ${sqlLiteral(b.public)}, ${sqlLiteral(b.file_size_limit)}, ${sqlLiteral(b.allowed_mime_types)});`,
           down: `DELETE FROM storage.buckets WHERE id = ${sqlLiteral(b.id)};`,
-        },
-      })
+        }
+      }
+
+      issues.push(issue)
     }
   }
 
   for (const [id, b] of targetMap) {
     if (!sourceMap.has(id)) {
-      issues.push({
+      const issue: DriftIssue = {
         id: `storage-extra-${id}`,
         check: 'storage',
         severity: 'info',
         title: `Extra bucket: ${b.name}`,
         description: `Bucket "${b.name}" exists in target but not in source.`,
         targetValue: b,
-        sql: {
+      }
+
+      if (useApi) {
+        issue.action = bucketAction(config!, 'DELETE', `/${id}`, `Delete bucket "${b.name}"`)
+      } else {
+        issue.sql = {
           up: `DELETE FROM storage.buckets WHERE id = ${sqlLiteral(b.id)};`,
           down: `INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types) VALUES (${sqlLiteral(b.id)}, ${sqlLiteral(b.name)}, ${sqlLiteral(b.public)}, ${sqlLiteral(b.file_size_limit)}, ${sqlLiteral(b.allowed_mime_types)});`,
-        },
-      })
+        }
+      }
+
+      issues.push(issue)
     }
   }
 
@@ -200,23 +250,32 @@ function diffBuckets(
       })
     }
 
-    // Attach SQL update to the first property-diff issue for this bucket
+    // Attach sync fix to the first property-diff issue for this bucket
     if (setClauses.length > 0) {
-      const revertClauses: string[] = []
-      if (sb.public !== tb.public) revertClauses.push(`public = ${sqlLiteral(tb.public)}`)
-      if (sb.file_size_limit !== tb.file_size_limit) revertClauses.push(`file_size_limit = ${sqlLiteral(tb.file_size_limit)}`)
-      if (srcMimes !== tgtMimes) revertClauses.push(`allowed_mime_types = ${sqlLiteral(tb.allowed_mime_types)}`)
-
-      const sql = {
-        up: `UPDATE storage.buckets SET ${setClauses.join(', ')} WHERE id = ${sqlLiteral(id)};`,
-        down: `UPDATE storage.buckets SET ${revertClauses.join(', ')} WHERE id = ${sqlLiteral(id)};`,
-      }
       const firstBucketIssue = issues.find(i =>
         i.id.startsWith(`storage-visibility-${id}`) ||
         i.id.startsWith(`storage-sizelimit-${id}`) ||
         i.id.startsWith(`storage-mimetypes-${id}`),
       )
-      if (firstBucketIssue) firstBucketIssue.sql = sql
+      if (firstBucketIssue) {
+        if (useApi) {
+          firstBucketIssue.action = bucketAction(config!, 'PUT', `/${id}`, `Update bucket "${sb.name}"`, {
+            public: sb.public,
+            file_size_limit: sb.file_size_limit,
+            allowed_mime_types: sb.allowed_mime_types,
+          })
+        } else {
+          const revertClauses: string[] = []
+          if (sb.public !== tb.public) revertClauses.push(`public = ${sqlLiteral(tb.public)}`)
+          if (sb.file_size_limit !== tb.file_size_limit) revertClauses.push(`file_size_limit = ${sqlLiteral(tb.file_size_limit)}`)
+          if (srcMimes !== tgtMimes) revertClauses.push(`allowed_mime_types = ${sqlLiteral(tb.allowed_mime_types)}`)
+
+          firstBucketIssue.sql = {
+            up: `UPDATE storage.buckets SET ${setClauses.join(', ')} WHERE id = ${sqlLiteral(id)};`,
+            down: `UPDATE storage.buckets SET ${revertClauses.join(', ')} WHERE id = ${sqlLiteral(id)};`,
+          }
+        }
+      }
     }
   }
 

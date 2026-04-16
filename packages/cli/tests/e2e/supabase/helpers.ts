@@ -56,12 +56,12 @@ export function buildConfig(opts?: BuildConfigOptions): SupaForgeConfig {
     environments: {
       source: {
         dbUrl: process.env.SUPAFORGE_E2E_SOURCE_DB_URL!,
-        accessToken: process.env.SUPAFORGE_E2E_SOURCE_ACCESS_TOKEN,
+        accessToken: process.env.SUPAFORGE_E2E_SOURCE_SERVICE_KEY,
         apiUrl: process.env.SUPAFORGE_E2E_SOURCE_API_URL,
       },
       target: {
         dbUrl: process.env.SUPAFORGE_E2E_TARGET_DB_URL!,
-        accessToken: process.env.SUPAFORGE_E2E_TARGET_ACCESS_TOKEN,
+        accessToken: process.env.SUPAFORGE_E2E_TARGET_SERVICE_KEY,
         apiUrl: process.env.SUPAFORGE_E2E_TARGET_API_URL,
       },
     },

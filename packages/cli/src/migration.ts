@@ -166,10 +166,10 @@ async function generateDiffMigration(
     } catch { /* skip */ }
   }
 
-  // Compare schema.sql (diff by content change)
+  // Compare schema.json (diff by content change)
   try {
-    const prevSchema = await readFile(join(previousDir, 'schema.sql'), 'utf-8').catch(() => '')
-    const newSchema = await readFile(join(snapshot.dir, 'schema.sql'), 'utf-8').catch(() => '')
+    const prevSchema = await readFile(join(previousDir, 'schema.json'), 'utf-8').catch(() => '')
+    const newSchema = await readFile(join(snapshot.dir, 'schema.json'), 'utf-8').catch(() => '')
     if (prevSchema !== newSchema) {
       layers.push('schema')
       // Schema diffs are best computed by @dbdiff/cli at apply time
@@ -177,8 +177,6 @@ async function generateDiffMigration(
       sqlUp.push('-- Schema changed. Use @dbdiff/cli to generate migration SQL.')
     }
   } catch { /* skip */ }
-
-  if (layers.length === 0) return null
 
   return {
     version: snapshot.timestamp,

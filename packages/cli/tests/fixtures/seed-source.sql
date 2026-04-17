@@ -160,11 +160,13 @@ CREATE TABLE storage.objects (
 );
 
 CREATE TABLE storage.buckets (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    public      BOOLEAN DEFAULT false,
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    updated_at  TIMESTAMPTZ DEFAULT now()
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    public              BOOLEAN DEFAULT false,
+    file_size_limit     BIGINT,
+    allowed_mime_types  TEXT[],
+    created_at          TIMESTAMPTZ DEFAULT now(),
+    updated_at          TIMESTAMPTZ DEFAULT now()
 );
 
 ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;

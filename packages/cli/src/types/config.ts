@@ -1,19 +1,21 @@
 export interface EnvironmentConfig {
   dbUrl: string
   projectRef?: string
-  apiKey?: string
+  /** Personal access token for Supabase Management API (auth config, edge functions). */
+  accessToken?: string
   /** Base URL for self-hosted Supabase API gateway (e.g. http://localhost:54321). Overrides projectRef-based URL construction. */
   apiUrl?: string
 }
 
 export interface ChecksConfig {
   data?: { tables: string[] }
+  migrations?: { dir?: string }
 }
 
 export interface SupaForgeConfig {
   environments: Record<string, EnvironmentConfig>
-  source: string
-  target: string
+  source?: string
+  target?: string
   ignoreSchemas?: string[]
   checks?: ChecksConfig
 }
@@ -25,6 +27,10 @@ export interface SnapshotLayerInfo {
   file: string
   /** Number of items captured (e.g. policies, buckets, jobs). -1 if not applicable. */
   itemCount: number
+  /** Error message if the layer failed to capture. */
+  error?: string
+  /** Human-readable reason the layer was skipped (when captured is false and there is no error). */
+  skipReason?: string
 }
 
 export interface SnapshotManifest {

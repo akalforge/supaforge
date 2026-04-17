@@ -142,3 +142,4 @@ docs/
 
 # Supaforge
 supaforge.config.json
+.supaforge/

@@ -6,6 +6,8 @@ import { MIGRATIONS_TABLE, loadMigrations } from './migration'
 import { loadSnapshot } from './snapshot'
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
+import { errMsg } from './utils/error'
+import { DEFAULT_IGNORE_SCHEMAS } from './defaults'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
@@ -14,8 +16,8 @@ export interface RestoreOptions {
   targetUrl: string
   /** Project ref for API-based operations (auth, storage, edge functions). */
   targetProjectRef?: string
-  /** API key for Supabase Management API. */
-  targetApiKey?: string
+  /** Access token for Supabase Management API. */
+  targetAccessToken?: string
   /** Restore from a specific snapshot directory. */
   snapshotDir?: string
   /** Or restore from migrations up to a specific version. */
@@ -35,6 +37,29 @@ export interface RestoreResult {
   skipped: { type: 'sql' | 'api'; label: string; reason: string }[]
   errors: { type: 'sql' | 'api'; label: string; error: string }[]
   mode: 'snapshot' | 'migrations'
+}
+
+// ─── Safety Check ────────────────────────────────────────────────────────────
+
+/**
+ * Check whether the target database has user tables in the public schema.
+ * Returns the table names if any exist — used to gate destructive restore.
+ */
+export async function getPublicTables(targetUrl: string): Promise<string[]> {
+  const ignoreList = DEFAULT_IGNORE_SCHEMAS.map(s => `'${s}'`).join(', ')
+  const client = new pg.Client({ connectionString: targetUrl })
+  await client.connect()
+  try {
+    const { rows } = await client.query<{ tablename: string }>(
+      `SELECT tablename FROM pg_tables
+       WHERE schemaname = 'public'
+         AND schemaname NOT IN (${ignoreList})
+       ORDER BY tablename`,
+    )
+    return rows.map(r => r.tablename)
+  } finally {
+    await client.end()
+  }
 }
 
 // ─── Restore from Snapshot ───────────────────────────────────────────────────
@@ -75,7 +100,7 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
             result.errors.push({
               type: 'sql',
               label: summarizeStatement(sql),
-              error: err instanceof Error ? err.message : String(err),
+              error: errMsg(err),
             })
           }
         }
@@ -101,7 +126,7 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
               result.errors.push({
                 type: 'sql',
                 label: `Data: ${file}`,
-                error: err instanceof Error ? err.message : String(err),
+                error: errMsg(err),
               })
             }
           }
@@ -190,7 +215,7 @@ export async function restoreFromMigrations(options: RestoreOptions): Promise<Re
           result.errors.push({
             type: 'sql',
             label: summarizeStatement(sql),
-            error: err instanceof Error ? err.message : String(err),
+            error: errMsg(err),
           })
         }
       }

@@ -70,7 +70,8 @@ describe('scan', () => {
     const result = await scan(registry, { config, checks: ['auth'] })
 
     expect(result.checks[0].status).toBe('error')
-    expect(result.checks[0].error).toBe('connection refused')
+    expect(result.checks[0].error).toContain('Cannot connect to PostgreSQL')
+    expect(result.score).toBeLessThan(100)
   })
 
   it('skips unregistered checks', async () => {

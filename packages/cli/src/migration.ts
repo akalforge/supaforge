@@ -2,10 +2,8 @@ import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { MigrationFile, MigrationAction, SnapshotManifest } from './types/config'
 import { loadSnapshot, findLatestSnapshot, captureSnapshot, generateTimestamp, type SnapshotOptions, type SnapshotResult } from './snapshot'
-
-/** Directory for migration files */
-const SUPAFORGE_DIR = '.supaforge'
-const MIGRATIONS_DIR = 'migrations'
+import { SUPAFORGE_DIR, MIGRATIONS_SUBDIR } from './constants'
+import { slugify } from './utils/strings'
 
 /** Migration tracking table name */
 export const MIGRATIONS_TABLE = '_supaforge_migrations'
@@ -26,15 +24,7 @@ export interface BackupResult {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function migrationsDir(cwd: string): string {
-  return resolve(cwd, SUPAFORGE_DIR, MIGRATIONS_DIR)
-}
-
-function sanitizeDescription(desc: string): string {
-  return desc
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '')
-    .slice(0, 60)
+  return resolve(cwd, SUPAFORGE_DIR, MIGRATIONS_SUBDIR)
 }
 
 // ─── Backup: Snapshot + Diff ─────────────────────────────────────────────────
@@ -68,7 +58,7 @@ export async function backup(options: BackupOptions): Promise<BackupResult> {
   if (migration) {
     const mDir = migrationsDir(cwd)
     await mkdir(mDir, { recursive: true })
-    const filename = `${snapshot.timestamp}_${sanitizeDescription(description)}.json`
+    const filename = `${snapshot.timestamp}_${slugify(description, '-')}.json`
     migrationFile = join(mDir, filename)
     await writeFile(migrationFile, JSON.stringify(migration, null, 2) + '\n')
   }
@@ -176,10 +166,10 @@ async function generateDiffMigration(
     } catch { /* skip */ }
   }
 
-  // Compare schema.sql (diff by content change)
+  // Compare schema.json (diff by content change)
   try {
-    const prevSchema = await readFile(join(previousDir, 'schema.sql'), 'utf-8').catch(() => '')
-    const newSchema = await readFile(join(snapshot.dir, 'schema.sql'), 'utf-8').catch(() => '')
+    const prevSchema = await readFile(join(previousDir, 'schema.json'), 'utf-8').catch(() => '')
+    const newSchema = await readFile(join(snapshot.dir, 'schema.json'), 'utf-8').catch(() => '')
     if (prevSchema !== newSchema) {
       layers.push('schema')
       // Schema diffs are best computed by @dbdiff/cli at apply time
@@ -187,8 +177,6 @@ async function generateDiffMigration(
       sqlUp.push('-- Schema changed. Use @dbdiff/cli to generate migration SQL.')
     }
   } catch { /* skip */ }
-
-  if (layers.length === 0) return null
 
   return {
     version: snapshot.timestamp,

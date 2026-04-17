@@ -62,7 +62,7 @@ describe('integration: snapshot capture', () => {
     expect(manifest.environment).toBe('source')
   })
 
-  it.skipIf(skipIfNoContainers())('should write schema.sql with DDL', async () => {
+  it.skipIf(skipIfNoContainers())('should write schema.json with table info', async () => {
     const config = makeSingleEnvConfig(tempDir)
     const result = await captureSnapshot({
       envName: 'source',
@@ -71,11 +71,11 @@ describe('integration: snapshot capture', () => {
       cwd: tempDir,
     })
 
-    const schemaPath = join(result.dir, 'schema.sql')
-    const schemaSql = await readFile(schemaPath, 'utf8')
+    const schemaPath = join(result.dir, 'schema.json')
+    const schemaJson = await readFile(schemaPath, 'utf8')
     // Should contain our test tables
-    expect(schemaSql).toContain('users')
-    expect(schemaSql).toContain('posts')
+    expect(schemaJson).toContain('users')
+    expect(schemaJson).toContain('posts')
   })
 
   it.skipIf(skipIfNoContainers())('should write rls.sql with policies', async () => {

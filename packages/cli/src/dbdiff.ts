@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { DriftIssue } from './types/drift'
+import { errMsg, friendlyDbError } from './utils/error'
+import { DBDIFF_EXEC_TIMEOUT_MS, DBDIFF_MAX_BUFFER } from './constants'
 
 const execFileAsync = promisify(execFile)
 
@@ -15,6 +17,8 @@ export interface DbDiffOptions {
   include: 'up' | 'down' | 'both'
   tables?: string[]
   ignoreTables?: string[]
+  /** Schemas to exclude — converted to --ignore-tables=schema.* glob patterns. */
+  ignoreSchemas?: string[]
 }
 
 export interface DbDiffResult {
@@ -72,10 +76,22 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
     args.push(`--ignore-tables=${options.ignoreTables.join(',')}`)
   }
 
+  // Convert ignoreSchemas to --ignore-tables glob patterns (e.g. auth.* , storage.*)
+  if (options.ignoreSchemas?.length) {
+    const schemaGlobs = options.ignoreSchemas.map(s => `${s}.*`)
+    const existing = args.find(a => a.startsWith('--ignore-tables='))
+    if (existing) {
+      const idx = args.indexOf(existing)
+      args[idx] = `${existing},${schemaGlobs.join(',')}`
+    } else {
+      args.push(`--ignore-tables=${schemaGlobs.join(',')}`)
+    }
+  }
+
   try {
     await execFileAsync(command, args, {
-      timeout: 120_000,
-      maxBuffer: 10 * 1024 * 1024,
+      timeout: DBDIFF_EXEC_TIMEOUT_MS,
+      maxBuffer: DBDIFF_MAX_BUFFER,
     })
 
     // When schemas are identical, dbdiff exits 0 but doesn't write the file
@@ -87,8 +103,8 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
     const output = await readFile(outputFile, 'utf8')
     return parseDbDiffOutput(output)
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err)
-    const stderr = String((err as Record<string, unknown>)?.stderr ?? '')
+    const message = errMsg(err)
+    const stderr = String((err as Record<string, unknown>)?.stderr ?? '').trim()
     const combined = `${message} ${stderr}`
     if (
       combined.includes('ENOENT') ||
@@ -101,7 +117,11 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
         '@dbdiff/cli is not installed. Install it with: npm install @dbdiff/cli',
       )
     }
-    throw err
+    // Use stderr (actual DB error) when available; fall through friendlyDbError
+    // to translate raw pg errors into actionable messages and strip the raw
+    // "Command failed: ..." exec wrapper that leaks connection URLs.
+    const dbErr = stderr || message
+    throw new Error(friendlyDbError(dbErr, options.sourceUrl))
   } finally {
     await unlink(outputFile).catch(() => {})
   }
@@ -143,15 +163,30 @@ export function parseDbDiffOutput(output: string): DbDiffResult {
  *
  * Each SQL statement (separated by `;`) becomes its own issue
  * with the appropriate severity and layer.
+ *
+ * When `ignoreSchemas` is provided, FK constraint statements that
+ * reference tables in ignored schemas are filtered out — these are
+ * false positives caused by dbdiff seeing stub tables.
  */
 export function sqlToIssues(
   result: DbDiffResult,
   check: 'schema' | 'data',
+  ignoreSchemas?: string[],
 ): DriftIssue[] {
   if (!result.up && !result.down) return []
 
-  const upStatements = splitStatements(result.up)
-  const downStatements = splitStatements(result.down)
+  let upStatements = splitStatements(result.up)
+  let downStatements = splitStatements(result.down)
+
+  // Filter out FK constraints that reference tables in ignored schemas.
+  // These arise because dbdiff compares stub tables vs real Supabase tables.
+  // We check both UP and DOWN statements — dbdiff generates broken REFERENCES "" ("")
+  // in the DOWN when the referenced table is in an ignored schema.
+  if (ignoreSchemas?.length && check === 'schema') {
+    const keep = filterCrossSchemaFks(upStatements, downStatements, ignoreSchemas)
+    upStatements = upStatements.filter((_, i) => keep[i])
+    downStatements = downStatements.filter((_, i) => keep[i])
+  }
 
   if (upStatements.length === 0) return []
 
@@ -169,6 +204,73 @@ export function sqlToIssues(
       sql: { up: upSql, down: downSql },
     }
   })
+}
+
+/**
+ * Identify which UP statements to keep after filtering cross-schema FK false positives.
+ *
+ * Two-pass approach:
+ * 1. Mark ADD CONSTRAINT ... FOREIGN KEY statements where the UP references an
+ *    ignored schema or the DOWN counterpart has broken `REFERENCES "" ("")`.
+ * 2. Mark paired DROP CONSTRAINT statements that share the same constraint name.
+ */
+function filterCrossSchemaFks(
+  upStmts: string[],
+  downStmts: string[],
+  schemas: string[],
+): boolean[] {
+  const keep = new Array<boolean>(upStmts.length).fill(true)
+
+  // Collect constraint names that are cross-schema FKs
+  const crossSchemaConstraints = new Set<string>()
+
+  // Pass 1: detect ADD CONSTRAINT ... FOREIGN KEY with cross-schema refs
+  for (let i = 0; i < upStmts.length; i++) {
+    const upper = upStmts[i].toUpperCase()
+    if (!upper.includes('ADD CONSTRAINT') || !upper.includes('FOREIGN KEY')) continue
+
+    const isCrossSchema =
+      hasCrossSchemaRef(upStmts[i], schemas) ||
+      (downStmts[i] != null && hasBrokenRef(downStmts[i]))
+
+    if (isCrossSchema) {
+      keep[i] = false
+      const name = upStmts[i].match(/CONSTRAINT\s+"([^"]+)"/i)?.[1]
+      if (name) crossSchemaConstraints.add(name)
+    }
+  }
+
+  // Pass 2: filter paired DROP CONSTRAINT for the same FK names
+  for (let i = 0; i < upStmts.length; i++) {
+    if (!keep[i]) continue
+    const upper = upStmts[i].toUpperCase()
+    if (!upper.includes('DROP CONSTRAINT')) continue
+    const name = upStmts[i].match(/DROP\s+CONSTRAINT\s+"([^"]+)"/i)?.[1]
+    if (name && crossSchemaConstraints.has(name)) {
+      keep[i] = false
+    }
+  }
+
+  return keep
+}
+
+/** Check if a REFERENCES clause points to an ignored schema or is empty. */
+function hasCrossSchemaRef(sql: string, schemas: string[]): boolean {
+  const refsMatch = sql.match(/REFERENCES\s+"([^"]*)"(?:\s*\.\s*"([^"]*)")?\s*\(\s*"([^"]*)"\s*\)/i)
+  if (!refsMatch) return false
+  const [, first, second] = refsMatch
+  // Broken: REFERENCES "" ("")
+  if (first === '') return true
+  // Schema-qualified: REFERENCES "auth"."users" ("id")
+  if (second !== undefined) {
+    return schemas.some(s => s.toLowerCase() === first.toLowerCase())
+  }
+  return false
+}
+
+/** Check if SQL contains a broken REFERENCES "" ("") from dbdiff. */
+function hasBrokenRef(sql: string): boolean {
+  return /REFERENCES\s+""\s*\(\s*""\s*\)/i.test(sql)
 }
 
 function splitStatements(sql: string): string[] {

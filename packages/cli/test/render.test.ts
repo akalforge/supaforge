@@ -94,3 +94,53 @@ describe('renderDetailed', () => {
     expect(output).toContain('Layer 6: Cron Jobs')
   })
 })
+
+describe('error rendering', () => {
+  const errorResult: ScanResult = {
+    timestamp: '2026-04-13T00:00:00.000Z',
+    source: 'local',
+    target: 'prod',
+    checks: [
+      {
+        check: 'schema',
+        status: 'error',
+        issues: [],
+        error: 'Command failed: postgres://user:***@host/db',
+        durationMs: 50,
+      },
+      { check: 'rls', status: 'clean', issues: [], durationMs: 10 },
+    ],
+    score: 90,
+    summary: { total: 0, critical: 0, warning: 0, info: 0 },
+  }
+
+  it('shows error marker and message for errored checks', () => {
+    const output = renderSummary(errorResult)
+    expect(output).toContain('✖')
+    expect(output).toContain('error:')
+    expect(output).toContain('Command failed')
+  })
+
+  it('shows clean marker for non-errored checks', () => {
+    const output = renderSummary(errorResult)
+    expect(output).toContain('✓')
+  })
+
+  it('does not show raw credentials in error output', () => {
+    const output = renderSummary(errorResult)
+    expect(output).not.toContain('password')
+    expect(output).toContain('***')
+  })
+
+  it('shows fallback label when error status has no error message', () => {
+    const noMsgResult: ScanResult = {
+      ...errorResult,
+      checks: [
+        { check: 'rls', status: 'error', issues: [], durationMs: 10 },
+      ],
+    }
+    const output = renderSummary(noMsgResult)
+    expect(output).toContain('✖')
+    expect(output).toContain('error: check failed')
+  })
+})

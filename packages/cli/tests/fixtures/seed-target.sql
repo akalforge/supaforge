@@ -27,10 +27,11 @@ GRANT ALL ON SCHEMA public TO PUBLIC;
 DROP SCHEMA IF EXISTS cron CASCADE;
 DROP SCHEMA IF EXISTS supabase_functions CASCADE;
 DROP SCHEMA IF EXISTS storage CASCADE;
+DROP SCHEMA IF EXISTS vault CASCADE;
 
 -- === Extensions ===
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp" SCHEMA public;
--- NOTE: pg_net intentionally NOT installed in target
+-- NOTE: pg_trgm intentionally NOT installed in target (drift)
 
 -- === Enum types (DRIFTED) ===
 -- DRIFT: "mood" enum is MISSING entirely
@@ -169,11 +170,13 @@ CREATE TABLE storage.objects (
 );
 
 CREATE TABLE storage.buckets (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    public      BOOLEAN DEFAULT false,
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    updated_at  TIMESTAMPTZ DEFAULT now()
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    public              BOOLEAN DEFAULT false,
+    file_size_limit     BIGINT,
+    allowed_mime_types  TEXT[],
+    created_at          TIMESTAMPTZ DEFAULT now(),
+    updated_at          TIMESTAMPTZ DEFAULT now()
 );
 
 ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
@@ -191,5 +194,25 @@ CREATE POLICY "storage_objects_select_own"
 INSERT INTO public.plans (name, price, active) VALUES
     ('Free', 0, true),
     ('Pro', 1900, true);
+
+-- NOTE: supaforge_live publication intentionally NOT created (drift)
+
+-- === Vault (DRIFTED) ===
+-- DRIFT: smtp_password secret is MISSING; api_key exists (with different encrypted value)
+CREATE SCHEMA IF NOT EXISTS vault;
+CREATE TABLE IF NOT EXISTS vault.secrets (
+    id          UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    name        TEXT,
+    description TEXT,
+    secret      TEXT NOT NULL,
+    unique_name TEXT,
+    nonce       TEXT,
+    key_id      UUID,
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+
+INSERT INTO vault.secrets (name, description, secret, unique_name) VALUES
+    ('api_key', 'Main API key', 'encrypted_api_key_tgt', 'api_key');
 
 COMMIT;

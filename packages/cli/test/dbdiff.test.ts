@@ -278,3 +278,80 @@ describe('sqlToIssues — programmable objects', () => {
     expect(issues[2].id).toBe('schema-create-function-3')
   })
 })
+
+describe('sqlToIssues — cross-schema FK filtering', () => {
+  it('filters out FK constraint referencing schema-qualified ignored schema', () => {
+    const issues = sqlToIssues({
+      up: 'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users" ("id") ON DELETE CASCADE;',
+      down: 'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+    }, 'schema', ['auth', 'storage'])
+    expect(issues).toHaveLength(0)
+  })
+
+  it('filters out FK with broken empty REFERENCES from dbdiff', () => {
+    const issues = sqlToIssues({
+      up: 'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "" ("");',
+      down: 'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+    }, 'schema', ['auth'])
+    expect(issues).toHaveLength(0)
+  })
+
+  it('filters out unqualified FK when DOWN has broken REFERENCES', () => {
+    // This is the actual dbdiff output format: UP strips the schema, DOWN has empty refs
+    const issues = sqlToIssues({
+      up: [
+        'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+        'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE CASCADE;',
+      ].join('\n'),
+      down: [
+        'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+        'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "" ("") ON UPDATE NO ACTION ON DELETE CASCADE;',
+      ].join('\n'),
+    }, 'schema', ['auth'])
+    expect(issues).toHaveLength(0)
+  })
+
+  it('keeps FK constraints referencing public schema tables', () => {
+    const issues = sqlToIssues({
+      up: 'ALTER TABLE "comments" ADD CONSTRAINT "comments_post_id_fkey" FOREIGN KEY ("post_id") REFERENCES "posts" ("id");',
+      down: 'ALTER TABLE "comments" DROP CONSTRAINT "comments_post_id_fkey";',
+    }, 'schema', ['auth', 'storage'])
+    expect(issues).toHaveLength(1)
+    expect(issues[0].title).toContain('comments')
+  })
+
+  it('does not filter when ignoreSchemas is not provided', () => {
+    const issues = sqlToIssues({
+      up: 'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users" ("id");',
+      down: 'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+    }, 'schema')
+    expect(issues).toHaveLength(1)
+  })
+
+  it('does not filter FK constraints for data checks', () => {
+    const issues = sqlToIssues({
+      up: 'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users" ("id");',
+      down: 'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+    }, 'data', ['auth'])
+    expect(issues).toHaveLength(1)
+  })
+
+  it('filters FK and keeps other statements in mixed output', () => {
+    const issues = sqlToIssues({
+      up: [
+        'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+        'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE CASCADE;',
+        'ALTER TABLE "users" ADD COLUMN "bio" text;',
+      ].join('\n'),
+      down: [
+        'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+        'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "" ("") ON UPDATE NO ACTION ON DELETE CASCADE;',
+        'ALTER TABLE "users" DROP COLUMN "bio";',
+      ].join('\n'),
+    }, 'schema', ['auth'])
+    // Only the ADD COLUMN survives — both FK statements are filtered
+    expect(issues).toHaveLength(1)
+    expect(issues[0].title).toContain('users')
+    expect(issues[0].sql?.up).toContain('ADD COLUMN')
+  })
+})

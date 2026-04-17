@@ -1,5 +1,6 @@
 import type { DriftIssue, SyncAction } from '../types/drift'
 import { Check, type CheckContext } from './base'
+import { SUPABASE_MGMT_API } from '../constants'
 
 interface EdgeFunction {
   slug: string
@@ -12,9 +13,6 @@ interface EdgeFunction {
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
-/** Supabase Management API base URL */
-const MGMT_API = 'https://api.supabase.com/v1/projects'
-
 export class EdgeFunctionsCheck extends Check {
   readonly name = 'edge-functions' as const
 
@@ -23,8 +21,10 @@ export class EdgeFunctionsCheck extends Check {
   }
 
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
-    const { projectRef: sourceRef, apiKey: sourceKey } = ctx.source
-    const { projectRef: targetRef, apiKey: targetKey } = ctx.target
+    const sourceRef = ctx.source.projectRef
+    const targetRef = ctx.target.projectRef
+    const sourceKey = ctx.source.accessToken
+    const targetKey = ctx.target.accessToken
 
     if (!sourceRef || !targetRef || !sourceKey || !targetKey) {
       return []
@@ -38,10 +38,10 @@ export class EdgeFunctionsCheck extends Check {
     return diffFunctions(source, target, targetRef, targetKey)
   }
 
-  private async listFunctions(projectRef: string, apiKey: string): Promise<EdgeFunction[]> {
-    const url = `${MGMT_API}/${encodeURIComponent(projectRef)}/functions`
+  private async listFunctions(projectRef: string, accessToken: string): Promise<EdgeFunction[]> {
+    const url = `${SUPABASE_MGMT_API}/${encodeURIComponent(projectRef)}/functions`
     const res = await this.fetchFn(url, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { Authorization: `Bearer ${accessToken}` },
     })
     if (!res.ok) throw new Error(`Failed to list functions for ${projectRef}: ${res.statusText}`)
     return res.json() as Promise<EdgeFunction[]>
@@ -51,7 +51,7 @@ export class EdgeFunctionsCheck extends Check {
 function makeDeleteAction(slug: string, targetRef: string, targetKey: string): SyncAction {
   return {
     method: 'DELETE',
-    url: `${MGMT_API}/${encodeURIComponent(targetRef)}/functions/${encodeURIComponent(slug)}`,
+    url: `${SUPABASE_MGMT_API}/${encodeURIComponent(targetRef)}/functions/${encodeURIComponent(slug)}`,
     headers: { Authorization: `Bearer ${targetKey}` },
     label: `Delete Edge Function "${slug}" from target`,
   }

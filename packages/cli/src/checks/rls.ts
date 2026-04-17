@@ -1,6 +1,7 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
+import { normalizeRoles } from '../utils/strings'
 import { Check, type CheckContext } from './base'
 
 interface RlsPolicy {
@@ -66,16 +67,9 @@ function policiesEqual(a: RlsPolicy, b: RlsPolicy): boolean {
 }
 
 /** Parse pg name[] which may arrive as JS array or Postgres literal {a,b} */
-function normalizeRoles(roles: string[] | string): string {
-  if (Array.isArray(roles)) return roles.join(', ')
-  if (typeof roles === 'string' && roles.startsWith('{') && roles.endsWith('}')) {
-    return roles.slice(1, -1).split(',').join(', ')
-  }
-  return String(roles)
-}
 
 function generateCreatePolicySql(p: RlsPolicy): string {
-  const roles = normalizeRoles(p.roles)
+  const roles = normalizeRoles(p.roles).join(', ')
   const lines = [
     `CREATE POLICY "${p.policyname}"`,
     `  ON "${p.schemaname}"."${p.tablename}"`,

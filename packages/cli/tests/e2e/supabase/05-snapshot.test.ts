@@ -52,7 +52,7 @@ describe('e2e: snapshot capture', () => {
   it.skipIf(shouldSkip())('should capture schema layer', () => {
     expect(manifest.layers.schema).toBeDefined()
     expect(manifest.layers.schema.captured).toBe(true)
-    expect(manifest.layers.schema.file).toBe('schema.sql')
+    expect(manifest.layers.schema.file).toBe('schema.json')
     expect(manifest.layers.schema.itemCount).toBeGreaterThanOrEqual(1)
   })
 
@@ -103,14 +103,14 @@ describe('e2e: snapshot capture', () => {
   it.skipIf(shouldSkip())('should write layer files to disk', async () => {
     const files = await readdir(snapshotDir)
     expect(files).toContain('manifest.json')
-    expect(files).toContain('schema.sql')
+    expect(files).toContain('schema.json')
     expect(files).toContain('rls.sql')
     expect(files).toContain('cron.sql')
     expect(files).toContain('extensions.sql')
   })
 
-  it.skipIf(shouldSkip())('schema.sql should contain CREATE TABLE for users', async () => {
-    const schema = await readFile(join(snapshotDir, 'schema.sql'), 'utf-8')
+  it.skipIf(shouldSkip())('schema.json should contain users table', async () => {
+    const schema = await readFile(join(snapshotDir, 'schema.json'), 'utf-8')
     expect(schema).toContain('users')
   })
 

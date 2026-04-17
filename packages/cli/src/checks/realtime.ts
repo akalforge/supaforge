@@ -1,6 +1,7 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
+import { quoteName } from '../utils/sql'
 import { Check, type CheckContext } from './base'
 
 interface RealtimePublication {
@@ -76,8 +77,8 @@ export function diffPublications(source: RealtimePublication[], target: Realtime
         description: `Publication "${pubname}" exists in source but not in target.`,
         sourceValue: tables,
         sql: {
-          up: `CREATE PUBLICATION ${quoteIdent(pubname)}${tables.length > 0 ? ` FOR TABLE ${tables.map(t => `${quoteIdent(t.schemaname)}.${quoteIdent(t.tablename)}`).join(', ')}` : ''};`,
-          down: `DROP PUBLICATION IF EXISTS ${quoteIdent(pubname)};`,
+          up: `CREATE PUBLICATION ${quoteName(pubname)}${tables.length > 0 ? ` FOR TABLE ${tables.map(t => `${quoteName(t.schemaname)}.${quoteName(t.tablename)}`).join(', ')}` : ''};`,
+          down: `DROP PUBLICATION IF EXISTS ${quoteName(pubname)};`,
         },
       })
     }
@@ -114,8 +115,8 @@ export function diffPublications(source: RealtimePublication[], target: Realtime
           title: `Table not published: ${fqn} in ${pubname}`,
           description: `Table "${fqn}" is published in source publication "${pubname}" but not in target.`,
           sql: {
-            up: `ALTER PUBLICATION ${quoteIdent(pubname)} ADD TABLE ${fqn};`,
-            down: `ALTER PUBLICATION ${quoteIdent(pubname)} DROP TABLE ${fqn};`,
+            up: `ALTER PUBLICATION ${quoteName(pubname)} ADD TABLE ${fqn};`,
+            down: `ALTER PUBLICATION ${quoteName(pubname)} DROP TABLE ${fqn};`,
           },
         })
       }
@@ -137,6 +138,3 @@ export function diffPublications(source: RealtimePublication[], target: Realtime
   return issues
 }
 
-function quoteIdent(name: string): string {
-  return `"${name.replace(/"/g, '""')}"`
-}

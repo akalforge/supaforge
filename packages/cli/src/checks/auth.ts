@@ -1,10 +1,8 @@
 import type { DriftIssue, SyncAction } from '../types/drift'
 import { Check, type CheckContext } from './base'
+import { SUPABASE_MGMT_API } from '../constants'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
-
-/** Supabase Management API base URL */
-const MGMT_API = 'https://api.supabase.com/v1/projects'
 
 const CRITICAL_KEYS = [
   'EXTERNAL_EMAIL_ENABLED',
@@ -23,8 +21,10 @@ export class AuthCheck extends Check {
   }
 
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
-    const { projectRef: sourceRef, apiKey: sourceKey } = ctx.source
-    const { projectRef: targetRef, apiKey: targetKey } = ctx.target
+    const sourceRef = ctx.source.projectRef
+    const targetRef = ctx.target.projectRef
+    const sourceKey = ctx.source.accessToken
+    const targetKey = ctx.target.accessToken
 
     if (!sourceRef || !targetRef || !sourceKey || !targetKey) {
       return []
@@ -38,10 +38,10 @@ export class AuthCheck extends Check {
     return diffAuthConfig(source, target, targetRef, targetKey)
   }
 
-  private async fetchAuthConfig(projectRef: string, apiKey: string): Promise<Record<string, unknown>> {
-    const url = `${MGMT_API}/${encodeURIComponent(projectRef)}/config/auth`
+  private async fetchAuthConfig(projectRef: string, accessToken: string): Promise<Record<string, unknown>> {
+    const url = `${SUPABASE_MGMT_API}/${encodeURIComponent(projectRef)}/config/auth`
     const res = await this.fetchFn(url, {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: { Authorization: `Bearer ${accessToken}` },
     })
     if (!res.ok) throw new Error(`Failed to fetch auth config for ${projectRef}: ${res.statusText}`)
     return res.json() as Promise<Record<string, unknown>>
@@ -67,7 +67,7 @@ function diffAuthConfig(
       // Build a PATCH action to sync this specific key to the target
       const action: SyncAction = {
         method: 'PATCH',
-        url: `${MGMT_API}/${encodeURIComponent(targetRef)}/config/auth`,
+        url: `${SUPABASE_MGMT_API}/${encodeURIComponent(targetRef)}/config/auth`,
         headers: { Authorization: `Bearer ${targetKey}` },
         body: { [key]: sv },
         label: `Set auth config "${key}" to ${JSON.stringify(sv)} in target`,

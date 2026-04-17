@@ -1,6 +1,9 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
-import type { DriftIssue } from '../types/drift'
+import type { DriftIssue, SyncAction } from '../types/drift'
+import { sqlLiteral } from '../utils/sql'
+import { normalizeRoles } from '../utils/strings'
+import { scanStorageFiles, type ScanFilesOptions } from '../storage-files'
 import { Check, type CheckContext } from './base'
 
 interface StorageBucket {
@@ -21,14 +24,12 @@ interface StoragePolicy {
   with_check: string | null
 }
 
-export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
-
 export class StorageCheck extends Check {
   readonly name = 'storage' as const
 
   constructor(
-    private fetchFn: FetchFn = globalThis.fetch.bind(globalThis),
     private queryFn: QueryFn = pgQuery,
+    private includeFiles = false,
   ) {
     super()
   }
@@ -36,23 +37,25 @@ export class StorageCheck extends Check {
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     const bucketIssues = await this.scanBuckets(ctx)
     const policyIssues = await this.scanPolicies(ctx)
-    return [...bucketIssues, ...policyIssues]
+
+    let fileIssues: DriftIssue[] = []
+    if (this.includeFiles) {
+      fileIssues = await this.scanFiles(ctx)
+    }
+
+    return [...bucketIssues, ...policyIssues, ...fileIssues]
   }
 
   private async scanBuckets(ctx: CheckContext): Promise<DriftIssue[]> {
-    const { projectRef: sourceRef, apiKey: sourceKey, apiUrl: sourceApiUrl } = ctx.source
-    const { projectRef: targetRef, apiKey: targetKey, apiUrl: targetApiUrl } = ctx.target
-
-    if ((!sourceRef && !sourceApiUrl) || (!targetRef && !targetApiUrl) || !sourceKey || !targetKey) {
-      return []
-    }
-
     const [source, target] = await Promise.all([
-      this.listBuckets(sourceRef, sourceKey, sourceApiUrl),
-      this.listBuckets(targetRef, targetKey, targetApiUrl),
+      this.listBuckets(ctx.source.dbUrl),
+      this.listBuckets(ctx.target.dbUrl),
     ])
 
-    return diffBuckets(source, target, targetRef, targetKey, targetApiUrl)
+    return diffBuckets(source, target, {
+      apiUrl: ctx.target.apiUrl,
+      accessToken: ctx.target.accessToken,
+    })
   }
 
   private async scanPolicies(ctx: CheckContext): Promise<DriftIssue[]> {
@@ -63,22 +66,42 @@ export class StorageCheck extends Check {
     return diffStoragePolicies(source, target)
   }
 
-  private async listBuckets(projectRef: string | undefined, apiKey: string, apiUrl?: string): Promise<StorageBucket[]> {
-    const base = apiUrl
-      ? `${apiUrl}/storage/v1`
-      : `https://${encodeURIComponent(projectRef!)}.supabase.co/storage/v1`
-    const url = `${base}/bucket`
-    const res = await this.fetchFn(url, {
-      headers: { Authorization: `Bearer ${apiKey}`, apikey: apiKey },
-    })
-    if (!res.ok) throw new Error(`Failed to list buckets for ${projectRef ?? apiUrl}: ${res.statusText}`)
-    return res.json() as Promise<StorageBucket[]>
+  private async listBuckets(dbUrl: string): Promise<StorageBucket[]> {
+    return await this.queryFn(dbUrl, STORAGE_BUCKET_SQL) as unknown as StorageBucket[]
   }
 
   private async fetchStoragePolicies(dbUrl: string): Promise<StoragePolicy[]> {
     return await this.queryFn(dbUrl, STORAGE_POLICY_SQL) as unknown as StoragePolicy[]
   }
+
+  private async scanFiles(ctx: CheckContext): Promise<DriftIssue[]> {
+    const sourceRef = ctx.source.projectRef
+    const targetRef = ctx.target.projectRef
+    const sourceKey = ctx.source.accessToken
+    const targetKey = ctx.target.accessToken
+
+    // File scanning requires projectRef + accessToken for both environments
+    if (!sourceRef || !targetRef || !sourceKey || !targetKey) return []
+
+    const options: ScanFilesOptions = {
+      sourceRef,
+      targetRef,
+      sourceKey,
+      targetKey,
+      sourceApiUrl: ctx.source.apiUrl,
+      targetApiUrl: ctx.target.apiUrl,
+    }
+
+    return await scanStorageFiles(options)
+  }
 }
+
+/** Query storage buckets directly from PostgreSQL. */
+const STORAGE_BUCKET_SQL = `
+  SELECT id, name, public, file_size_limit, allowed_mime_types
+  FROM storage.buckets
+  ORDER BY name
+`
 
 /** Query RLS policies specifically on the storage schema (normally excluded from main RLS layer). */
 const STORAGE_POLICY_SQL = `
@@ -90,67 +113,93 @@ const STORAGE_POLICY_SQL = `
 
 // ─── Bucket diffing ──────────────────────────────────────────────────────────
 
-function storageBaseUrl(targetRef?: string, apiUrl?: string): string {
-  if (apiUrl) return `${apiUrl}/storage/v1`
-  return `https://${encodeURIComponent(targetRef!)}.supabase.co/storage/v1`
+interface BucketDiffConfig {
+  apiUrl?: string
+  accessToken?: string
+}
+
+function bucketApiHeaders(accessToken?: string): Record<string, string> {
+  if (!accessToken) return {}
+  return { apikey: accessToken, Authorization: `Bearer ${accessToken}` }
+}
+
+function bucketAction(
+  config: BucketDiffConfig,
+  method: SyncAction['method'],
+  path: string,
+  label: string,
+  body?: unknown,
+): SyncAction {
+  return {
+    method,
+    url: `${config.apiUrl}/storage/v1/bucket${path}`,
+    headers: bucketApiHeaders(config.accessToken),
+    label,
+    ...(body !== undefined && { body }),
+  }
 }
 
 function diffBuckets(
   source: StorageBucket[],
   target: StorageBucket[],
-  targetRef?: string,
-  targetKey?: string,
-  targetApiUrl?: string,
+  config?: BucketDiffConfig,
 ): DriftIssue[] {
   const issues: DriftIssue[] = []
   const sourceMap = new Map(source.map(b => [b.id, b]))
   const targetMap = new Map(target.map(b => [b.id, b]))
-  const canSync = !!(targetRef || targetApiUrl) && !!targetKey
-  const baseUrl = canSync ? storageBaseUrl(targetRef, targetApiUrl) : ''
+  const useApi = !!config?.apiUrl
 
   for (const [id, b] of sourceMap) {
     if (!targetMap.has(id)) {
-      issues.push({
+      const issue: DriftIssue = {
         id: `storage-missing-${id}`,
         check: 'storage',
         severity: 'warning',
         title: `Missing bucket: ${b.name}`,
         description: `Bucket "${b.name}" exists in source but not in target.`,
         sourceValue: b,
-        action: canSync ? {
-          method: 'POST',
-          url: `${baseUrl}/bucket`,
-          headers: { Authorization: `Bearer ${targetKey}`, apikey: targetKey! },
-          body: {
-            id: b.id,
-            name: b.name,
-            public: b.public,
-            file_size_limit: b.file_size_limit,
-            allowed_mime_types: b.allowed_mime_types,
-          },
-          label: `Create bucket "${b.name}" in target`,
-        } : undefined,
-      })
+      }
+
+      if (useApi) {
+        issue.action = bucketAction(config!, 'POST', '', `Create bucket "${b.name}"`, {
+          id: b.id,
+          name: b.name,
+          public: b.public,
+          file_size_limit: b.file_size_limit,
+          allowed_mime_types: b.allowed_mime_types,
+        })
+      } else {
+        issue.sql = {
+          up: `INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types) VALUES (${sqlLiteral(b.id)}, ${sqlLiteral(b.name)}, ${sqlLiteral(b.public)}, ${sqlLiteral(b.file_size_limit)}, ${sqlLiteral(b.allowed_mime_types)});`,
+          down: `DELETE FROM storage.buckets WHERE id = ${sqlLiteral(b.id)};`,
+        }
+      }
+
+      issues.push(issue)
     }
   }
 
   for (const [id, b] of targetMap) {
     if (!sourceMap.has(id)) {
-      issues.push({
+      const issue: DriftIssue = {
         id: `storage-extra-${id}`,
         check: 'storage',
         severity: 'info',
         title: `Extra bucket: ${b.name}`,
         description: `Bucket "${b.name}" exists in target but not in source.`,
         targetValue: b,
-        action: canSync ? {
-          method: 'DELETE',
-          url: `${baseUrl}/bucket/${encodeURIComponent(b.id)}`,
-          headers: { Authorization: `Bearer ${targetKey}`, apikey: targetKey! },
-          body: {},
-          label: `Delete bucket "${b.name}" from target`,
-        } : undefined,
-      })
+      }
+
+      if (useApi) {
+        issue.action = bucketAction(config!, 'DELETE', `/${id}`, `Delete bucket "${b.name}"`)
+      } else {
+        issue.sql = {
+          up: `DELETE FROM storage.buckets WHERE id = ${sqlLiteral(b.id)};`,
+          down: `INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types) VALUES (${sqlLiteral(b.id)}, ${sqlLiteral(b.name)}, ${sqlLiteral(b.public)}, ${sqlLiteral(b.file_size_limit)}, ${sqlLiteral(b.allowed_mime_types)});`,
+        }
+      }
+
+      issues.push(issue)
     }
   }
 
@@ -158,13 +207,10 @@ function diffBuckets(
     const tb = targetMap.get(id)
     if (!tb) continue
 
-    // Collect all property diffs for a single update action
-    const diffs: string[] = []
-    const updateBody: Record<string, unknown> = {}
+    const setClauses: string[] = []
 
     if (sb.public !== tb.public) {
-      diffs.push(`visibility (${sb.public ? 'public' : 'private'} → ${tb.public ? 'public' : 'private'})`)
-      updateBody.public = sb.public
+      setClauses.push(`public = ${sqlLiteral(sb.public)}`)
       issues.push({
         id: `storage-visibility-${id}`,
         check: 'storage',
@@ -177,8 +223,7 @@ function diffBuckets(
     }
 
     if (sb.file_size_limit !== tb.file_size_limit) {
-      diffs.push(`file_size_limit`)
-      updateBody.file_size_limit = sb.file_size_limit
+      setClauses.push(`file_size_limit = ${sqlLiteral(sb.file_size_limit)}`)
       issues.push({
         id: `storage-sizelimit-${id}`,
         check: 'storage',
@@ -193,8 +238,7 @@ function diffBuckets(
     const srcMimes = (sb.allowed_mime_types ?? []).slice().sort().join(',')
     const tgtMimes = (tb.allowed_mime_types ?? []).slice().sort().join(',')
     if (srcMimes !== tgtMimes) {
-      diffs.push(`allowed_mime_types`)
-      updateBody.allowed_mime_types = sb.allowed_mime_types
+      setClauses.push(`allowed_mime_types = ${sqlLiteral(sb.allowed_mime_types)}`)
       issues.push({
         id: `storage-mimetypes-${id}`,
         check: 'storage',
@@ -206,22 +250,32 @@ function diffBuckets(
       })
     }
 
-    // Attach update action to the first property-diff issue for this bucket
-    if (diffs.length > 0 && canSync) {
-      const action = {
-        method: 'PUT' as const,
-        url: `${baseUrl}/bucket/${encodeURIComponent(id)}`,
-        headers: { Authorization: `Bearer ${targetKey}`, apikey: targetKey! },
-        body: updateBody,
-        label: `Update bucket "${sb.name}" in target (${diffs.join(', ')})`,
-      }
-      // Find the first issue for this bucket and attach action
+    // Attach sync fix to the first property-diff issue for this bucket
+    if (setClauses.length > 0) {
       const firstBucketIssue = issues.find(i =>
         i.id.startsWith(`storage-visibility-${id}`) ||
         i.id.startsWith(`storage-sizelimit-${id}`) ||
         i.id.startsWith(`storage-mimetypes-${id}`),
       )
-      if (firstBucketIssue) firstBucketIssue.action = action
+      if (firstBucketIssue) {
+        if (useApi) {
+          firstBucketIssue.action = bucketAction(config!, 'PUT', `/${id}`, `Update bucket "${sb.name}"`, {
+            public: sb.public,
+            file_size_limit: sb.file_size_limit,
+            allowed_mime_types: sb.allowed_mime_types,
+          })
+        } else {
+          const revertClauses: string[] = []
+          if (sb.public !== tb.public) revertClauses.push(`public = ${sqlLiteral(tb.public)}`)
+          if (sb.file_size_limit !== tb.file_size_limit) revertClauses.push(`file_size_limit = ${sqlLiteral(tb.file_size_limit)}`)
+          if (srcMimes !== tgtMimes) revertClauses.push(`allowed_mime_types = ${sqlLiteral(tb.allowed_mime_types)}`)
+
+          firstBucketIssue.sql = {
+            up: `UPDATE storage.buckets SET ${setClauses.join(', ')} WHERE id = ${sqlLiteral(id)};`,
+            down: `UPDATE storage.buckets SET ${revertClauses.join(', ')} WHERE id = ${sqlLiteral(id)};`,
+          }
+        }
+      }
     }
   }
 
@@ -244,15 +298,7 @@ function storagePoliciesEqual(a: StoragePolicy, b: StoragePolicy): boolean {
   )
 }
 
-function normalizeRoles(roles: string[] | string): string[] {
-  const arr = Array.isArray(roles) ? roles : [roles]
-  return arr
-    .map(r => r.replace(/^\{|\}$/g, ''))
-    .flatMap(r => r.split(','))
-    .map(r => r.trim())
-    .filter(Boolean)
-    .sort()
-}
+// normalizeRoles imported from utils/strings
 
 function generateStorageCreatePolicySql(p: StoragePolicy): string {
   const roles = normalizeRoles(p.roles).join(', ')

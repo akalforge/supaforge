@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import {
   previewSnapshotRestore,
   previewMigrationRestore,
+  getPublicTables,
 } from '../src/restore.js'
 import type { SnapshotManifest, MigrationFile } from '../src/types/config.js'
 
@@ -252,5 +253,11 @@ describe('previewMigrationRestore', () => {
     const result = await previewMigrationRestore(tempDir, '20250201T120000Z', '20250201T120000Z')
     expect(result).toHaveLength(1)
     expect(result[0].version).toBe('20250201T120000Z')
+  })
+})
+
+describe('getPublicTables', () => {
+  it('is exported and callable', () => {
+    expect(typeof getPublicTables).toBe('function')
   })
 })

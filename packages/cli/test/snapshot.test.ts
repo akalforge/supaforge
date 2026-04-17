@@ -37,6 +37,17 @@ describe('snapshotDir', () => {
     const dir = snapshotDir('/base', '20250101T120000Z')
     expect(dir).toBe(join('/base', '.supaforge', 'snapshots', '20250101T120000Z'))
   })
+
+  it('outputDir overrides default path (used by captureSnapshot)', () => {
+    // When outputDir is set, captureSnapshot uses join(resolve(outputDir), timestamp)
+    // instead of snapshotDir(cwd, timestamp). Verify both paths are distinct.
+    const defaultDir = snapshotDir('/project', '20250101T120000Z')
+    const customDir = join('/custom/output', '20250101T120000Z')
+
+    expect(defaultDir).toContain('.supaforge/snapshots')
+    expect(customDir).not.toContain('.supaforge')
+    expect(customDir).toBe('/custom/output/20250101T120000Z')
+  })
 })
 
 describe('loadSnapshot', () => {

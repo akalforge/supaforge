@@ -1,0 +1,68 @@
+{
+  // ─── Environments ──────────────────────────────────────────────────────────
+  // Define two or more Supabase environments to compare.
+  // For a single database (snapshot/backup only), define just one environment
+  // and omit "source" / "target" below.
+  // Use $VAR or ${VAR} for secrets — they expand from environment variables.
+  // Keep actual credentials in .env (never commit secrets to git).
+
+  "environments": {
+
+    "staging": {
+      // PostgreSQL connection string (required).
+      // Format: postgres://user:password@host:port/database
+      "dbUrl": "$STAGING_DATABASE_URL",
+
+      // Supabase project ref (optional).
+      // Copy your Project URL from the Supabase dashboard — either the full URL
+      // or just the ref works:
+      //   "https://abcdef123456.supabase.co"  →  extracted automatically
+      //   "abcdef123456"                       →  used as-is
+      // Needed for API-based checks: auth config, edge functions.
+      // Omit for self-hosted Supabase — use "apiUrl" instead.
+      "projectRef": "https://your-staging-ref.supabase.co",
+
+      // Supabase personal access token (optional, required if projectRef is set).
+      // Generate at: supabase.com/dashboard/account/tokens
+      // Used for Management API checks: auth config, edge functions.
+      "accessToken": "$STAGING_ACCESS_TOKEN"
+    },
+
+    "production": {
+      "dbUrl": "$PRODUCTION_DATABASE_URL",
+      "projectRef": "https://your-production-ref.supabase.co",
+      "accessToken": "$PRODUCTION_ACCESS_TOKEN"
+    }
+
+    // ─── Self-hosted example ───────────────────────────────────────────────
+    // For local development or self-hosted Supabase, use "apiUrl" instead of
+    // "projectRef" to point at your local API gateway:
+    //
+    // "local": {
+    //   "dbUrl": "$LOCAL_DATABASE_URL",
+    //   "accessToken": "$LOCAL_ACCESS_TOKEN",
+    //   "apiUrl": "http://127.0.0.1:54321"
+    // }
+  },
+
+  // ─── Source & Target (optional for single-database configs) ───────────────
+  // Which environments to compare. Source = truth, target = to be synced.
+  // Omit both for single-database setups (snapshot, clone, backup, restore).
+  "source": "staging",
+  "target": "production",
+
+  // ─── Ignore Schemas (optional) ───────────────────────────────────────────
+  // Supabase internal schemas are ignored by default (auth, storage, realtime,
+  // vault, etc.). Override here if needed.
+  // "ignoreSchemas": ["auth", "storage", "realtime", "vault"],
+
+  // ─── Checks (optional) ──────────────────────────────────────────────────
+  // Fine-tune which checks run and what they inspect.
+  "checks": {
+    // Reference-data tables to include in data drift detection.
+    // Only these tables are compared row-by-row. Leave empty to skip data checks.
+    "data": {
+      "tables": ["plans", "feature_flags"]
+    }
+  }
+}

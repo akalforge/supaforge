@@ -1,14 +1,16 @@
-import { Command, Flags } from '@oclif/core'
-import { loadConfig, validateSingleEnvConfig } from '../config'
+import { Flags } from '@oclif/core'
+import { BaseCommand } from '../base-command.js'
 import { findLatestSnapshot, listSnapshots } from '../snapshot'
 import {
   restoreFromSnapshot,
   restoreFromMigrations,
   previewSnapshotRestore,
   previewMigrationRestore,
+  getPublicTables,
 } from '../restore'
+import { warn, cmd } from '../ui.js'
 
-export default class Restore extends Command {
+export default class Restore extends BaseCommand {
   static override description = 'Restore a Supabase environment from a snapshot or migration history'
 
   static override examples = [
@@ -16,6 +18,7 @@ export default class Restore extends Command {
     '<%= config.bin %> restore --env=local --from-snapshot=latest --apply',
     '<%= config.bin %> restore --env=local --from-migrations --apply',
     '<%= config.bin %> restore --env=local --from-migrations --to=20260407T120000Z --apply',
+    '<%= config.bin %> restore --env=local --from-snapshot=latest --apply --force',
   ]
 
   static override flags = {
@@ -42,6 +45,10 @@ export default class Restore extends Command {
       description: 'Actually execute the restore (default: dry-run preview)',
       default: false,
     }),
+    force: Flags.boolean({
+      description: 'Allow restore into a non-empty database (destructive)',
+      default: false,
+    }),
     json: Flags.boolean({ description: 'Output results as JSON' }),
   }
 
@@ -52,22 +59,35 @@ export default class Restore extends Command {
       this.error('Specify --from-snapshot or --from-migrations')
     }
 
-    let config
-    try {
-      config = await loadConfig()
-    } catch {
-      this.error(
-        'Could not load supaforge.config.json. Run this command from a directory containing your config file.',
-      )
-    }
+    const config = await this.loadConfigOrFail()
 
     const envName = flags.env
-    const errors = validateSingleEnvConfig(config, envName)
-    if (errors.length > 0) {
-      this.error(`Invalid configuration:\n  ${errors.join('\n  ')}`)
+    const { env } = this.resolveEnv(config, envName)
+
+    // Preflight: verify database is reachable
+    if (!flags.json) {
+      const pre = this.createPreflight('Restore preflight checks')
+        .addDatabase('Target', envName, env.dbUrl)
+      await this.runPreflight(pre, 'Restore')
     }
 
-    const env = config.environments[envName]
+    // Safety: check if target DB has existing tables before destructive restore
+    if (flags.apply) {
+      const tables = await getPublicTables(env.dbUrl)
+      if (tables.length > 0 && !flags.force) {
+        this.log(`\n${warn('Target database is not empty.')} Found ${tables.length} table(s) in public schema:`)
+        for (const t of tables.slice(0, 10)) {
+          this.log(`  • ${t}`)
+        }
+        if (tables.length > 10) {
+          this.log(`  ... and ${tables.length - 10} more`)
+        }
+        this.log(`\n  Restore replays SQL into the target and may conflict with existing data.`)
+        this.log(`  → Use ${cmd('supaforge sync')} to apply only the differences instead.`)
+        this.log(`  → Add ${cmd('--force')} to proceed anyway.\n`)
+        return
+      }
+    }
 
     if (flags['from-snapshot']) {
       await this.handleSnapshotRestore(flags, env.dbUrl)
@@ -86,7 +106,7 @@ export default class Restore extends Command {
     if (snapshotRef === 'latest') {
       const latest = await findLatestSnapshot()
       if (!latest) {
-        this.error('No snapshots found. Run "supaforge snapshot --apply" first.')
+        this.error('No snapshots found. Create one with "supaforge snapshot" first.')
       }
       snapshotDir = latest
     } else {
@@ -100,7 +120,7 @@ export default class Restore extends Command {
     }
 
     if (!flags.apply) {
-      this.log('\n🔄 Restore preview (dry-run) — from snapshot\n')
+      this.log('\nRestore preview (dry-run) -- from snapshot\n')
       const preview = await previewSnapshotRestore(snapshotDir)
       if (preview.length === 0) {
         this.log('  No executable SQL found in snapshot.')
@@ -122,7 +142,7 @@ export default class Restore extends Command {
       return
     }
 
-    this.log(`\n🔄 Restoring from snapshot...\n`)
+    this.log(`\nRestoring from snapshot...\n`)
 
     const result = await restoreFromSnapshot({
       targetUrl,
@@ -140,7 +160,7 @@ export default class Restore extends Command {
     const fromVersion = flags.from as string | undefined
 
     if (!flags.apply) {
-      this.log('\n🔄 Restore preview (dry-run) — from migrations\n')
+      this.log('\nRestore preview (dry-run) -- from migrations\n')
       const migrations = await previewMigrationRestore(process.cwd(), toVersion, fromVersion)
       if (migrations.length === 0) {
         this.log('  No migrations found.')
@@ -158,7 +178,7 @@ export default class Restore extends Command {
       return
     }
 
-    this.log(`\n🔄 Restoring from migrations...\n`)
+    this.log(`\nRestoring from migrations...\n`)
 
     const result = await restoreFromMigrations({
       targetUrl,

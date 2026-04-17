@@ -4,6 +4,7 @@ import type { SupaForgeConfig } from './types/config'
 import type { CheckName, CheckResult, ScanResult } from './types/drift'
 import { CHECK_NAMES } from './types/drift'
 import { computeScore, summarize } from './scoring'
+import { friendlyDbError } from './utils/error'
 
 export interface ScanOptions {
   config: SupaForgeConfig
@@ -18,8 +19,8 @@ export async function scan(
   const { config } = options
   const checksToScan = options.checks ?? [...CHECK_NAMES]
 
-  const source = config.environments[config.source]
-  const target = config.environments[config.target]
+  const source = config.environments[config.source!]
+  const target = config.environments[config.target!]
   const ctx = { source, target, config }
 
   await bus?.emit('supaforge.scan.before', ctx)
@@ -47,7 +48,7 @@ export async function scan(
         check: name,
         status: 'error',
         issues: [],
-        error: err instanceof Error ? err.message : String(err),
+        error: friendlyDbError(err, source.dbUrl),
         durationMs,
       })
     }
@@ -60,8 +61,8 @@ export async function scan(
 
   const scanResult: ScanResult = {
     timestamp: new Date().toISOString(),
-    source: config.source,
-    target: config.target,
+    source: config.source!,
+    target: config.target!,
     checks: results,
     score,
     summary,

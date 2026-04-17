@@ -15,9 +15,11 @@ GRANT ALL ON SCHEMA public TO PUBLIC;
 DROP SCHEMA IF EXISTS cron CASCADE;
 DROP SCHEMA IF EXISTS supabase_functions CASCADE;
 DROP SCHEMA IF EXISTS storage CASCADE;
+DROP SCHEMA IF EXISTS vault CASCADE;
 
 -- === Extensions ===
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp" SCHEMA public;
+CREATE EXTENSION IF NOT EXISTS "pg_trgm" SCHEMA public;
 
 -- === Enum types (source has enums that target lacks) ===
 CREATE TYPE public.mood AS ENUM ('happy', 'sad', 'neutral');
@@ -158,11 +160,13 @@ CREATE TABLE storage.objects (
 );
 
 CREATE TABLE storage.buckets (
-    id          TEXT PRIMARY KEY,
-    name        TEXT NOT NULL,
-    public      BOOLEAN DEFAULT false,
-    created_at  TIMESTAMPTZ DEFAULT now(),
-    updated_at  TIMESTAMPTZ DEFAULT now()
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    public              BOOLEAN DEFAULT false,
+    file_size_limit     BIGINT,
+    allowed_mime_types  TEXT[],
+    created_at          TIMESTAMPTZ DEFAULT now(),
+    updated_at          TIMESTAMPTZ DEFAULT now()
 );
 
 ALTER TABLE storage.objects ENABLE ROW LEVEL SECURITY;
@@ -182,5 +186,27 @@ INSERT INTO public.plans (name, price, active) VALUES
     ('Free', 0, true),
     ('Pro', 2900, true),
     ('Enterprise', 9900, true);
+
+-- === Realtime Publications ===
+DROP PUBLICATION IF EXISTS supaforge_live;
+CREATE PUBLICATION supaforge_live FOR TABLE public.users, public.posts;
+
+-- === Vault Secrets ===
+CREATE SCHEMA IF NOT EXISTS vault;
+CREATE TABLE IF NOT EXISTS vault.secrets (
+    id          UUID DEFAULT uuid_generate_v4() PRIMARY KEY,
+    name        TEXT,
+    description TEXT,
+    secret      TEXT NOT NULL,
+    unique_name TEXT,
+    nonce       TEXT,
+    key_id      UUID,
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now()
+);
+
+INSERT INTO vault.secrets (name, description, secret, unique_name) VALUES
+    ('smtp_password', 'SMTP credentials', 'encrypted_smtp_src', 'smtp_password'),
+    ('api_key', 'Main API key', 'encrypted_api_key_src', 'api_key');
 
 COMMIT;

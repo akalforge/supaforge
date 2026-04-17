@@ -4,9 +4,6 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { BaseCommand } from '../src/base-command.js'
-import { writeFile, unlink, mkdir } from 'node:fs/promises'
-import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import type { SupaForgeConfig } from '../src/types/config.js'
 
 /* ── Concrete test subclass (BaseCommand is abstract) ─────────────── */

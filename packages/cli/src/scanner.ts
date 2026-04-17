@@ -4,7 +4,7 @@ import type { SupaForgeConfig } from './types/config'
 import type { CheckName, CheckResult, ScanResult } from './types/drift'
 import { CHECK_NAMES } from './types/drift'
 import { computeScore, summarize } from './scoring'
-import { errMsg, friendlyDbError } from './utils/error'
+import { friendlyDbError } from './utils/error'
 
 export interface ScanOptions {
   config: SupaForgeConfig

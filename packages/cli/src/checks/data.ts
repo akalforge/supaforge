@@ -31,7 +31,7 @@ export class DataCheck extends Check {
     if (!tables?.length) return []
 
     // Fast fingerprint check — skip tables that haven't changed
-    const { changed, skipped } = await filterChangedTables(
+    const { changed } = await filterChangedTables(
       ctx.source.dbUrl,
       ctx.target.dbUrl,
       tables,

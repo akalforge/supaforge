@@ -3,7 +3,7 @@ import { join } from 'node:path'
 import type { QueryFn } from './db.js'
 import { pgQuery } from './db.js'
 import type { LocalMigration } from './checks/migrations.js'
-import { readLocalMigrations, DEFAULT_MIGRATIONS_DIR } from './checks/migrations.js'
+import { readLocalMigrations } from './checks/migrations.js'
 import type { ReadDirFn } from './checks/migrations.js'
 import { MIGRATIONS_SCHEMA, MIGRATIONS_TABLE } from './constants.js'
 

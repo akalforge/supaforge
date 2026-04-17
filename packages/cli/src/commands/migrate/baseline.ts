@@ -1,7 +1,7 @@
 import { Flags } from '@oclif/core'
 import { BaseCommand } from '../../base-command.js'
 import { baselineMigrations } from '../../migrate.js'
-import { ok, warn, dim, bold } from '../../ui.js'
+import { ok, dim, bold } from '../../ui.js'
 
 /**
  * Mark all local migration files as applied without executing them.

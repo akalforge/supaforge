@@ -119,7 +119,7 @@ export default class Clone extends BaseCommand {
 
     // ── Delete clone ─────────────────────────────────────────────────────────
     if (flags.delete) {
-      const { envName, env } = this.resolveEnv(config, flags.env)
+      const { env } = this.resolveEnv(config, flags.env)
 
       const branches = await listBranches()
       const branch = branches.find(b => b.name === flags.delete)
@@ -152,14 +152,12 @@ export default class Clone extends BaseCommand {
     const { envName, env } = this.resolveEnv(config, flags.env)
     const localDbName = flags['local-db']
     let localBaseUrl = flags['local-url']
-    let startedContainer = false
 
     // Auto-start a local PostgreSQL container if requested
     if (flags['start-local']) {
       this.log(`\n  ${bold('Starting local PostgreSQL container...')}\n`)
       const info = await startLocalPg()
       localBaseUrl = info.url
-      startedContainer = true
       this.log(`    ${ok('✓')} PostgreSQL running via ${bold(info.runtime)} on port ${info.port}\n`)
     }
 

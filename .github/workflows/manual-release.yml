@@ -92,7 +92,7 @@ jobs:
           if [ "$OVERWRITE" = "true" ]; then
             EXTRA_FLAGS="--force-tag"
           fi
-          node scripts/release.js "${{ steps.version.outputs.arg }}" $EXTRA_FLAGS
+          node scripts/release.js "${{ steps.version.outputs.arg }}" --apply $EXTRA_FLAGS
 
       - name: Write job summary
         run: |

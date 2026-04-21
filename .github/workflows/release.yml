@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_call:
+    inputs:
+      tag_name:
+        description: 'Tag name to release (e.g. v1.2.3). Defaults to the pushed tag when triggered directly.'
+        required: false
+        type: string
 
 jobs:
   build-and-test:
@@ -13,6 +18,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -46,11 +53,13 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
 
       - name: Detect prerelease
         id: prerelease
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ inputs.tag_name || github.ref_name }}"
           if [[ "$TAG" == *"-rc."* ]] || [[ "$TAG" == *"-beta."* ]] || [[ "$TAG" == *"-alpha."* ]]; then
             echo "is_prerelease=true" >> "$GITHUB_OUTPUT"
           else
@@ -62,8 +71,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tag_name: ${{ github.ref_name }}
-          name: Release ${{ github.ref_name }}
+          tag_name: ${{ inputs.tag_name || github.ref_name }}
+          name: Release ${{ inputs.tag_name || github.ref_name }}
           draft: false
           prerelease: ${{ steps.prerelease.outputs.is_prerelease }}
           generate_release_notes: true
@@ -78,6 +87,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -98,7 +109,7 @@ jobs:
       - name: Determine npm dist-tag
         id: dist-tag
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ inputs.tag_name || github.ref_name }}"
           if [[ "$TAG" == *"-rc."* ]] || [[ "$TAG" == *"-beta."* ]] || [[ "$TAG" == *"-alpha."* ]]; then
             echo "tag=next" >> "$GITHUB_OUTPUT"
           else
@@ -121,6 +132,8 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag_name || github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -141,7 +154,7 @@ jobs:
       - name: Determine npm dist-tag
         id: dist-tag
         run: |
-          TAG="${GITHUB_REF_NAME}"
+          TAG="${{ inputs.tag_name || github.ref_name }}"
           if [[ "$TAG" == *"-rc."* ]] || [[ "$TAG" == *"-beta."* ]] || [[ "$TAG" == *"-alpha."* ]]; then
             echo "tag=next" >> "$GITHUB_OUTPUT"
           else

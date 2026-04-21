@@ -35,11 +35,14 @@ on:
 permissions:
   contents: write
   id-token: write
+  packages: write
 
 jobs:
   release:
     name: Bump version & push tag
     runs-on: ubuntu-latest
+    outputs:
+      tag_name: ${{ steps.tag.outputs.tag_name }}
 
     steps:
       - name: Validate inputs
@@ -94,9 +97,26 @@ jobs:
           fi
           node scripts/release.js "${{ steps.version.outputs.arg }}" --apply $EXTRA_FLAGS
 
-      - name: Write job summary
+      - name: Resolve tag name
+        id: tag
         run: |
           VERSION=$(node -p "require('./packages/cli/package.json').version")
-          echo "## Release v${VERSION} 🚀" >> "$GITHUB_STEP_SUMMARY"
+          echo "tag_name=v${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Write job summary
+        run: |
+          echo "## Release ${{ steps.tag.outputs.tag_name }} 🚀" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Tag \`v${VERSION}\` pushed — the [Release workflow](.github/workflows/release.yml) will handle npm publish and GitHub Release creation." >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag \`${{ steps.tag.outputs.tag_name }}\` pushed — the Release workflow will now run automatically." >> "$GITHUB_STEP_SUMMARY"
+
+  trigger-release:
+    name: Trigger Release pipeline
+    needs: [release]
+    uses: ./.github/workflows/release.yml
+    with:
+      tag_name: ${{ needs.release.outputs.tag_name }}
+    permissions:
+      contents: write
+      id-token: write
+      packages: write
+    secrets: inherit

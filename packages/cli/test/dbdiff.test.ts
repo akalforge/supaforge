@@ -124,6 +124,68 @@ describe('sqlToIssues', () => {
 
     expect(issues[0].title).toContain('Extra row')
   })
+
+  it('keeps a dollar-quoted function body as a single statement', () => {
+    const up = [
+      'CREATE OR REPLACE FUNCTION public.handle_new_user()',
+      'RETURNS trigger',
+      'LANGUAGE plpgsql',
+      'AS $$',
+      'BEGIN',
+      "  INSERT INTO public.profiles (id, full_name) VALUES (NEW.id, NEW.raw_user_meta_data->>'full_name');",
+      '  RETURN NEW;',
+      'END;',
+      '$$;',
+    ].join('\n')
+
+    const issues = sqlToIssues({ up, down: 'DROP FUNCTION public.handle_new_user();' }, 'schema')
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].sql?.up).toContain('$$')
+    expect(issues[0].sql?.up).toContain('INSERT INTO public.profiles')
+    expect(issues[0].sql?.up).toContain('END;')
+    expect(issues[0].sql?.up).toContain('RETURN NEW;')
+  })
+
+  it('splits correctly at boundaries outside dollar-quoted blocks', () => {
+    const up = [
+      'CREATE OR REPLACE FUNCTION public.foo()',
+      'RETURNS void',
+      'LANGUAGE plpgsql',
+      'AS $$',
+      'BEGIN',
+      '  INSERT INTO t VALUES (1);',
+      'END;',
+      '$$;',
+      'ALTER TABLE t ADD COLUMN bio text;',
+    ].join('\n')
+
+    const issues = sqlToIssues({ up, down: '' }, 'schema')
+
+    expect(issues).toHaveLength(2)
+    expect(issues[0].sql?.up).toContain('CREATE OR REPLACE FUNCTION')
+    expect(issues[0].sql?.up).toContain('$$')
+    expect(issues[1].sql?.up).toContain('ADD COLUMN bio')
+  })
+
+  it('handles named dollar-quote tags like $body$', () => {
+    const up = [
+      'CREATE OR REPLACE FUNCTION public.bar()',
+      'RETURNS void',
+      'LANGUAGE plpgsql',
+      'AS $body$',
+      'BEGIN',
+      '  DELETE FROM t WHERE id = 1;',
+      'END;',
+      '$body$;',
+    ].join('\n')
+
+    const issues = sqlToIssues({ up, down: '' }, 'schema')
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].sql?.up).toContain('$body$')
+    expect(issues[0].sql?.up).toContain('DELETE FROM t')
+  })
 })
 
 describe('classifyStatement', () => {

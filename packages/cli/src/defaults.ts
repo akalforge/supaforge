@@ -18,8 +18,7 @@ export const DEFAULT_IGNORE_SCHEMAS = [
 /** Hint text shown during `supaforge init` to guide users through the Supabase UI. */
 export const INIT_HINTS = {
   DB_URL: [
-    '  In Supabase: Dashboard overview \u2192 click Copy \u2192 Direct connection string.',
-    '  Or: click \"Connect\" (top bar) \u2192 Direct connection \u2192 copy the URI.',
+    '  In Supabase: click "Connect" (top bar) -> Direct -> Session pooler -> URI -> copy the Connection string.',
     '  Format: postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:5432/postgres\n',
   ],
   PROJECT_URL: [

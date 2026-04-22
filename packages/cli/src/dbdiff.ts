@@ -275,11 +275,56 @@ function hasBrokenRef(sql: string): boolean {
 
 function splitStatements(sql: string): string[] {
   if (!sql) return []
-  return sql
-    .split(/;\s*\n/)
-    .map(s => s.trim())
-    .filter(s => s.length > 0 && !s.startsWith('--'))
-    .map(s => (s.endsWith(';') ? s : `${s};`))
+
+  const statements: string[] = []
+  let buf = ''
+  let i = 0
+
+  while (i < sql.length) {
+    // Dollar-quoted string: $tag$...$tag$ consumed as a single token so that
+    // semicolons inside function/trigger/procedure bodies are not treated as
+    // statement boundaries. The tag is /\$([A-Za-z0-9_]*)\$/ e.g. $$ or $body$.
+    if (sql[i] === '$') {
+      const tagMatch = sql.slice(i + 1).match(/^([A-Za-z0-9_]*)\$/)
+      if (tagMatch) {
+        const tag = `$${tagMatch[1]}$`
+        const closeIdx = sql.indexOf(tag, i + tag.length)
+        if (closeIdx !== -1) {
+          buf += sql.slice(i, closeIdx + tag.length)
+          i = closeIdx + tag.length
+          continue
+        }
+      }
+    }
+
+    // Statement boundary: ';' optionally followed by spaces/tabs/CR then '\n'
+    if (sql[i] === ';') {
+      buf += ';'
+      i++
+      let j = i
+      while (j < sql.length && (sql[j] === ' ' || sql[j] === '\t' || sql[j] === '\r')) j++
+      if (j >= sql.length || sql[j] === '\n') {
+        const stmt = buf.trim()
+        if (stmt.length > 0 && !stmt.startsWith('--')) {
+          statements.push(stmt)
+        }
+        buf = ''
+        i = j < sql.length ? j + 1 : j
+      }
+      continue
+    }
+
+    buf += sql[i]
+    i++
+  }
+
+  // Flush any trailing content without a statement-ending newline
+  const last = buf.trim()
+  if (last.length > 0 && !last.startsWith('--')) {
+    statements.push(last.endsWith(';') ? last : `${last};`)
+  }
+
+  return statements
 }
 
 export function classifyStatement(sql: string): string {

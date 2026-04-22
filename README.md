@@ -155,12 +155,12 @@ Create `supaforge.config.json` in your project root:
 {
   "environments": {
     "dev": {
-      "dbUrl": "postgres://...",
+      "dbUrl": "postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:5432/postgres",
       "projectRef": "abc123",
       "accessToken": "your-service-role-key"
     },
     "prod": {
-      "dbUrl": "postgres://...",
+      "dbUrl": "postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:5432/postgres",
       "projectRef": "xyz789",
       "accessToken": "your-service-role-key"
     }

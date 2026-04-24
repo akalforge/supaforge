@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import { SchemaCheck } from '../../src/checks/schema.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { RunDbDiffFn } from '../../src/checks/schema.js'
+import type { QueryFn } from '../../src/db.js'
 
 function mockContext(): CheckContext {
   return {
@@ -16,6 +17,9 @@ function mockContext(): CheckContext {
   }
 }
 
+/** A queryFn that returns no tables (simulates empty ignored schemas). */
+const noTablesQuery: QueryFn = async () => []
+
 describe('SchemaCheck', () => {
   it('has name "schema"', () => {
     const check = new SchemaCheck(async () => ({ up: '', down: '' }))
@@ -24,7 +28,7 @@ describe('SchemaCheck', () => {
 
   it('returns empty issues when no diff found', async () => {
     const runFn: RunDbDiffFn = async () => ({ up: '', down: '' })
-    const check = new SchemaCheck(runFn)
+    const check = new SchemaCheck(runFn, noTablesQuery)
     const issues = await check.scan(mockContext())
     expect(issues).toEqual([])
   })
@@ -34,7 +38,7 @@ describe('SchemaCheck', () => {
       up: 'ALTER TABLE "users" ADD COLUMN "bio" text;',
       down: 'ALTER TABLE "users" DROP COLUMN "bio";',
     })
-    const check = new SchemaCheck(runFn)
+    const check = new SchemaCheck(runFn, noTablesQuery)
     const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
@@ -49,7 +53,7 @@ describe('SchemaCheck', () => {
       up: 'DROP TABLE "legacy_data";',
       down: 'CREATE TABLE "legacy_data" (id int);',
     })
-    const check = new SchemaCheck(runFn)
+    const check = new SchemaCheck(runFn, noTablesQuery)
     const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
@@ -62,7 +66,7 @@ describe('SchemaCheck', () => {
       capturedOptions = opts
       return { up: '', down: '' }
     }
-    const check = new SchemaCheck(runFn)
+    const check = new SchemaCheck(runFn, noTablesQuery)
     await check.scan(mockContext())
 
     expect(capturedOptions).toMatchObject({
@@ -77,7 +81,7 @@ describe('SchemaCheck', () => {
     const runFn: RunDbDiffFn = async () => {
       throw new Error('@dbdiff/cli is not installed. Install it with: npm install -g @dbdiff/cli')
     }
-    const check = new SchemaCheck(runFn)
+    const check = new SchemaCheck(runFn, noTablesQuery)
     const issues = await check.scan(mockContext())
     expect(issues).toEqual([])
   })
@@ -86,7 +90,7 @@ describe('SchemaCheck', () => {
     const runFn: RunDbDiffFn = async () => {
       throw new Error('Connection refused')
     }
-    const check = new SchemaCheck(runFn)
+    const check = new SchemaCheck(runFn, noTablesQuery)
     await expect(check.scan(mockContext())).rejects.toThrow('Connection refused')
   })
 
@@ -96,7 +100,7 @@ describe('SchemaCheck', () => {
       capturedOptions = opts
       return { up: '', down: '' }
     }
-    const check = new SchemaCheck(runFn)
+    const check = new SchemaCheck(runFn, noTablesQuery)
     const ctx = mockContext()
     delete ctx.config.ignoreSchemas
     await check.scan(ctx)
@@ -113,11 +117,90 @@ describe('SchemaCheck', () => {
       up: 'ALTER TABLE "users" ADD COLUMN "bio" text;\nCREATE INDEX idx_bio ON users(bio);',
       down: 'ALTER TABLE "users" DROP COLUMN "bio";\nDROP INDEX idx_bio;',
     })
-    const check = new SchemaCheck(runFn)
+    const check = new SchemaCheck(runFn, noTablesQuery)
     const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(2)
     expect(issues[0].title).toContain('users')
     expect(issues[1].title).toContain('Index')
+  })
+
+  // ── Unqualified FK filtering via ignoredSchemaTables ─────────────────────
+
+  it('filters unqualified FK when queryFn reports the referenced table is in an ignored schema', async () => {
+    // This is the real-world case: auth was excluded from pg_dump, so local has no
+    // projects_user_id_fkey. dbdiff outputs REFERENCES "users" (no schema prefix).
+    // The queryFn simulates the target DB returning auth.users when queried.
+    const runFn: RunDbDiffFn = async () => ({
+      up: 'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE CASCADE;',
+      down: 'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+    })
+    const queryFn: QueryFn = async (_dbUrl, sql) => {
+      if (sql.includes('pg_tables')) return [{ tablename: 'users' }, { tablename: 'refresh_tokens' }]
+      return []
+    }
+    const check = new SchemaCheck(runFn, queryFn)
+    const issues = await check.scan(mockContext())
+
+    expect(issues).toHaveLength(0)
+  })
+
+  it('keeps unqualified FK when the referenced table does not live in an ignored schema', async () => {
+    const runFn: RunDbDiffFn = async () => ({
+      up: 'ALTER TABLE "comments" ADD CONSTRAINT "comments_post_id_fkey" FOREIGN KEY ("post_id") REFERENCES "posts" ("id");',
+      down: 'ALTER TABLE "comments" DROP CONSTRAINT "comments_post_id_fkey";',
+    })
+    // queryFn returns auth tables — "posts" is not among them
+    const queryFn: QueryFn = async (_dbUrl, sql) => {
+      if (sql.includes('pg_tables')) return [{ tablename: 'users' }]
+      return []
+    }
+    const check = new SchemaCheck(runFn, queryFn)
+    const issues = await check.scan(mockContext())
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].sql?.up).toContain('ADD CONSTRAINT')
+  })
+
+  it('queries the TARGET database for ignored-schema tables (not source)', async () => {
+    const queriedUrls: string[] = []
+    const runFn: RunDbDiffFn = async () => ({ up: '', down: '' })
+    const queryFn: QueryFn = async (dbUrl, sql) => {
+      if (sql.includes('pg_tables')) queriedUrls.push(dbUrl)
+      return []
+    }
+    const check = new SchemaCheck(runFn, queryFn)
+    await check.scan(mockContext())
+
+    expect(queriedUrls).toHaveLength(1)
+    expect(queriedUrls[0]).toBe('postgres://target')
+  })
+
+  it('passes ignoreSchemas as parameters to the pg_tables query', async () => {
+    const calls: { sql: string; params?: unknown[] }[] = []
+    const runFn: RunDbDiffFn = async () => ({ up: '', down: '' })
+    const queryFn: QueryFn = async (_dbUrl, sql, params) => {
+      calls.push({ sql, params })
+      return []
+    }
+    const check = new SchemaCheck(runFn, queryFn)
+    await check.scan(mockContext())
+
+    const tablesCall = calls.find(c => c.sql.includes('pg_tables'))
+    expect(tablesCall).toBeDefined()
+    expect(tablesCall!.params).toEqual(['auth', 'storage'])
+  })
+
+  it('continues gracefully when queryFn throws (non-fatal)', async () => {
+    const runFn: RunDbDiffFn = async () => ({
+      up: 'ALTER TABLE "users" ADD COLUMN "bio" text;',
+      down: 'ALTER TABLE "users" DROP COLUMN "bio";',
+    })
+    const queryFn: QueryFn = async () => { throw new Error('DB not reachable') }
+    const check = new SchemaCheck(runFn, queryFn)
+    const issues = await check.scan(mockContext())
+
+    // The main diff result is still returned despite queryFn failure
+    expect(issues).toHaveLength(1)
   })
 })

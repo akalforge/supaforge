@@ -10,7 +10,8 @@
 
     "staging": {
       // PostgreSQL connection string (required).
-      // Format: postgres://user:password@host:port/database
+      // Get it from Supabase: Connect (top bar) -> Direct -> Session pooler -> URI -> Connection string.
+      // Format: postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:5432/postgres
       "dbUrl": "$STAGING_DATABASE_URL",
 
       // Supabase project ref (optional).

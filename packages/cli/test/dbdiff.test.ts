@@ -124,6 +124,68 @@ describe('sqlToIssues', () => {
 
     expect(issues[0].title).toContain('Extra row')
   })
+
+  it('keeps a dollar-quoted function body as a single statement', () => {
+    const up = [
+      'CREATE OR REPLACE FUNCTION public.handle_new_user()',
+      'RETURNS trigger',
+      'LANGUAGE plpgsql',
+      'AS $$',
+      'BEGIN',
+      "  INSERT INTO public.profiles (id, full_name) VALUES (NEW.id, NEW.raw_user_meta_data->>'full_name');",
+      '  RETURN NEW;',
+      'END;',
+      '$$;',
+    ].join('\n')
+
+    const issues = sqlToIssues({ up, down: 'DROP FUNCTION public.handle_new_user();' }, 'schema')
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].sql?.up).toContain('$$')
+    expect(issues[0].sql?.up).toContain('INSERT INTO public.profiles')
+    expect(issues[0].sql?.up).toContain('END;')
+    expect(issues[0].sql?.up).toContain('RETURN NEW;')
+  })
+
+  it('splits correctly at boundaries outside dollar-quoted blocks', () => {
+    const up = [
+      'CREATE OR REPLACE FUNCTION public.foo()',
+      'RETURNS void',
+      'LANGUAGE plpgsql',
+      'AS $$',
+      'BEGIN',
+      '  INSERT INTO t VALUES (1);',
+      'END;',
+      '$$;',
+      'ALTER TABLE t ADD COLUMN bio text;',
+    ].join('\n')
+
+    const issues = sqlToIssues({ up, down: '' }, 'schema')
+
+    expect(issues).toHaveLength(2)
+    expect(issues[0].sql?.up).toContain('CREATE OR REPLACE FUNCTION')
+    expect(issues[0].sql?.up).toContain('$$')
+    expect(issues[1].sql?.up).toContain('ADD COLUMN bio')
+  })
+
+  it('handles named dollar-quote tags like $body$', () => {
+    const up = [
+      'CREATE OR REPLACE FUNCTION public.bar()',
+      'RETURNS void',
+      'LANGUAGE plpgsql',
+      'AS $body$',
+      'BEGIN',
+      '  DELETE FROM t WHERE id = 1;',
+      'END;',
+      '$body$;',
+    ].join('\n')
+
+    const issues = sqlToIssues({ up, down: '' }, 'schema')
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].sql?.up).toContain('$body$')
+    expect(issues[0].sql?.up).toContain('DELETE FROM t')
+  })
 })
 
 describe('classifyStatement', () => {
@@ -353,5 +415,54 @@ describe('sqlToIssues — cross-schema FK filtering', () => {
     expect(issues).toHaveLength(1)
     expect(issues[0].title).toContain('users')
     expect(issues[0].sql?.up).toContain('ADD COLUMN')
+  })
+
+  // ── ignoredSchemaTables (unqualified REFERENCES) ─────────────────────────
+
+  it('filters unqualified FK when referenced table is in ignoredSchemaTables', () => {
+    // Real-world case: dbdiff outputs REFERENCES "users" (no schema prefix) because
+    // Supabase sets search_path. The auth schema was excluded from the local clone
+    // so local has no FK, prod has the FK referencing auth.users.
+    const issues = sqlToIssues({
+      up: 'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE CASCADE;',
+      down: 'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+    }, 'schema', ['auth'], new Set(['users', 'refresh_tokens']))
+    expect(issues).toHaveLength(0)
+  })
+
+  it('keeps unqualified FK when referenced table is NOT in ignoredSchemaTables', () => {
+    const issues = sqlToIssues({
+      up: 'ALTER TABLE "comments" ADD CONSTRAINT "comments_post_id_fkey" FOREIGN KEY ("post_id") REFERENCES "posts" ("id");',
+      down: 'ALTER TABLE "comments" DROP CONSTRAINT "comments_post_id_fkey";',
+    }, 'schema', ['auth'], new Set(['users', 'refresh_tokens']))
+    expect(issues).toHaveLength(1)
+    expect(issues[0].title).toContain('comments')
+  })
+
+  it('filters unqualified FK and keeps unrelated statements in mixed output', () => {
+    // Mirrors the exact output seen in the field: lone ADD CONSTRAINT (no preceding DROP)
+    // with unqualified REFERENCES, paired with a legitimate schema change
+    const issues = sqlToIssues({
+      up: [
+        'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE CASCADE;',
+        'ALTER TABLE "projects" ADD COLUMN "description" text;',
+      ].join('\n'),
+      down: [
+        'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+        'ALTER TABLE "projects" DROP COLUMN "description";',
+      ].join('\n'),
+    }, 'schema', ['auth'], new Set(['users']))
+    expect(issues).toHaveLength(1)
+    expect(issues[0].sql?.up).toContain('ADD COLUMN')
+  })
+
+  it('falls back gracefully when ignoredSchemaTables is omitted (no regression)', () => {
+    // Without ignoredSchemaTables the unqualified ref is NOT filtered — existing behaviour
+    const issues = sqlToIssues({
+      up: 'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users" ("id") ON UPDATE NO ACTION ON DELETE CASCADE;',
+      down: 'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+    }, 'schema', ['auth'])
+    // Still shows as an issue — caller must provide ignoredSchemaTables to suppress it
+    expect(issues).toHaveLength(1)
   })
 })

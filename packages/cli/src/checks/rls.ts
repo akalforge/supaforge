@@ -15,6 +15,12 @@ interface RlsPolicy {
   with_check: string | null
 }
 
+interface RlsTableStatus {
+  schemaname: string
+  tablename: string
+  rls_enabled: boolean
+}
+
 export class RlsCheck extends Check {
   readonly name = 'rls' as const
 
@@ -24,11 +30,17 @@ export class RlsCheck extends Check {
 
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     const ignoreSchemas = ctx.config.ignoreSchemas ?? []
-    const [source, target] = await Promise.all([
+    const [sourcePolicies, targetPolicies, sourceStatus, targetStatus] = await Promise.all([
       this.fetchPolicies(ctx.source.dbUrl, ignoreSchemas),
       this.fetchPolicies(ctx.target.dbUrl, ignoreSchemas),
+      this.fetchTableRlsStatus(ctx.source.dbUrl, ignoreSchemas),
+      this.fetchTableRlsStatus(ctx.target.dbUrl, ignoreSchemas),
     ])
-    return diffPolicies(source, target)
+    // RLS status issues come first so ENABLE runs before CREATE POLICY when applying
+    return [
+      ...diffRlsStatus(sourceStatus, targetStatus),
+      ...diffPolicies(sourcePolicies, targetPolicies),
+    ]
   }
 
   private async fetchPolicies(dbUrl: string, ignoreSchemas: string[]): Promise<RlsPolicy[]> {
@@ -44,12 +56,36 @@ export class RlsCheck extends Check {
     `
     return await this.queryFn(dbUrl, sql, ignoreSchemas) as unknown as RlsPolicy[]
   }
+
+  private async fetchTableRlsStatus(dbUrl: string, ignoreSchemas: string[]): Promise<RlsTableStatus[]> {
+    if (ignoreSchemas.length === 0) {
+      return await this.queryFn(dbUrl, RLS_STATUS_SQL_NO_FILTER) as unknown as RlsTableStatus[]
+    }
+    const placeholders = ignoreSchemas.map((_, i) => `$${i + 1}`).join(', ')
+    const sql = `
+      SELECT n.nspname AS schemaname, c.relname AS tablename, c.relrowsecurity AS rls_enabled
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE c.relkind = 'r'
+      AND n.nspname NOT IN (${placeholders})
+      ORDER BY n.nspname, c.relname
+    `
+    return await this.queryFn(dbUrl, sql, ignoreSchemas) as unknown as RlsTableStatus[]
+  }
 }
 
 const POLICY_SQL_NO_FILTER = `
   SELECT schemaname, tablename, policyname, permissive, roles, cmd, qual, with_check
   FROM pg_policies
   ORDER BY schemaname, tablename, policyname
+`
+
+const RLS_STATUS_SQL_NO_FILTER = `
+  SELECT n.nspname AS schemaname, c.relname AS tablename, c.relrowsecurity AS rls_enabled
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind = 'r'
+  ORDER BY n.nspname, c.relname
 `
 
 function policyKey(p: RlsPolicy): string {
@@ -143,6 +179,59 @@ export function diffPolicies(source: RlsPolicy[], target: RlsPolicy[]): DriftIss
         sql: {
           up: [generateDropPolicySql(sp), generateCreatePolicySql(sp)].join('\n'),
           down: [generateDropPolicySql(tp), generateCreatePolicySql(tp)].join('\n'),
+        },
+      })
+    }
+  }
+
+  return issues
+}
+
+/**
+ * Compare RLS enabled/disabled status for tables that exist in both environments.
+ *
+ * Generates a critical issue when source has RLS enabled but target does not —
+ * any policies on that table are silently inactive until RLS is turned on.
+ */
+export function diffRlsStatus(
+  source: { schemaname: string; tablename: string; rls_enabled: boolean }[],
+  target: { schemaname: string; tablename: string; rls_enabled: boolean }[],
+): DriftIssue[] {
+  const issues: DriftIssue[] = []
+  const targetMap = new Map(target.map(t => [`${t.schemaname}.${t.tablename}`, t]))
+
+  for (const src of source) {
+    const key = `${src.schemaname}.${src.tablename}`
+    const tgt = targetMap.get(key)
+    // Table absent from target — schema drift handles creation, skip here
+    if (!tgt) continue
+
+    if (src.rls_enabled && !tgt.rls_enabled) {
+      issues.push({
+        id: `rls-disabled-${key}`,
+        check: 'rls',
+        severity: 'critical',
+        title: `RLS not enabled: ${src.schemaname}.${src.tablename}`,
+        description: `Row Level Security is enabled on "${src.schemaname}"."${src.tablename}" in source but disabled in target. Any policies on this table have no effect until RLS is enabled.`,
+        sourceValue: src,
+        targetValue: tgt,
+        sql: {
+          up: `ALTER TABLE "${src.schemaname}"."${src.tablename}" ENABLE ROW LEVEL SECURITY;`,
+          down: `ALTER TABLE "${src.schemaname}"."${src.tablename}" DISABLE ROW LEVEL SECURITY;`,
+        },
+      })
+    } else if (!src.rls_enabled && tgt.rls_enabled) {
+      issues.push({
+        id: `rls-enabled-${key}`,
+        check: 'rls',
+        severity: 'warning',
+        title: `RLS enabled unexpectedly: ${src.schemaname}.${src.tablename}`,
+        description: `Row Level Security is disabled on "${src.schemaname}"."${src.tablename}" in source but enabled in target.`,
+        sourceValue: src,
+        targetValue: tgt,
+        sql: {
+          up: `ALTER TABLE "${src.schemaname}"."${src.tablename}" DISABLE ROW LEVEL SECURITY;`,
+          down: `ALTER TABLE "${src.schemaname}"."${src.tablename}" ENABLE ROW LEVEL SECURITY;`,
         },
       })
     }

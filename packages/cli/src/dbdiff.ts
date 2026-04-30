@@ -167,11 +167,17 @@ export function parseDbDiffOutput(output: string): DbDiffResult {
  * When `ignoreSchemas` is provided, FK constraint statements that
  * reference tables in ignored schemas are filtered out — these are
  * false positives caused by dbdiff seeing stub tables.
+ *
+ * `ignoredSchemaTables` is an optional pre-queried set of table names
+ * (lowercase) that exist inside ignored schemas. When provided it lets the
+ * filter catch unqualified REFERENCES like `REFERENCES "users"` where
+ * "users" lives in the ignored "auth" schema but dbdiff omitted the prefix.
  */
 export function sqlToIssues(
   result: DbDiffResult,
   check: 'schema' | 'data',
   ignoreSchemas?: string[],
+  ignoredSchemaTables?: Set<string>,
 ): DriftIssue[] {
   if (!result.up && !result.down) return []
 
@@ -182,8 +188,10 @@ export function sqlToIssues(
   // These arise because dbdiff compares stub tables vs real Supabase tables.
   // We check both UP and DOWN statements — dbdiff generates broken REFERENCES "" ("")
   // in the DOWN when the referenced table is in an ignored schema.
+  // `ignoredSchemaTables` additionally catches unqualified refs like
+  // REFERENCES "users" where "users" lives in the ignored "auth" schema.
   if (ignoreSchemas?.length && check === 'schema') {
-    const keep = filterCrossSchemaFks(upStatements, downStatements, ignoreSchemas)
+    const keep = filterCrossSchemaFks(upStatements, downStatements, ignoreSchemas, ignoredSchemaTables)
     upStatements = upStatements.filter((_, i) => keep[i])
     downStatements = downStatements.filter((_, i) => keep[i])
   }
@@ -211,13 +219,15 @@ export function sqlToIssues(
  *
  * Two-pass approach:
  * 1. Mark ADD CONSTRAINT ... FOREIGN KEY statements where the UP references an
- *    ignored schema or the DOWN counterpart has broken `REFERENCES "" ("")`.
+ *    ignored schema or the DOWN counterpart has broken `REFERENCES "" ("")`,
+ *    or the referenced table (even unqualified) is in `ignoredSchemaTables`.
  * 2. Mark paired DROP CONSTRAINT statements that share the same constraint name.
  */
 function filterCrossSchemaFks(
   upStmts: string[],
   downStmts: string[],
   schemas: string[],
+  ignoredSchemaTables?: Set<string>,
 ): boolean[] {
   const keep = new Array<boolean>(upStmts.length).fill(true)
 
@@ -230,7 +240,7 @@ function filterCrossSchemaFks(
     if (!upper.includes('ADD CONSTRAINT') || !upper.includes('FOREIGN KEY')) continue
 
     const isCrossSchema =
-      hasCrossSchemaRef(upStmts[i], schemas) ||
+      hasCrossSchemaRef(upStmts[i], schemas, ignoredSchemaTables) ||
       (downStmts[i] != null && hasBrokenRef(downStmts[i]))
 
     if (isCrossSchema) {
@@ -254,8 +264,17 @@ function filterCrossSchemaFks(
   return keep
 }
 
-/** Check if a REFERENCES clause points to an ignored schema or is empty. */
-function hasCrossSchemaRef(sql: string, schemas: string[]): boolean {
+/**
+ * Check if a REFERENCES clause points to an ignored schema, is empty/broken,
+ * or is unqualified but the referenced table exists in an ignored schema.
+ *
+ * Handles three forms:
+ *   REFERENCES "" ("")              — broken ref from dbdiff, always filtered
+ *   REFERENCES "auth"."users" ("id") — schema-qualified, filtered if schema ignored
+ *   REFERENCES "users" ("id")        — unqualified, filtered if "users" is in
+ *                                       ignoredSchemaTables (queried from target DB)
+ */
+function hasCrossSchemaRef(sql: string, schemas: string[], ignoredSchemaTables?: Set<string>): boolean {
   const refsMatch = sql.match(/REFERENCES\s+"([^"]*)"(?:\s*\.\s*"([^"]*)")?\s*\(\s*"([^"]*)"\s*\)/i)
   if (!refsMatch) return false
   const [, first, second] = refsMatch
@@ -265,7 +284,10 @@ function hasCrossSchemaRef(sql: string, schemas: string[]): boolean {
   if (second !== undefined) {
     return schemas.some(s => s.toLowerCase() === first.toLowerCase())
   }
-  return false
+  // Unqualified: REFERENCES "users" ("id") — filter if the table lives in an ignored schema.
+  // This catches the case where pg_dump or dbdiff drops the schema prefix due to
+  // search_path, so the reference appears unqualified even though it targets e.g. auth.users.
+  return ignoredSchemaTables ? ignoredSchemaTables.has(first.toLowerCase()) : false
 }
 
 /** Check if SQL contains a broken REFERENCES "" ("") from dbdiff. */
@@ -275,11 +297,56 @@ function hasBrokenRef(sql: string): boolean {
 
 function splitStatements(sql: string): string[] {
   if (!sql) return []
-  return sql
-    .split(/;\s*\n/)
-    .map(s => s.trim())
-    .filter(s => s.length > 0 && !s.startsWith('--'))
-    .map(s => (s.endsWith(';') ? s : `${s};`))
+
+  const statements: string[] = []
+  let buf = ''
+  let i = 0
+
+  while (i < sql.length) {
+    // Dollar-quoted string: $tag$...$tag$ consumed as a single token so that
+    // semicolons inside function/trigger/procedure bodies are not treated as
+    // statement boundaries. The tag is /\$([A-Za-z0-9_]*)\$/ e.g. $$ or $body$.
+    if (sql[i] === '$') {
+      const tagMatch = sql.slice(i + 1).match(/^([A-Za-z0-9_]*)\$/)
+      if (tagMatch) {
+        const tag = `$${tagMatch[1]}$`
+        const closeIdx = sql.indexOf(tag, i + tag.length)
+        if (closeIdx !== -1) {
+          buf += sql.slice(i, closeIdx + tag.length)
+          i = closeIdx + tag.length
+          continue
+        }
+      }
+    }
+
+    // Statement boundary: ';' optionally followed by spaces/tabs/CR then '\n'
+    if (sql[i] === ';') {
+      buf += ';'
+      i++
+      let j = i
+      while (j < sql.length && (sql[j] === ' ' || sql[j] === '\t' || sql[j] === '\r')) j++
+      if (j >= sql.length || sql[j] === '\n') {
+        const stmt = buf.trim()
+        if (stmt.length > 0 && !stmt.startsWith('--')) {
+          statements.push(stmt)
+        }
+        buf = ''
+        i = j < sql.length ? j + 1 : j
+      }
+      continue
+    }
+
+    buf += sql[i]
+    i++
+  }
+
+  // Flush any trailing content without a statement-ending newline
+  const last = buf.trim()
+  if (last.length > 0 && !last.startsWith('--')) {
+    statements.push(last.endsWith(';') ? last : `${last};`)
+  }
+
+  return statements
 }
 
 export function classifyStatement(sql: string): string {

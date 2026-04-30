@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { RlsCheck } from '../../src/checks/rls.js'
+import { RlsCheck, diffRlsStatus } from '../../src/checks/rls.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { QueryFn } from '../../src/db.js'
 
@@ -126,9 +126,12 @@ describe('RlsCheck', () => {
     const check = new RlsCheck(queryFn)
     await check.scan(mockContext())
 
-    expect(calls.length).toBe(2)
-    expect(calls[0].sql).toContain('NOT IN')
-    expect(calls[0].params).toEqual(['auth'])
+    // 4 calls: fetchPolicies × 2 + fetchTableRlsStatus × 2
+    expect(calls.length).toBe(4)
+    for (const call of calls) {
+      expect(call.sql).toContain('NOT IN')
+      expect(call.params).toEqual(['auth'])
+    }
   })
 
   it('generates valid CREATE POLICY SQL', async () => {
@@ -162,5 +165,94 @@ describe('RlsCheck', () => {
     const sql = issues[0].sql!.up
     expect(sql).toContain('TO authenticated')
     expect(sql).not.toContain('{')
+  })
+})
+
+describe('diffRlsStatus', () => {
+  const makeStatus = (overrides: Record<string, unknown> = {}) => ({
+    schemaname: 'public',
+    tablename: 'orders',
+    rls_enabled: false,
+    ...overrides,
+  })
+
+  it('detects RLS disabled in target when source has it enabled', () => {
+    const source = [makeStatus({ rls_enabled: true })]
+    const target = [makeStatus({ rls_enabled: false })]
+
+    const issues = diffRlsStatus(source, target)
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].id).toBe('rls-disabled-public.orders')
+    expect(issues[0].severity).toBe('critical')
+    expect(issues[0].title).toContain('RLS not enabled')
+    expect(issues[0].sql?.up).toBe('ALTER TABLE "public"."orders" ENABLE ROW LEVEL SECURITY;')
+    expect(issues[0].sql?.down).toBe('ALTER TABLE "public"."orders" DISABLE ROW LEVEL SECURITY;')
+  })
+
+  it('detects RLS unexpectedly enabled in target', () => {
+    const source = [makeStatus({ rls_enabled: false })]
+    const target = [makeStatus({ rls_enabled: true })]
+
+    const issues = diffRlsStatus(source, target)
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].id).toBe('rls-enabled-public.orders')
+    expect(issues[0].severity).toBe('warning')
+    expect(issues[0].sql?.up).toBe('ALTER TABLE "public"."orders" DISABLE ROW LEVEL SECURITY;')
+  })
+
+  it('returns no issues when RLS status matches', () => {
+    const source = [makeStatus({ rls_enabled: true })]
+    const target = [makeStatus({ rls_enabled: true })]
+
+    expect(diffRlsStatus(source, target)).toHaveLength(0)
+  })
+
+  it('skips tables absent from target (schema drift covers creation)', () => {
+    const source = [makeStatus({ rls_enabled: true })]
+
+    expect(diffRlsStatus(source, [])).toHaveLength(0)
+  })
+
+  it('handles multiple tables with mixed status', () => {
+    const source = [
+      makeStatus({ tablename: 'orders', rls_enabled: true }),
+      makeStatus({ tablename: 'products', rls_enabled: false }),
+      makeStatus({ tablename: 'users', rls_enabled: true }),
+    ]
+    const target = [
+      makeStatus({ tablename: 'orders', rls_enabled: false }),
+      makeStatus({ tablename: 'products', rls_enabled: false }),
+      makeStatus({ tablename: 'users', rls_enabled: true }),
+    ]
+
+    const issues = diffRlsStatus(source, target)
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].id).toBe('rls-disabled-public.orders')
+  })
+
+  it('RlsCheck.scan returns RLS status issues before policy issues', async () => {
+    const queryFn: QueryFn = async (dbUrl, sql) => {
+      if (sql.includes('relrowsecurity')) {
+        // Status query
+        if (dbUrl.includes('source')) return [{ schemaname: 'public', tablename: 'products', rls_enabled: true }]
+        return [{ schemaname: 'public', tablename: 'products', rls_enabled: false }]
+      }
+      // Policy query — missing policy in target
+      if (dbUrl.includes('source')) return [makePolicy({ tablename: 'products', policyname: 'products_read' })]
+      return []
+    }
+
+    const check = new RlsCheck(queryFn)
+    const issues = await check.scan(mockContext())
+
+    expect(issues.length).toBeGreaterThanOrEqual(2)
+    // ENABLE RLS issue must come before the CREATE POLICY issue
+    const enableIdx = issues.findIndex(i => i.id.includes('rls-disabled'))
+    const policyIdx = issues.findIndex(i => i.id.includes('rls-missing'))
+    expect(enableIdx).toBeLessThan(policyIdx)
+    expect(issues[enableIdx].sql?.up).toContain('ENABLE ROW LEVEL SECURITY')
   })
 })

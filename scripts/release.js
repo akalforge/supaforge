@@ -6,7 +6,8 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const pkgPath = path.join(__dirname, '..', 'packages', 'cli', 'package.json');
+const repoRoot = path.join(__dirname, '..');
+const pkgPath = path.join(repoRoot, 'packages', 'cli', 'package.json');
 
 // Parse args: node scripts/release.js <type> [--preid=rc] [--apply] [--force-tag]
 const positionalArgs = process.argv.slice(2).filter(a => !a.startsWith('--'));
@@ -22,7 +23,7 @@ const BUMP_TYPES = ['major', 'minor', 'patch', 'premajor', 'preminor', 'prepatch
 function runCommand(command) {
   try {
     console.log(`Executing: ${command}`);
-    return execSync(command, { encoding: 'utf8', stdio: 'inherit' });
+    return execSync(command, { encoding: 'utf8', stdio: 'inherit', cwd: repoRoot });
   } catch (_error) {
     console.error(`Error executing command: ${command}`);
     process.exit(1);
@@ -114,7 +115,7 @@ runCommand('git add .');
 
 // Check if there are changes to commit
 try {
-  execSync('git diff --staged --quiet', { encoding: 'utf8' });
+  execSync('git diff --staged --quiet', { encoding: 'utf8', cwd: repoRoot });
   if (isTagOnly) console.log(`Tagging current version ${newVersion} (no version bump)`);
   else console.log('No version changes detected (already at this version)');
 } catch (_e) {

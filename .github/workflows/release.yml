@@ -7,9 +7,12 @@ on:
   workflow_call:
     inputs:
       tag_name:
-        description: 'Tag name to release (e.g. v1.2.3). Defaults to the pushed tag when triggered directly.'
-        required: false
+        description: The version tag to release (e.g. v1.2.3)
+        required: true
         type: string
+    secrets:
+      NPM_TOKEN:
+        required: true
 
 jobs:
   build-and-test:

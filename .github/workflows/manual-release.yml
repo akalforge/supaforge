@@ -97,26 +97,19 @@ jobs:
           fi
           node scripts/release.js "${{ steps.version.outputs.arg }}" --apply $EXTRA_FLAGS
 
-      - name: Resolve tag name
+      - name: Write job summary
         id: tag
         run: |
           VERSION=$(node -p "require('./packages/cli/package.json').version")
           echo "tag_name=v${VERSION}" >> "$GITHUB_OUTPUT"
-
-      - name: Write job summary
-        run: |
-          echo "## Release ${{ steps.tag.outputs.tag_name }} 🚀" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Release v${VERSION}" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "Tag \`${{ steps.tag.outputs.tag_name }}\` pushed — the Release workflow will now run automatically." >> "$GITHUB_STEP_SUMMARY"
+          echo "Tag \`v${VERSION}\` pushed - the release pipeline will now run." >> "$GITHUB_STEP_SUMMARY"
 
-  trigger-release:
-    name: Trigger Release pipeline
+  run-release:
+    name: Run release pipeline
     needs: [release]
     uses: ./.github/workflows/release.yml
     with:
       tag_name: ${{ needs.release.outputs.tag_name }}
-    permissions:
-      contents: write
-      id-token: write
-      packages: write
     secrets: inherit

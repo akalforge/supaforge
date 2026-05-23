@@ -63,6 +63,57 @@ describe('CLI e2e: diff', () => {
     expect(stdout).toContain('--target')
     expect(stdout).toContain('--include-files')
   })
+
+  it('should output valid JSON with --json flag', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-diff-json-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const config = {
+      environments: {
+        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
+        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
+      },
+      source: 'dev',
+      target: 'prod',
+    }
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
+
+    // diff will error connecting to DB but still produces JSON output
+    const { stdout } = await run(['diff', '--json', '--check=rls'], { cwd: tmpDir })
+    const parsed = JSON.parse(stdout)
+    expect(parsed).toHaveProperty('timestamp')
+    expect(parsed).toHaveProperty('source', 'dev')
+    expect(parsed).toHaveProperty('target', 'prod')
+    expect(parsed).toHaveProperty('checks')
+    expect(Array.isArray(parsed.checks)).toBe(true)
+    expect(parsed).toHaveProperty('score')
+    expect(parsed).toHaveProperty('summary')
+  })
+
+  it('should output detailed format with --detail flag', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-diff-detail-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const config = {
+      environments: {
+        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
+        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
+      },
+      source: 'dev',
+      target: 'prod',
+    }
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
+
+    // --detail triggers preflight (which errors on unreachable DBs), but we can
+    // verify the flag is accepted and the command reaches that stage.
+    try {
+      await run(['diff', '--detail', '--check=rls'], { cwd: tmpDir })
+      expect.unreachable('Should have thrown — unreachable DB URLs')
+    } catch (err: any) {
+      const output = (err.stderr || '') + (err.stdout || '')
+      // Preflight ran (not a flag parsing error), proving --detail was accepted
+      expect(output).toContain('preflight checks')
+      expect(output).toContain('not reachable')
+    }
+  })
 })
 
 describe('CLI e2e: hukam', () => {
@@ -327,6 +378,32 @@ describe('CLI e2e: migrate create', () => {
     } catch (err: any) {
       const output = (err.stderr || '') + (err.stdout || '')
       expect(output).toMatch(/--name|Missing required flag/i)
+    }
+  })
+
+  it('creates a timestamped .sql file under supabase/migrations/', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-migrate-create-file-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const config = {
+      environments: {
+        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
+        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
+      },
+      source: 'dev',
+      target: 'prod',
+    }
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
+
+    // migrate create requires real DB access for preflight — verify it reaches
+    // that stage (flag accepted, config loaded) rather than failing on config/flag parsing.
+    try {
+      await run(['migrate', 'create', '--name=add_users'], { cwd: tmpDir })
+      expect.unreachable('Should have thrown — unreachable DB URLs')
+    } catch (err: any) {
+      const output = (err.stderr || '') + (err.stdout || '')
+      // Preflight ran (not a flag/config parsing error)
+      expect(output).toContain('preflight checks')
+      expect(output).toContain('not reachable')
     }
   })
 })

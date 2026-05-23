@@ -72,6 +72,9 @@ function formatIssue(issue: DriftIssue): string {
     for (const line of issue.sql.up.split('\n')) {
       lines.push(`      ${c('cyan', line)}`)
     }
+  } else if (issue.action) {
+    lines.push('')
+    lines.push(`    ${dim('API action:')} ${c('cyan', issue.action.label)}`)
   }
 
   lines.push('')

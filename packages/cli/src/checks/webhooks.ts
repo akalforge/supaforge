@@ -173,5 +173,64 @@ function diffHooks(source: WebhookEntry[], target: WebhookEntry[]): DriftIssue[]
     }
   }
 
+  // Detect modified webhooks — same name but different events or trigger table
+  for (const [name, sh] of sourceMap) {
+    const th = targetMap.get(name)
+    if (!th) continue
+
+    const eventsChanged = sh.events !== th.events
+    const tableChanged = sh.trigger_table !== th.trigger_table
+
+    if (eventsChanged || tableChanged) {
+      const sql = sh.function_body && sh.events && sh.trigger_table
+        ? {
+            up: [
+              `DROP TRIGGER IF EXISTS "${sh.hook_name}" ON ${th.trigger_table ?? sh.trigger_table};`,
+              '',
+              `-- Recreate trigger function`,
+              sh.function_body + ';',
+              '',
+              `-- Recreate trigger with updated configuration`,
+              `CREATE TRIGGER "${sh.hook_name}"`,
+              `  AFTER ${sh.events}`,
+              `  ON ${sh.trigger_table}`,
+              `  FOR EACH ROW`,
+              `  EXECUTE FUNCTION supabase_functions.http_request();`,
+            ].join('\n'),
+            down: th.function_body && th.events && th.trigger_table
+              ? [
+                  `DROP TRIGGER IF EXISTS "${th.hook_name}" ON ${sh.trigger_table ?? th.trigger_table};`,
+                  '',
+                  `-- Revert trigger function`,
+                  th.function_body + ';',
+                  '',
+                  `-- Revert trigger`,
+                  `CREATE TRIGGER "${th.hook_name}"`,
+                  `  AFTER ${th.events}`,
+                  `  ON ${th.trigger_table}`,
+                  `  FOR EACH ROW`,
+                  `  EXECUTE FUNCTION supabase_functions.http_request();`,
+                ].join('\n')
+              : '',
+          }
+        : undefined
+
+      const parts: string[] = []
+      if (eventsChanged) parts.push(`events (source: ${sh.events ?? 'unknown'}, target: ${th.events ?? 'unknown'})`)
+      if (tableChanged) parts.push(`table (source: ${sh.trigger_table ?? 'unknown'}, target: ${th.trigger_table ?? 'unknown'})`)
+
+      issues.push({
+        id: `webhooks-modified-${name}`,
+        check: 'webhooks',
+        severity: 'warning',
+        title: `Modified webhook: ${name}`,
+        description: `Webhook "${name}" differs in ${parts.join(' and ')} between source and target.`,
+        sourceValue: sh,
+        targetValue: th,
+        sql,
+      })
+    }
+  }
+
   return issues
 }

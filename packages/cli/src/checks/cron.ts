@@ -104,6 +104,22 @@ export function diffCronJobs(source: CronJob[], target: CronJob[]): DriftIssue[]
         },
       })
     }
+
+    if (sj.active !== tj.active) {
+      issues.push({
+        id: `cron-active-${key}`,
+        check: 'cron',
+        severity: 'warning',
+        title: `Cron job active state mismatch: ${key}`,
+        description: `Cron job "${key}" is ${sj.active ? 'active' : 'inactive'} in source but ${tj.active ? 'active' : 'inactive'} in target.`,
+        sourceValue: { active: sj.active },
+        targetValue: { active: tj.active },
+        sql: {
+          up: `UPDATE cron.job SET active = ${sj.active} WHERE jobname = '${key}';`,
+          down: `UPDATE cron.job SET active = ${tj.active} WHERE jobname = '${key}';`,
+        },
+      })
+    }
   }
 
   return issues

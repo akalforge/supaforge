@@ -131,4 +131,66 @@ describe('CronCheck', () => {
 
     expect(issues[0].id).toBe('cron-missing-job-42')
   })
+
+  it('detects active/inactive state mismatch', async () => {
+    const queryFn: QueryFn = async (dbUrl) => {
+      if (dbUrl.includes('source')) return [makeJob({ active: true })]
+      return [makeJob({ active: false })]
+    }
+
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
+
+    expect(issues).toHaveLength(1)
+    const issue = issues[0]
+    expect(issue.id).toBe('cron-active-cleanup_sessions')
+    expect(issue.severity).toBe('warning')
+    expect(issue.title).toContain('active state mismatch')
+    expect(issue.title).toContain('cleanup_sessions')
+    expect(issue.description).toContain('active in source')
+    expect(issue.description).toContain('inactive in target')
+  })
+
+  it('detects inactive-to-active mismatch', async () => {
+    const queryFn: QueryFn = async (dbUrl) => {
+      if (dbUrl.includes('source')) return [makeJob({ active: false })]
+      return [makeJob({ active: true })]
+    }
+
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].description).toContain('inactive in source')
+    expect(issues[0].description).toContain('active in target')
+  })
+
+  it('active state issue SQL updates the active column', async () => {
+    const queryFn: QueryFn = async (dbUrl) => {
+      if (dbUrl.includes('source')) return [makeJob({ active: true })]
+      return [makeJob({ active: false })]
+    }
+
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
+
+    expect(issues[0].sql?.up).toContain('UPDATE cron.job')
+    expect(issues[0].sql?.up).toContain('active = true')
+    expect(issues[0].sql?.down).toContain('active = false')
+  })
+
+  it('emits both modified and active issues when schedule and active both differ', async () => {
+    const queryFn: QueryFn = async (dbUrl) => {
+      if (dbUrl.includes('source')) return [makeJob({ schedule: '0 1 * * *', active: true })]
+      return [makeJob({ schedule: '0 2 * * *', active: false })]
+    }
+
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
+
+    expect(issues).toHaveLength(2)
+    const ids = issues.map(i => i.id)
+    expect(ids).toContain('cron-modified-cleanup_sessions')
+    expect(ids).toContain('cron-active-cleanup_sessions')
+  })
 })

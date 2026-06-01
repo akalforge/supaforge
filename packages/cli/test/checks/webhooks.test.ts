@@ -229,4 +229,89 @@ describe('WebhooksCheck', () => {
     expect(issues[0].description).toContain('public.users')
     expect(issues[0].description).toContain('INSERT OR UPDATE')
   })
+
+  // ── Modified webhook detection ───────────────────────────────────────
+
+  it('detects webhook with changed events', async () => {
+    const queryFn: QueryFn = async (dbUrl, sql) => {
+      if (sql.includes('pg_extension')) return []
+      if (dbUrl.includes('source')) return [makeHookWithTrigger({ events: 'INSERT OR UPDATE' })]
+      return [makeHookWithTrigger({ events: 'INSERT' })]
+    }
+
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
+
+    expect(issues).toHaveLength(1)
+    const issue = issues[0]
+    expect(issue.id).toBe('webhooks-modified-on_user_created')
+    expect(issue.severity).toBe('warning')
+    expect(issue.title).toContain('Modified webhook')
+    expect(issue.title).toContain('on_user_created')
+    expect(issue.description).toContain('events')
+    expect(issue.description).toContain('INSERT OR UPDATE')
+    expect(issue.description).toContain('INSERT')
+  })
+
+  it('detects webhook with changed trigger table', async () => {
+    const queryFn: QueryFn = async (dbUrl, sql) => {
+      if (sql.includes('pg_extension')) return []
+      if (dbUrl.includes('source')) return [makeHookWithTrigger({ trigger_table: 'public.profiles' })]
+      return [makeHookWithTrigger({ trigger_table: 'public.users' })]
+    }
+
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
+
+    expect(issues).toHaveLength(1)
+    const issue = issues[0]
+    expect(issue.id).toBe('webhooks-modified-on_user_created')
+    expect(issue.description).toContain('table')
+    expect(issue.description).toContain('public.profiles')
+    expect(issue.description).toContain('public.users')
+  })
+
+  it('detects webhook with both events and table changed', async () => {
+    const queryFn: QueryFn = async (dbUrl, sql) => {
+      if (sql.includes('pg_extension')) return []
+      if (dbUrl.includes('source')) return [makeHookWithTrigger({ events: 'INSERT OR UPDATE', trigger_table: 'public.profiles' })]
+      return [makeHookWithTrigger({ events: 'INSERT', trigger_table: 'public.users' })]
+    }
+
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].description).toContain('events')
+    expect(issues[0].description).toContain('table')
+  })
+
+  it('generates sync SQL for modified webhook (drop + recreate)', async () => {
+    const queryFn: QueryFn = async (dbUrl, sql) => {
+      if (sql.includes('pg_extension')) return []
+      if (dbUrl.includes('source')) return [makeHookWithTrigger({ events: 'INSERT OR UPDATE' })]
+      return [makeHookWithTrigger({ events: 'INSERT' })]
+    }
+
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
+
+    expect(issues[0].sql).toBeDefined()
+    expect(issues[0].sql!.up).toContain('DROP TRIGGER')
+    expect(issues[0].sql!.up).toContain('CREATE TRIGGER')
+    expect(issues[0].sql!.up).toContain('INSERT OR UPDATE')
+  })
+
+  it('does not report modified for identical webhooks', async () => {
+    const hook = makeHookWithTrigger()
+    const queryFn: QueryFn = async (_dbUrl, sql) => {
+      if (sql.includes('pg_extension')) return []
+      return [hook]
+    }
+
+    const check = new WebhooksCheck(queryFn)
+    const issues = await check.scan(mockContext())
+    expect(issues).toHaveLength(0)
+  })
 })
+

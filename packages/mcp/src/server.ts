@@ -3,7 +3,6 @@ import { z } from 'zod'
 import { readFile, readdir } from 'node:fs/promises'
 import { resolve, join } from 'node:path'
 import {
-  loadConfig,
   resolveConfig,
   validateConfig,
   createDefaultRegistry,

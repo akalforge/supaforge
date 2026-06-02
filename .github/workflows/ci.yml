@@ -26,22 +26,39 @@ jobs:
           cache: npm
           cache-dependency-path: packages/cli/package-lock.json
 
-      - name: Install dependencies
+      - name: Install CLI dependencies
         working-directory: packages/cli
         run: npm ci
 
-      - name: Lint (type-check)
+      - name: Lint CLI (type-check)
         working-directory: packages/cli
         run: npm run lint
 
-      - name: Run tests
+      - name: Run CLI tests
         working-directory: packages/cli
         run: npm test
 
-      - name: Build
+      - name: Build CLI
         working-directory: packages/cli
         run: npm run build
 
       - name: Test CLI entry point
         working-directory: packages/cli
         run: node bin/run.js --help
+
+      - name: Install MCP dependencies
+        working-directory: packages/mcp
+        run: npm install
+
+      - name: Lint MCP (type-check)
+        working-directory: packages/mcp
+        run: npm run lint
+
+      - name: Run MCP tests
+        working-directory: packages/mcp
+        run: node_modules/.bin/vitest run
+
+      - name: Build MCP
+        working-directory: packages/mcp
+        run: npm run build
+

@@ -91,7 +91,7 @@ describe('renderDetailed', () => {
   it('shows check headers for drifted checks', () => {
     const output = renderDetailed(driftedResult)
     expect(output).toContain('Layer 2: RLS Policies')
-    expect(output).toContain('Layer 6: Cron Jobs')
+    expect(output).toContain('Layer 7: Cron Jobs')
   })
 })
 

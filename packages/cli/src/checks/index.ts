@@ -1,6 +1,7 @@
 import { CheckRegistry } from './registry'
 import { SchemaCheck } from './schema'
 import { RlsCheck } from './rls'
+import { RlsCoverageCheck } from './rls-coverage'
 import { EdgeFunctionsCheck } from './edge-functions'
 import { StorageCheck } from './storage'
 import { AuthCheck } from './auth'
@@ -21,6 +22,7 @@ export function createDefaultRegistry(options: RegistryOptions = {}): CheckRegis
   const registry = new CheckRegistry()
   registry.register(new SchemaCheck())
   registry.register(new RlsCheck())
+  registry.register(new RlsCoverageCheck())
   registry.register(new EdgeFunctionsCheck())
   registry.register(new StorageCheck(undefined, options.includeFiles ?? false))
   registry.register(new AuthCheck())
@@ -38,6 +40,7 @@ export { CheckRegistry } from './registry'
 export { Check, type CheckContext } from './base'
 export { SchemaCheck } from './schema'
 export { RlsCheck } from './rls'
+export { RlsCoverageCheck } from './rls-coverage'
 export { EdgeFunctionsCheck } from './edge-functions'
 export { StorageCheck } from './storage'
 export { AuthCheck } from './auth'

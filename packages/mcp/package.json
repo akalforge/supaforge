@@ -1,0 +1,44 @@
+{
+  "name": "@akalforge/supaforge-mcp",
+  "version": "0.0.4",
+  "description": "MCP server exposing SupaForge drift detection to AI agents",
+  "author": "Akal Software Ltd",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/akalforge/supaforge",
+    "directory": "packages/mcp"
+  },
+  "type": "module",
+  "bin": {
+    "supaforge-mcp": "./dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "node --import tsx/esm src/index.ts",
+    "lint": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@akalforge/supaforge": "file:../cli",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.25.51"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4",
+    "typescript": "^5",
+    "vitest": "^3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

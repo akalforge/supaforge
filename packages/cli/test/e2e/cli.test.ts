@@ -57,6 +57,26 @@ describe('CLI e2e: diff', () => {
     }
   })
 
+  it('should accept --check=rls-coverage', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-rls-coverage-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const config = {
+      environments: {
+        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
+        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
+      },
+      source: 'dev',
+      target: 'prod',
+    }
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
+
+    const { stdout } = await run(['diff', '--json', '--check=rls-coverage'], { cwd: tmpDir })
+    const parsed = JSON.parse(stdout)
+    expect(parsed).toHaveProperty('checks')
+    const rlsCoverage = parsed.checks.find((c: any) => c.check === 'rls-coverage')
+    expect(rlsCoverage).toBeDefined()
+  })
+
   it('should show --source and --target flags in help', async () => {
     const { stdout } = await run(['diff', '--help'])
     expect(stdout).toContain('--source')

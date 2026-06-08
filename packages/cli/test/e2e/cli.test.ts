@@ -427,3 +427,12 @@ describe('CLI e2e: migrate create', () => {
     }
   })
 })
+
+describe('CLI e2e: mcp', () => {
+  it('should show help', async () => {
+    const { stdout } = await run(['mcp', '--help'])
+    expect(stdout).toContain('MCP')
+    expect(stdout).toContain('stdio')
+    expect(stdout).toContain('Claude Desktop')
+  })
+})

@@ -32,4 +32,7 @@ export {
   previewSnapshotRestore,
   previewMigrationRestore,
 } from './restore'
+export { createServer } from './mcp/server'
+export { setLastScanResult, getLastScanResult, clearLastScanResult } from './mcp/state'
 export * from './types/index'
+

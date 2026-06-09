@@ -143,9 +143,40 @@ supaforge clone --delete=<name> --apply   Remove a clone
 
 supaforge restore --env=local --from-snapshot=latest --apply   Restore from snapshot
 supaforge restore --env=local --from-migrations --apply        Replay migrations
+
+supaforge mcp                             Start MCP stdio server for AI agents
 ```
 
 > All commands that modify state preview by default. Add `--apply` to execute.
+
+## MCP Integration (AI Agents)
+
+SupaForge ships a built-in [Model Context Protocol](https://modelcontextprotocol.io/) server. Configure Claude Desktop, Cursor, or any MCP-compatible AI client to call SupaForge tools directly:
+
+```json
+{
+  "mcpServers": {
+    "supaforge": {
+      "command": "supaforge",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+The MCP server exposes:
+
+| Tool | Description |
+|------|-------------|
+| `scan_drift` | Scan for drift and return a structured report |
+| `apply_fixes` | Apply SQL fixes (supports `dryRun=true` preview) |
+| `take_snapshot` | Capture a point-in-time environment snapshot |
+| `create_migration` | Generate a migration file from snapshot diff |
+| `get_check_result` | Retrieve the result for a specific check from the last scan |
+
+Resources: `supaforge://config`, `supaforge://last-scan`, `supaforge://migrations`
+
+Prompts: `review_drift_before_deploy`, `fix_critical_issues`
 
 ## Configuration
 

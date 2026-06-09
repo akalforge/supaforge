@@ -15,6 +15,7 @@ export default defineConfig({
     'src/commands/migrate/run.ts',
     'src/commands/migrate/baseline.ts',
     'src/commands/migrate/create.ts',
+    'src/commands/mcp.ts',
   ],
   format: ['esm'],
   dts: true,

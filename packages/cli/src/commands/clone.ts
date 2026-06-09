@@ -15,6 +15,7 @@ import type { BranchMeta } from '../branch.js'
 import { checkPgDumpCompat } from '../pg-tools.js'
 import { startLocalPg, DEFAULT_LOCAL_PORT, LOCAL_PG_USER, LOCAL_PG_PASSWORD } from '../local-pg.js'
 import { ok, warn, dim, cmd, bold } from '../ui.js'
+import { renderTip } from '../tips.js'
 import { DEFAULT_IGNORE_SCHEMAS } from '../defaults.js'
 import { CLONE_EXTRA_EXCLUDE_SCHEMAS, SUPAFORGE_DIR, MIGRATIONS_SUBDIR } from '../constants.js'
 import { errMsg, redactUrls } from '../utils/error.js'
@@ -228,6 +229,7 @@ export default class Clone extends BaseCommand {
         this.log('      4. Update supaforge.config.json with local + remote environments')
         this.log('')
         this.log(`    → Add ${cmd('--apply')} to execute the clone.\n`)
+        this.log(renderTip({ command: 'clone', cloneApplied: false, schemaOnly: flags['schema-only'] }))
       }
       return
     }
@@ -322,5 +324,6 @@ export default class Clone extends BaseCommand {
     this.log(`    3. ${cmd('supaforge diff --apply')}     ${dim('— push changes to remote')}`)
     this.log(`    4. ${cmd('supaforge snapshot')}          ${dim('— capture the current state')}`)
     this.log('')
+    this.log(renderTip({ command: 'clone', cloneApplied: true, schemaOnly: flags['schema-only'] }))
   }
 }

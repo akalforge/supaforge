@@ -4,6 +4,7 @@ import { captureSnapshot, listSnapshots, pruneSnapshots, DEFAULT_KEEP_COUNT } fr
 import { backup, listMigrationFiles } from '../migration.js'
 import type { SnapshotManifest } from '../types/config.js'
 import { ok, warn, dim, cmd, bold } from '../ui.js'
+import { renderTip } from '../tips.js'
 
 /**
  * Capture and manage environment state snapshots.
@@ -88,6 +89,7 @@ export default class Snapshot extends BaseCommand {
         this.log(`  ${bold(manifest.timestamp)}  ${dim('env=')}${manifest.environment}  ${dim('layers=')}${layerCount}  ${dim('items=')}${itemCount}`)
       }
       this.log('')
+      this.log(renderTip({ command: 'snapshot', snapshotList: true }))
       return
     }
 
@@ -178,6 +180,7 @@ export default class Snapshot extends BaseCommand {
       }
 
       this.log(`\n  ${ok('Snapshot + migration complete.')}\n`)
+      this.log(renderTip({ command: 'snapshot', snapshotMigration: true }))
       return
     }
 
@@ -202,6 +205,7 @@ export default class Snapshot extends BaseCommand {
       this.log(`  → Run with ${cmd('--migration')} to save a baseline migration.`)
     }
     this.log('')
+    this.log(renderTip({ command: 'snapshot', snapshotMigration: false, snapshotList: false }))
   }
 
   private logSnapshotResult(manifest: SnapshotManifest): void {

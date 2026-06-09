@@ -9,6 +9,7 @@ import type { CheckName } from '../types/drift.js'
 import { CHECK_NAMES, CHECK_META } from '../types/drift.js'
 import { ok, warn, dim, cmd } from '../ui.js'
 import { sanitizeForReport } from '../utils/sanitize.js'
+import { renderTip } from '../tips.js'
 
 /**
  * Unified drift detection & resolution command.
@@ -113,7 +114,8 @@ export default class Diff extends BaseCommand {
       })))
 
       if (scanResult.summary.total === 0) {
-        this.log(`${ok('No drift detected.')} Nothing to apply. \u2713`)
+        this.log(`${ok('No drift detected.')} Nothing to apply. ✓`)
+        this.log(renderTip({ command: 'diff', apply: true, driftTotal: 0 }))
         return
       }
 
@@ -131,27 +133,33 @@ export default class Diff extends BaseCommand {
       }
 
       if (result.applied.length > 0) {
-        this.log(`${ok(`Applied ${result.applied.length} fix(es):`)}`) 
+        this.log(`${ok(`Applied ${result.applied.length} fix(es):`)}`)
         for (const stmt of result.applied) {
           this.log(`  ${ok('✓')} ${dim(`[${stmt.check}]`)} ${stmt.issueId}`)
         }
       }
 
       if (result.skipped.length > 0) {
-        this.log(`\n${dim(`Skipped ${result.skipped.length} issue(s):`)}`) 
+        this.log(`\n${dim(`Skipped ${result.skipped.length} issue(s):`)}`)
         for (const item of result.skipped) {
           this.log(`  ${dim('○')} ${dim(`[${item.check}]`)} ${item.issueId}: ${item.reason}`)
         }
       }
 
       if (result.errors.length > 0) {
-        this.log(`\n${warn(`${result.errors.length} error(s):`)}`) 
+        this.log(`\n${warn(`${result.errors.length} error(s):`)}`)
         for (const item of result.errors) {
           this.log(`  ${warn('✗')} ${dim(`[${item.check}]`)} ${item.issueId}: ${item.error}`)
         }
         this.exit(1)
       }
 
+      this.log(renderTip({
+        command: 'diff',
+        apply: true,
+        driftTotal: scanResult.summary.total,
+        driftedChecks: scanResult.checks.filter(c => c.status === 'drifted').map(c => c.check),
+      }))
       return
     }
 
@@ -166,10 +174,21 @@ export default class Diff extends BaseCommand {
       ...(c.error ? { error: sanitizeForReport(c.error) } : {}),
     })))
 
+    const driftedChecks = result.checks.filter(c => c.status === 'drifted').map(c => c.check)
+    const skippedChecks = result.checks.filter(c => c.status === 'skipped').map(c => c.check)
+
     if (flags.json) {
       this.log(JSON.stringify(result, null, 2))
     } else if (flags.detail) {
       this.log(renderDetailed(result))
+      this.log(renderTip({
+        command: 'diff',
+        detail: true,
+        driftTotal: result.summary.total,
+        driftedChecks,
+        skippedChecks,
+        singleCheck: checks?.[0],
+      }))
     } else {
       this.log(renderSummary(result))
 
@@ -177,6 +196,15 @@ export default class Diff extends BaseCommand {
         this.log(`  → Run with ${cmd('--detail')} to see SQL diffs`)
         this.log(`  → Run with ${cmd('--apply')} to fix drift\n`)
       }
+
+      this.log(renderTip({
+        command: 'diff',
+        detail: false,
+        driftTotal: result.summary.total,
+        driftedChecks,
+        skippedChecks,
+        singleCheck: checks?.[0],
+      }))
     }
 
     if (result.summary.critical > 0) {

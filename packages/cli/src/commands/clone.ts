@@ -9,7 +9,9 @@ import {
   replaceDbName,
   listBranches,
   deleteBranch,
+  addBranchToManifest,
 } from '../branch.js'
+import type { BranchMeta } from '../branch.js'
 import { checkPgDumpCompat } from '../pg-tools.js'
 import { startLocalPg, DEFAULT_LOCAL_PORT, LOCAL_PG_USER, LOCAL_PG_PASSWORD } from '../local-pg.js'
 import { ok, warn, dim, cmd, bold } from '../ui.js'
@@ -89,9 +91,7 @@ export default class Clone extends BaseCommand {
   async run(): Promise<void> {
     const { flags } = await this.parse(Clone)
 
-    const config = await this.loadConfigOrFail()
-
-    // ── List clones ──────────────────────────────────────────────────────────
+    // ── List clones (no config file needed) ─────────────────────────────────
     if (flags.list) {
       const branches = await listBranches()
 
@@ -116,6 +116,8 @@ export default class Clone extends BaseCommand {
       }
       return
     }
+
+    const config = await this.loadConfigOrFail()
 
     // ── Delete clone ─────────────────────────────────────────────────────────
     if (flags.delete) {
@@ -296,6 +298,17 @@ export default class Clone extends BaseCommand {
     const configPath = resolve('supaforge.config.json')
     await writeFile(configPath, JSON.stringify(newConfig, null, 2) + '\n')
     this.log(`      ${ok('✓')} Config updated: ${configPath}`)
+
+    // Register clone in .supaforge/branches.json so `clone --list` works
+    const branchMeta: BranchMeta = {
+      name: localDbName,
+      dbName: localDbName,
+      dbUrl: localDbUrl,
+      createdFrom: envName,
+      createdAt: new Date().toISOString(),
+      schemaOnly: flags['schema-only'],
+    }
+    await addBranchToManifest(branchMeta)
 
     if (flags.json) {
       this.log(JSON.stringify({ snapshot: snapshot.manifest, config: newConfig }, null, 2))

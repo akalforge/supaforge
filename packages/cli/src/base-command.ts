@@ -4,12 +4,59 @@ import { Preflight } from './preflight.js'
 import { DEFAULT_MIGRATIONS_DIR } from './checks/migrations.js'
 import type { SupaForgeConfig, EnvironmentConfig } from './types/config.js'
 import type { PreflightReport } from './preflight.js'
+import { appendRunLog, redactArgs, type RunLogCheckSummary } from './run-log.js'
 
 /**
  * Shared base for all supaforge commands.
- * Extracts config loading, env resolution, and URL redaction.
+ * Extracts config loading, env resolution, URL redaction, and run logging.
  */
 export abstract class BaseCommand extends Command {
+
+  private _startTime = 0
+  private _logWritten = false
+  private _checkSummaries?: RunLogCheckSummary[]
+
+  /** Call after scan() to attach per-check metadata to the run log entry. */
+  protected setCheckSummaries(summaries: RunLogCheckSummary[]): void {
+    this._checkSummaries = summaries
+  }
+
+  override async init(): Promise<void> {
+    await super.init()
+    this._startTime = Date.now()
+  }
+
+  override async catch(err: Error): Promise<void> {
+    this._logWritten = true
+    await this._writeRunLog('error', err.message)
+    return super.catch(err)
+  }
+
+  override async finally(err: Error | undefined): Promise<void> {
+    if (!this._logWritten) {
+      await this._writeRunLog(err ? 'error' : 'success', err?.message)
+    }
+    return super.finally(err)
+  }
+
+  private async _writeRunLog(exitStatus: 'success' | 'error', error?: string): Promise<void> {
+    try {
+      const version = this.config?.version
+      const argv = this.argv ?? []
+      await appendRunLog({
+        timestamp: new Date().toISOString(),
+        command: this.id ?? 'unknown',
+        args: redactArgs(argv),
+        durationMs: Date.now() - this._startTime,
+        exitStatus,
+        error,
+        version,
+        checkSummaries: this._checkSummaries,
+      })
+    } catch {
+      // Never let logging failures surface to users
+    }
+  }
 
   /** Load config or exit with a helpful error. */
   protected async loadConfigOrFail(): Promise<SupaForgeConfig> {

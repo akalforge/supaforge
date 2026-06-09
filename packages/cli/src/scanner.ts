@@ -6,9 +6,14 @@ import { CHECK_NAMES } from './types/drift'
 import { computeScore, summarize } from './scoring'
 import { friendlyDbError } from './utils/error'
 
+export type ScanProgressEvent =
+  | { phase: 'check:start'; check: CheckName; index: number; total: number }
+  | { phase: 'check:done'; check: CheckName; index: number; total: number; status: CheckResult['status']; issueCount: number; durationMs: number }
+
 export interface ScanOptions {
   config: SupaForgeConfig
   checks?: CheckName[]
+  onProgress?: (event: ScanProgressEvent) => void
 }
 
 export async function scan(
@@ -27,10 +32,16 @@ export async function scan(
 
   const results: CheckResult[] = []
 
-  for (const name of checksToScan) {
+  for (let i = 0; i < checksToScan.length; i++) {
+    const name = checksToScan[i]
     const check = registry.get(name)
+    const total = checksToScan.length
+
+    options.onProgress?.({ phase: 'check:start', check: name, index: i, total })
+
     if (!check) {
       results.push({ check: name, status: 'skipped', issues: [], durationMs: 0 })
+      options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'skipped', issueCount: 0, durationMs: 0 })
       continue
     }
 
@@ -42,6 +53,7 @@ export async function scan(
       const durationMs = Math.round(performance.now() - start)
       const status = issues.length > 0 ? 'drifted' : 'clean'
       results.push({ check: name, status, issues, durationMs })
+      options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status, issueCount: issues.length, durationMs })
     } catch (err) {
       const durationMs = Math.round(performance.now() - start)
       results.push({
@@ -51,6 +63,7 @@ export async function scan(
         error: friendlyDbError(err, source.dbUrl),
         durationMs,
       })
+      options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'error', issueCount: 0, durationMs })
     }
 
     await bus?.emit('supaforge.check.after', { check: name, result: results.at(-1) })

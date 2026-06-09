@@ -97,3 +97,14 @@ export const MIGRATIONS_TABLE = `${MIGRATIONS_SCHEMA}.${MIGRATIONS_TABLE_NAME}`
 
 /** Maximum number of objects to list per Supabase Storage API call. */
 export const STORAGE_LIST_LIMIT = 1000
+
+// ─── Run Log ─────────────────────────────────────────────────────────────────
+
+/** Directory (relative to home) where the run log is stored. */
+export const RUN_LOG_DIR = '.supaforge'
+
+/** Filename for the run log. */
+export const RUN_LOG_FILE = 'run-log.jsonl'
+
+/** Maximum number of run log entries to keep. */
+export const RUN_LOG_MAX_ENTRIES = 500

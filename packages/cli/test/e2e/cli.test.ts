@@ -436,3 +436,154 @@ describe('CLI e2e: mcp', () => {
     expect(stdout).toContain('Claude Desktop')
   })
 })
+
+// ─── diff: schema error message ───────────────────────────────────────────────
+
+describe('CLI e2e: diff schema error', () => {
+  it('schema error message does not expose raw "Command failed:" string', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-diff-schema-error-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const config = {
+      environments: {
+        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
+        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
+      },
+      source: 'dev',
+      target: 'prod',
+    }
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
+    const { stdout } = await run(['diff', '--json', '--check=schema'], { cwd: tmpDir })
+    const parsed = JSON.parse(stdout)
+    const schemaCheck = parsed.checks.find((c: any) => c.check === 'schema')
+    expect(schemaCheck).toBeDefined()
+    if (schemaCheck.error) {
+      expect(schemaCheck.error).not.toContain('Command failed:')
+      expect(schemaCheck.error).not.toContain('/bin/node')
+      expect(schemaCheck.error).not.toContain('dbdiff.js diff')
+    }
+  })
+})
+
+// ─── clone --list ─────────────────────────────────────────────────────────────
+
+describe('CLI e2e: clone --list', () => {
+  it('--list reads from .supaforge/branches.json and shows existing clones', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-clone-list-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+
+    const supaforgeDir = join(tmpDir, '.supaforge')
+    await mkdir(supaforgeDir, { recursive: true })
+    const branches = {
+      branches: [{
+        name: 'my-local',
+        dbName: 'supaforge_branch_my_local',
+        dbUrl: 'postgres://postgres:postgres@localhost:5432/supaforge_branch_my_local',
+        createdFrom: 'production',
+        createdAt: new Date().toISOString(),
+        schemaOnly: false,
+      }]
+    }
+    await writeFile(join(supaforgeDir, 'branches.json'), JSON.stringify(branches))
+
+    const { stdout } = await run(['clone', '--list', '--json'], { cwd: tmpDir })
+    const parsed = JSON.parse(stdout)
+    expect(Array.isArray(parsed)).toBe(true)
+    expect(parsed).toHaveLength(1)
+    expect(parsed[0].name).toBe('my-local')
+    expect(parsed[0].createdFrom).toBe('production')
+  })
+
+  it('--list shows empty message when no branches.json exists', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-clone-list-empty-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const { stdout } = await run(['clone', '--list'], { cwd: tmpDir })
+    expect(stdout).toContain('No clones found')
+  })
+})
+
+// ─── report ───────────────────────────────────────────────────────────────────
+
+describe('CLI e2e: report', () => {
+  it('should show help', async () => {
+    const { stdout } = await run(['report', '--help'])
+    expect(stdout).toContain('run log')
+    expect(stdout).toContain('--last')
+    expect(stdout).toContain('--json')
+  })
+
+  it('should output valid JSON with --json when no log exists', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-report-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const { stdout } = await run(['report', '--json'], { env: { HOME: tmpDir } })
+    const parsed = JSON.parse(stdout)
+    expect(Array.isArray(parsed)).toBe(true)
+    expect(parsed).toHaveLength(0)
+  })
+
+  it('should show "No command history found" when log is empty', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-report-empty-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const { stdout } = await run(['report'], { env: { HOME: tmpDir } })
+    expect(stdout).toContain('No command history found')
+  })
+})
+
+// ─── migrate list ─────────────────────────────────────────────────────────────
+
+describe('CLI e2e: migrate list', () => {
+  it('should show help', async () => {
+    const { stdout } = await run(['migrate', 'list', '--help'])
+    expect(stdout).toContain('List local migration files')
+    expect(stdout).toContain('--offline')
+    expect(stdout).toContain('--env')
+    expect(stdout).toContain('--json')
+  })
+
+  it('should error without config file', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-migrate-list-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    try {
+      await run(['migrate', 'list'], { cwd: tmpDir })
+      expect.unreachable('Should have thrown')
+    } catch (err: any) {
+      expect(err.stderr || err.stdout || '').toContain('supaforge.config.json')
+    }
+  })
+
+  it('--offline shows local files without DB connection', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-migrate-list-offline-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const config = {
+      environments: { dev: { dbUrl: 'postgresql://invalid:5432/dev' } },
+      source: 'dev',
+    }
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
+    const migrationsDir = join(tmpDir, 'supabase', 'migrations')
+    await mkdir(migrationsDir, { recursive: true })
+    await writeFile(join(migrationsDir, '20240101000000_initial.sql'), '-- init')
+
+    const { stdout } = await run(['migrate', 'list', '--offline'], { cwd: tmpDir })
+    expect(stdout).toContain('20240101000000_initial.sql')
+  })
+
+  it('--offline --json returns array of migrations', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-migrate-list-json-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const config = {
+      environments: { dev: { dbUrl: 'postgresql://invalid:5432/dev' } },
+      source: 'dev',
+    }
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
+    const migrationsDir = join(tmpDir, 'supabase', 'migrations')
+    await mkdir(migrationsDir, { recursive: true })
+    await writeFile(join(migrationsDir, '20240101000000_init.sql'), '-- init')
+    await writeFile(join(migrationsDir, '20240102000000_users.sql'), '-- users')
+
+    const { stdout } = await run(['migrate', 'list', '--offline', '--json'], { cwd: tmpDir })
+    const parsed = JSON.parse(stdout)
+    expect(Array.isArray(parsed)).toBe(true)
+    expect(parsed).toHaveLength(2)
+    expect(parsed[0].version).toBe('20240101000000')
+    expect(parsed[1].version).toBe('20240102000000')
+  })
+})

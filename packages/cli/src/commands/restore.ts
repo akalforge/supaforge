@@ -9,6 +9,7 @@ import {
   getPublicTables,
 } from '../restore'
 import { warn, cmd } from '../ui.js'
+import { renderTip } from '../tips.js'
 
 export default class Restore extends BaseCommand {
   static override description = 'Restore a Supabase environment from a snapshot or migration history'
@@ -223,6 +224,6 @@ export default class Restore extends BaseCommand {
       this.exit(1)
     }
 
-    this.log('')
+    this.log(renderTip({ command: 'restore' }))
   }
 }

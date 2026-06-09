@@ -127,6 +127,8 @@ supaforge diff                            Summary: what's drifted?
 supaforge diff --detail                   Show detailed SQL diffs
 supaforge diff --apply                    Fix the drift
 supaforge diff --check=rls                Limit to a specific check
+supaforge diff --skip=storage             Skip a specific check
+supaforge diff --skip=auth --skip=vault   Skip multiple checks (repeatable)
 supaforge hukam                           Alias for diff 🙏
 
 supaforge snapshot                        Capture full 9-layer snapshot
@@ -202,12 +204,15 @@ Create `supaforge.config.json` in your project root:
   "checks": {
     "data": {
       "tables": ["plans", "feature_flags", "pricing_tiers"]
-    }
+    },
+    "exclude": ["storage", "vault", "auth", "edge-functions", "realtime"]
   }
 }
 ```
 
 Supabase internal schemas (`auth`, `storage`, `realtime`, `vault`, etc.) are ignored by default.
+
+`checks.exclude` permanently skips the listed checks on every `diff`/`hukam`/`sync` run — useful when diffing against a clone where checks like `storage`, `auth`, `edge-functions`, `vault`, and `realtime` have no local equivalent and produce only noise. The `--skip` CLI flag does the same on a one-off basis; both are merged at runtime.
 
 ## Extending with Hooks
 

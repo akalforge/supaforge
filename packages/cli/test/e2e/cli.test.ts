@@ -77,11 +77,87 @@ describe('CLI e2e: diff', () => {
     expect(rlsCoverage).toBeDefined()
   })
 
-  it('should show --source and --target flags in help', async () => {
+  it('should show --source, --target, and --skip flags in help', async () => {
     const { stdout } = await run(['diff', '--help'])
     expect(stdout).toContain('--source')
     expect(stdout).toContain('--target')
     expect(stdout).toContain('--include-files')
+    expect(stdout).toContain('--skip')
+  })
+
+  it('should reject invalid --skip value', async () => {
+    try {
+      await run(['diff', '--skip=bogus'])
+      expect.unreachable('Should have thrown')
+    } catch (err: any) {
+      const output = (err.stderr || '') + (err.stdout || '')
+      expect(output).toMatch(/Expected.*bogus|must be one of/i)
+    }
+  })
+
+  it('should exclude a skipped check from JSON output', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-diff-skip-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const config = {
+      environments: {
+        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
+        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
+      },
+      source: 'dev',
+      target: 'prod',
+    }
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
+
+    const { stdout } = await run(['diff', '--json', '--skip=storage', '--skip=vault'], { cwd: tmpDir })
+    const parsed = JSON.parse(stdout)
+    const checkNames: string[] = parsed.checks.map((c: any) => c.check)
+    expect(checkNames).not.toContain('storage')
+    expect(checkNames).not.toContain('vault')
+    expect(checkNames).toContain('rls')
+  })
+
+  it('should exclude checks listed in config checks.exclude', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-diff-config-exclude-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const config = {
+      environments: {
+        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
+        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
+      },
+      source: 'dev',
+      target: 'prod',
+      checks: { exclude: ['auth', 'edge-functions', 'realtime'] },
+    }
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
+
+    const { stdout } = await run(['diff', '--json'], { cwd: tmpDir })
+    const parsed = JSON.parse(stdout)
+    const checkNames: string[] = parsed.checks.map((c: any) => c.check)
+    expect(checkNames).not.toContain('auth')
+    expect(checkNames).not.toContain('edge-functions')
+    expect(checkNames).not.toContain('realtime')
+  })
+
+  it('should merge CLI --skip with config checks.exclude', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-diff-skip-merge-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const config = {
+      environments: {
+        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
+        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
+      },
+      source: 'dev',
+      target: 'prod',
+      checks: { exclude: ['vault'] },
+    }
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
+
+    const { stdout } = await run(['diff', '--json', '--skip=storage'], { cwd: tmpDir })
+    const parsed = JSON.parse(stdout)
+    const checkNames: string[] = parsed.checks.map((c: any) => c.check)
+    expect(checkNames).not.toContain('vault')    // from config
+    expect(checkNames).not.toContain('storage')  // from --skip
+    expect(checkNames).toContain('rls')
   })
 
   it('should output valid JSON with --json flag', async () => {
@@ -147,6 +223,7 @@ describe('CLI e2e: hukam', () => {
     expect(stdout).toContain('--apply')
     expect(stdout).toContain('--detail')
     expect(stdout).toContain('--check')
+    expect(stdout).toContain('--skip')
   })
 })
 
@@ -269,6 +346,7 @@ describe('CLI e2e: sync', () => {
   it('should accept the same flags as diff', async () => {
     const { stdout } = await run(['sync', '--help'])
     expect(stdout).toContain('--check')
+    expect(stdout).toContain('--skip')
     expect(stdout).toContain('--source')
     expect(stdout).toContain('--target')
     expect(stdout).toContain('--json')

@@ -60,6 +60,8 @@ supaforge diff --detail                 Show detailed SQL diffs
 supaforge diff --apply                  Apply SQL + API fixes to the target environment
 supaforge diff --check=rls              Limit to a specific check
 supaforge diff --check=rls --apply      Fix only one check
+supaforge diff --skip=storage           Skip a specific check
+supaforge diff --skip=auth --skip=vault Skip multiple checks (flag is repeatable)
 supaforge diff --include-files          Include file-level storage drift detection
 supaforge diff --json                   Output as JSON
 supaforge hukam                         Alias for diff 🙏
@@ -156,6 +158,7 @@ cp .env.example .env
 | `apiUrl` | No | Base URL for self-hosted Supabase API gateway. Use instead of `projectRef` for local/self-hosted. |
 | `source` / `target` | Yes | Environment names to compare. Source = truth, target = to be synced. |
 | `checks.data.tables` | No | Tables to include in row-level data drift detection. |
+| `checks.exclude` | No | Checks to always skip (e.g. `["storage","auth","vault"]`). Useful for clone environments where these checks produce noise. Can also be overridden per-run with `--skip`. |
 
 Sensitive values (`dbUrl`, `accessToken`) support `$VAR` and `${VAR}` syntax — expanded from environment variables at runtime. Store actual credentials in `.env` (already in `.gitignore`).
 
@@ -217,9 +220,31 @@ supaforge diff
   },
   "source": "dev",
   "target": "prod",
-  "checks": { "data": { "tables": ["plans", "feature_flags"] } }
+  "checks": {
+    "data": { "tables": ["plans", "feature_flags"] }
+  }
 }
 ```
+
+### Diffing a Clone (Suppressing Expected Noise)
+
+After `supaforge clone`, the local copy has no Supabase-managed services (`storage`, `auth`, `edge-functions`, `vault`, `realtime`). Running `diff` against it will always report drift on those checks. Use `--skip` to suppress them:
+
+```bash
+supaforge diff --skip=storage --skip=auth --skip=edge-functions --skip=vault --skip=realtime
+```
+
+Or lock the exclusions in config so you never have to repeat them:
+
+```json
+{
+  "checks": {
+    "exclude": ["storage", "auth", "edge-functions", "vault", "realtime"]
+  }
+}
+```
+
+Both mechanisms merge — `--skip` on the CLI is unioned with `checks.exclude` from config.
 
 ### Single-DB: Snapshot, Clone, Restore (Local ↔ Remote)
 

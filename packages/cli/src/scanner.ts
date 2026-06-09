@@ -12,7 +12,10 @@ export type ScanProgressEvent =
 
 export interface ScanOptions {
   config: SupaForgeConfig
+  /** Whitelist: only run these checks. Defaults to all checks. */
   checks?: CheckName[]
+  /** Blacklist: skip these checks (CLI --skip flag). Merged with config.checks.exclude. */
+  skip?: CheckName[]
   onProgress?: (event: ScanProgressEvent) => void
 }
 
@@ -22,7 +25,9 @@ export async function scan(
   bus?: HookBus,
 ): Promise<ScanResult> {
   const { config } = options
-  const checksToScan = options.checks ?? [...CHECK_NAMES]
+  const configExclude = (config.checks?.exclude ?? []) as CheckName[]
+  const skipSet = new Set([...(options.skip ?? []), ...configExclude])
+  const checksToScan = (options.checks ?? [...CHECK_NAMES]).filter(n => !skipSet.has(n))
 
   const source = config.environments[config.source!]
   const target = config.environments[config.target!]

@@ -27,6 +27,8 @@ export default class Diff extends BaseCommand {
     '<%= config.bin %> diff --check=rls',
     '<%= config.bin %> diff --check=rls --apply',
     '<%= config.bin %> diff --source=staging --target=production',
+    '<%= config.bin %> diff --skip=storage --skip=vault',
+    '<%= config.bin %> diff --skip=auth --skip=edge-functions --skip=realtime',
   ]
 
   static override flags = {
@@ -34,6 +36,12 @@ export default class Diff extends BaseCommand {
       char: 'l',
       description: 'Limit to a specific check',
       options: [...CHECK_NAMES],
+    }),
+    skip: Flags.string({
+      char: 'x',
+      description: 'Skip a specific check (repeatable). Also configurable via checks.exclude in supaforge.config.json.',
+      options: [...CHECK_NAMES],
+      multiple: true,
     }),
     detail: Flags.boolean({
       description: 'Show detailed SQL diffs (default: summary)',
@@ -60,6 +68,7 @@ export default class Diff extends BaseCommand {
 
     const registry = createDefaultRegistry({ includeFiles: flags['include-files'] })
     const checks = flags.check ? [flags.check as CheckName] : undefined
+    const skip = flags.skip?.length ? (flags.skip as CheckName[]) : undefined
 
     // ── Preflight: verify both databases are reachable ───────────────────────
     if (!flags.json) {
@@ -94,7 +103,7 @@ export default class Diff extends BaseCommand {
     // ── Apply mode (was: promote) ────────────────────────────────────────────
     if (flags.apply) {
       const onProgress = makeProgress()
-      const scanResult = await scan(registry, { config, checks, onProgress })
+      const scanResult = await scan(registry, { config, checks, skip, onProgress })
       this.setCheckSummaries(scanResult.checks.map(c => ({
         check: c.check,
         status: c.status,
@@ -148,7 +157,7 @@ export default class Diff extends BaseCommand {
 
     // ── Scan mode (summary or detail) ────────────────────────────────────────
     const onProgress = makeProgress()
-    const result = await scan(registry, { config, checks, onProgress })
+    const result = await scan(registry, { config, checks, skip, onProgress })
     this.setCheckSummaries(result.checks.map(c => ({
       check: c.check,
       status: c.status,

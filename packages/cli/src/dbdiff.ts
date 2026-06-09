@@ -117,11 +117,25 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
         '@dbdiff/cli is not installed. Install it with: npm install @dbdiff/cli',
       )
     }
-    // Use stderr (actual DB error) when available; fall through friendlyDbError
-    // to translate raw pg errors into actionable messages and strip the raw
-    // "Command failed: ..." exec wrapper that leaks connection URLs.
-    const dbErr = stderr || message
-    throw new Error(friendlyDbError(dbErr, options.sourceUrl))
+
+    // @dbdiff/cli exits 1 when differences are found (standard diff convention).
+    // The output file is written before exit — read it if it exists.
+    const fileExists = await access(outputFile).then(() => true, () => false)
+    if (fileExists) {
+      const output = await readFile(outputFile, 'utf8')
+      return parseDbDiffOutput(output)
+    }
+
+    // No output file written → genuine error (connection refused, timeout, etc.)
+    // Extract the real error from stderr/stdout, stripping the raw
+    // "Command failed: /path/to/node /path/to/dbdiff.js diff ..." prefix
+    // which leaks connection URLs and is unhelpful.
+    const stdout = String((err as Record<string, unknown>)?.stdout ?? '').trim()
+    const realError = stderr || stdout || ''
+    const cleanMessage = realError
+      ? realError
+      : message.replace(/^Command failed:[^\n]*/m, '').trim() || 'dbdiff failed with no error output'
+    throw new Error(friendlyDbError(cleanMessage, options.sourceUrl))
   } finally {
     await unlink(outputFile).catch(() => {})
   }

@@ -2,11 +2,13 @@ import { Flags } from '@oclif/core'
 import { BaseCommand } from '../base-command.js'
 import { createDefaultRegistry } from '../checks/index.js'
 import { scan } from '../scanner.js'
+import type { ScanProgressEvent } from '../scanner.js'
 import { renderSummary, renderDetailed } from '../render.js'
 import { promote } from '../promote.js'
 import type { CheckName } from '../types/drift.js'
-import { CHECK_NAMES } from '../types/drift.js'
+import { CHECK_NAMES, CHECK_META } from '../types/drift.js'
 import { ok, warn, dim, cmd } from '../ui.js'
+import { sanitizeForReport } from '../utils/sanitize.js'
 
 /**
  * Unified drift detection & resolution command.
@@ -69,10 +71,37 @@ export default class Diff extends BaseCommand {
       await this.runPreflight(pre, 'Diff')
     }
 
+    /** Build a progress callback for scan calls. Only active when not --json. */
+    const makeProgress = (): ((event: ScanProgressEvent) => void) | undefined => {
+      if (flags.json) return undefined
+      process.stdout.write('\n  Scanning...\n')
+      return (event: ScanProgressEvent) => {
+        const meta = CHECK_META[event.check]
+        const label = meta?.label ?? event.check
+        const idx = `[${event.index + 1}/${event.total}]`
+        if (event.phase === 'check:start') {
+          process.stdout.write(`  ▶ ${idx} ${label}...\n`)
+        } else {
+          const dur = `${(event.durationMs / 1000).toFixed(1)}s`
+          const issues = event.status === 'error' ? warn('error')
+            : event.status === 'skipped' ? dim('skipped')
+            : `${event.issueCount} issues`
+          process.stdout.write(`  ${ok('✓')} ${idx} ${label.padEnd(24)} ${issues}  (${dur})\n`)
+        }
+      }
+    }
+
     // ── Apply mode (was: promote) ────────────────────────────────────────────
     if (flags.apply) {
-      this.log('\nScanning for drift...\n')
-      const scanResult = await scan(registry, { config, checks })
+      const onProgress = makeProgress()
+      const scanResult = await scan(registry, { config, checks, onProgress })
+      this.setCheckSummaries(scanResult.checks.map(c => ({
+        check: c.check,
+        status: c.status,
+        issueCount: c.issues.length,
+        durationMs: c.durationMs,
+        ...(c.error ? { error: sanitizeForReport(c.error) } : {}),
+      })))
 
       if (scanResult.summary.total === 0) {
         this.log(`${ok('No drift detected.')} Nothing to apply. \u2713`)
@@ -118,7 +147,15 @@ export default class Diff extends BaseCommand {
     }
 
     // ── Scan mode (summary or detail) ────────────────────────────────────────
-    const result = await scan(registry, { config, checks })
+    const onProgress = makeProgress()
+    const result = await scan(registry, { config, checks, onProgress })
+    this.setCheckSummaries(result.checks.map(c => ({
+      check: c.check,
+      status: c.status,
+      issueCount: c.issues.length,
+      durationMs: c.durationMs,
+      ...(c.error ? { error: sanitizeForReport(c.error) } : {}),
+    })))
 
     if (flags.json) {
       this.log(JSON.stringify(result, null, 2))

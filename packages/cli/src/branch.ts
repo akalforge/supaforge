@@ -279,6 +279,22 @@ export async function listBranches(cwd = process.cwd()): Promise<BranchMeta[]> {
   return manifest.branches
 }
 
+/**
+ * Add a branch entry to the manifest.
+ * Used by clone.ts which manages its own DB creation pipeline.
+ * Overwrites an existing entry with the same name to avoid duplicates.
+ */
+export async function addBranchToManifest(meta: BranchMeta, cwd = process.cwd()): Promise<void> {
+  const manifest = await loadManifest(cwd)
+  const existing = manifest.branches.findIndex(b => b.name === meta.name)
+  if (existing >= 0) {
+    manifest.branches[existing] = meta
+  } else {
+    manifest.branches.push(meta)
+  }
+  await saveManifest(manifest, cwd)
+}
+
 /** Delete a branch: drop the database and remove from manifest. */
 export async function deleteBranch(
   name: string,

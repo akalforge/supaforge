@@ -94,6 +94,15 @@ describe('SchemaCheck', () => {
     await expect(check.scan(mockContext())).rejects.toThrow('Connection refused')
   })
 
+  it('reports error cleanly when dbdiff cannot connect (no output file)', async () => {
+    const runFn: RunDbDiffFn = async () => {
+      throw new Error('dbdiff failed with no error output')
+    }
+    const check = new SchemaCheck(runFn, noTablesQuery)
+    await expect(check.scan(mockContext())).rejects.toThrow('dbdiff failed')
+    await expect(check.scan(mockContext())).rejects.not.toThrow('Command failed:')
+  })
+
   it('uses DEFAULT_IGNORE_SCHEMAS when config has no ignoreSchemas', async () => {
     let capturedOptions: unknown
     const runFn: RunDbDiffFn = async (opts) => {

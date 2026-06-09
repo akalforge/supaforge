@@ -10,6 +10,8 @@ export interface EnvironmentConfig {
 export interface ChecksConfig {
   data?: { tables: string[] }
   migrations?: { dir?: string }
+  /** Checks to always skip, regardless of CLI flags. Useful in config for clone environments. */
+  exclude?: string[]
 }
 
 export interface SupaForgeConfig {

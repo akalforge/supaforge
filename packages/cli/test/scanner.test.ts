@@ -127,3 +127,88 @@ describe('scan', () => {
     expect(result.timestamp).toBeTruthy()
   })
 })
+
+describe('scan — skip option', () => {
+  it('skips a check listed in the skip option', async () => {
+    const registry = new CheckRegistry()
+    registry.register(new MockLayer('rls'))
+    registry.register(new MockLayer('cron'))
+
+    const result = await scan(registry, { config, skip: ['cron'] })
+
+    const names = result.checks.map(c => c.check)
+    expect(names).not.toContain('cron')
+    expect(names).toContain('rls')
+  })
+
+  it('skip takes precedence over an explicit checks include', async () => {
+    const registry = new CheckRegistry()
+    registry.register(new MockLayer('rls'))
+
+    // ask for rls but also skip rls → nothing runs
+    const result = await scan(registry, { config, checks: ['rls'], skip: ['rls'] })
+
+    expect(result.checks).toHaveLength(0)
+  })
+
+  it('skips multiple checks when skip contains several names', async () => {
+    const registry = new CheckRegistry()
+    registry.register(new MockLayer('rls'))
+    registry.register(new MockLayer('storage'))
+    registry.register(new MockLayer('vault'))
+
+    const result = await scan(registry, { config, skip: ['storage', 'vault'] })
+
+    const names = result.checks.map(c => c.check)
+    expect(names).toContain('rls')
+    expect(names).not.toContain('storage')
+    expect(names).not.toContain('vault')
+  })
+
+  it('respects config.checks.exclude as a permanent skip list', async () => {
+    const configWithExclude: SupaForgeConfig = {
+      ...config,
+      checks: { exclude: ['auth', 'edge-functions', 'realtime'] },
+    }
+    const registry = new CheckRegistry()
+    registry.register(new MockLayer('auth'))
+    registry.register(new MockLayer('rls'))
+
+    const result = await scan(registry, { config: configWithExclude })
+
+    const names = result.checks.map(c => c.check)
+    expect(names).not.toContain('auth')
+    expect(names).not.toContain('edge-functions')
+    expect(names).not.toContain('realtime')
+    expect(names).toContain('rls')
+  })
+
+  it('merges CLI skip and config.checks.exclude', async () => {
+    const configWithExclude: SupaForgeConfig = {
+      ...config,
+      checks: { exclude: ['vault'] },
+    }
+    const registry = new CheckRegistry()
+    registry.register(new MockLayer('vault'))
+    registry.register(new MockLayer('storage'))
+    registry.register(new MockLayer('rls'))
+
+    const result = await scan(registry, { config: configWithExclude, skip: ['storage'] })
+
+    const names = result.checks.map(c => c.check)
+    expect(names).not.toContain('vault')    // from config.checks.exclude
+    expect(names).not.toContain('storage')  // from CLI skip
+    expect(names).toContain('rls')
+  })
+
+  it('returns empty checks array when all checks are skipped', async () => {
+    const registry = new CheckRegistry()
+    registry.register(new MockLayer('rls'))
+
+    const result = await scan(registry, { config, checks: ['rls'], skip: ['rls'] })
+
+    expect(result.checks).toHaveLength(0)
+    expect(result.summary.total).toBe(0)
+    expect(result.score).toBe(100)
+  })
+})

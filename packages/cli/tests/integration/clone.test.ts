@@ -13,7 +13,7 @@
  * skipIfNoContainers so it no-ops when no test database is configured.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import pg from 'pg'

@@ -54,8 +54,8 @@ describe('constants', () => {
   })
 
   describe('timeouts', () => {
-    it('DBDIFF_EXEC_TIMEOUT_MS is 2 minutes', () => {
-      expect(DBDIFF_EXEC_TIMEOUT_MS).toBe(120_000)
+    it('DBDIFF_EXEC_TIMEOUT_MS is 5 minutes', () => {
+      expect(DBDIFF_EXEC_TIMEOUT_MS).toBe(300_000)
     })
 
     it('PG_PIPELINE_TIMEOUT_MS is 30 minutes', () => {

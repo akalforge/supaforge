@@ -6,10 +6,11 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { execFile } from 'node:child_process'
-import { writeFile, unlink, mkdir } from 'node:fs/promises'
+import { writeFile, unlink, mkdir, rm, access } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
+import pg from 'pg'
 
 const exec = promisify(execFile)
 // test/e2e/ → packages/cli/
@@ -257,6 +258,9 @@ describe('CLI e2e: snapshot', () => {
     expect(stdout).toContain('--migration')
     expect(stdout).toContain('--list')
     expect(stdout).toContain('--prune')
+    // snapshot is now dry-run by default and documents --apply
+    expect(stdout).toContain('--apply')
+    expect(stdout).toContain('dry-run')
   })
 
   it('should show --env and --description flags in help', async () => {
@@ -686,5 +690,115 @@ describe('CLI e2e: migrate list', () => {
     expect(parsed).toHaveLength(2)
     expect(parsed[0].version).toBe('20240101000000')
     expect(parsed[1].version).toBe('20240102000000')
+  })
+})
+
+// ─── DB-backed CLI behaviour (gated on a configured test database) ────────────
+//
+// These exercise full command wiring (preflight → dry-run gate → render) and so
+// need a reachable Postgres. They are skipped unless SUPAFORGE_TEST_SOURCE_URL
+// (and, for clone discovery, SUPAFORGE_TEST_TARGET_URL) are set — matching the
+// integration-suite convention.
+
+const DB_SOURCE = process.env.SUPAFORGE_TEST_SOURCE_URL
+const DB_TARGET = process.env.SUPAFORGE_TEST_TARGET_URL
+const skipNoDb = !DB_SOURCE
+
+function replaceDbName(url: string, dbName: string): string {
+  const u = new URL(url)
+  u.pathname = `/${dbName}`
+  return u.toString()
+}
+
+describe('CLI e2e: snapshot dry-run gate', () => {
+  let tmpDir: string
+
+  beforeAll(async () => {
+    tmpDir = join(tmpdir(), `supaforge-e2e-snap-apply-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    if (!skipNoDb) {
+      const config = {
+        environments: {
+          source: { dbUrl: DB_SOURCE },
+          target: { dbUrl: DB_SOURCE },
+        },
+        source: 'source',
+        target: 'source',
+        ignoreSchemas: ['information_schema', 'pg_catalog', 'pg_toast'],
+      }
+      await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config, null, 2))
+    }
+  })
+
+  afterAll(async () => {
+    await rm(tmpDir, { recursive: true, force: true })
+  })
+
+  it.skipIf(skipNoDb)('previews without writing a snapshot when --apply is omitted', async () => {
+    const { stdout } = await run(['snapshot'], { cwd: tmpDir })
+    expect(stdout).toContain('dry-run')
+    expect(stdout).toContain('Add --apply')
+    // No snapshot directory should have been created.
+    const exists = await access(join(tmpDir, '.supaforge', 'snapshots')).then(() => true, () => false)
+    expect(exists).toBe(false)
+  })
+
+  it.skipIf(skipNoDb)('captures a snapshot only when --apply is given', async () => {
+    const { stdout } = await run(['snapshot', '--apply'], { cwd: tmpDir })
+    expect(stdout).toContain('Snapshot saved to')
+    const exists = await access(join(tmpDir, '.supaforge', 'snapshots')).then(() => true, () => false)
+    expect(exists).toBe(true)
+  })
+})
+
+describe('CLI e2e: clone --list discovery', () => {
+  let tmpDir: string
+  const discoveredDb = `sf_e2e_disc_${Date.now()}`
+  const skipDiscovery = skipNoDb || !DB_TARGET
+
+  beforeAll(async () => {
+    tmpDir = join(tmpdir(), `supaforge-e2e-clone-disc-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    if (!skipDiscovery) {
+      // Create a clone database that the manifest does NOT know about.
+      const admin = new pg.Client({ connectionString: replaceDbName(DB_TARGET!, 'postgres') })
+      await admin.connect()
+      await admin.query(`DROP DATABASE IF EXISTS "${discoveredDb}"`)
+      await admin.query(`CREATE DATABASE "${discoveredDb}"`)
+      await admin.end()
+
+      // Config registers a "local" environment pointing at that database.
+      const config = {
+        environments: {
+          remote: { dbUrl: DB_SOURCE },
+          local: { dbUrl: replaceDbName(DB_TARGET!, discoveredDb) },
+        },
+        source: 'local',
+        target: 'remote',
+      }
+      await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config, null, 2))
+    }
+  })
+
+  afterAll(async () => {
+    await rm(tmpDir, { recursive: true, force: true })
+    if (!skipDiscovery) {
+      const admin = new pg.Client({ connectionString: replaceDbName(DB_TARGET!, 'postgres') })
+      await admin.connect()
+      await admin.query(
+        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
+        [discoveredDb],
+      )
+      await admin.query(`DROP DATABASE IF EXISTS "${discoveredDb}"`)
+      await admin.end()
+    }
+  })
+
+  it.skipIf(skipDiscovery)('surfaces an existing clone database missing from the manifest', async () => {
+    const { stdout } = await run(['clone', '--list', '--json'], { cwd: tmpDir })
+    const parsed = JSON.parse(stdout)
+    const found = parsed.find((c: { dbName: string }) => c.dbName === discoveredDb)
+    expect(found).toBeDefined()
+    expect(found.discovered).toBe(true)
   })
 })

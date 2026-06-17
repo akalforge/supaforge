@@ -6,6 +6,7 @@ import {
   branchDbName,
   replaceDbName,
   loadManifest,
+  reconcileClones,
   BRANCH_DB_PREFIX,
   type BranchesManifest,
 } from '../src/branch.js'
@@ -97,5 +98,50 @@ describe('loadManifest', () => {
     const manifest = await loadManifest(tempDir)
     expect(manifest.branches).toHaveLength(1)
     expect(manifest.branches[0].name).toBe('feature-x')
+  })
+})
+
+describe('reconcileClones', () => {
+  let tempDir: string
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'supaforge-test-'))
+  })
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true })
+  })
+
+  it('returns the manifest unchanged when no server URL is provided', async () => {
+    const { writeFile, mkdir } = await import('node:fs/promises')
+    const dir = join(tempDir, '.supaforge')
+    await mkdir(dir, { recursive: true })
+    const data: BranchesManifest = {
+      branches: [{
+        name: 'my-local',
+        dbName: 'supaforge_local',
+        dbUrl: 'postgres://postgres:postgres@localhost:5432/supaforge_local',
+        createdFrom: 'production',
+        createdAt: '2025-01-01T00:00:00.000Z',
+        schemaOnly: false,
+      }],
+    }
+    await writeFile(join(dir, 'branches.json'), JSON.stringify(data))
+
+    const clones = await reconcileClones({ cwd: tempDir })
+    expect(clones).toHaveLength(1)
+    expect(clones[0].name).toBe('my-local')
+    expect(clones[0].missing).toBeUndefined()
+    expect(clones[0].discovered).toBeUndefined()
+  })
+
+  it('falls back to the manifest when the server is unreachable', async () => {
+    const clones = await reconcileClones({
+      // Unroutable port → connection fails fast → manifest fallback (empty here)
+      localServerUrl: 'postgres://postgres:postgres@127.0.0.1:1/postgres',
+      configuredLocalDb: 'supaforge_local',
+      cwd: tempDir,
+    })
+    expect(clones).toEqual([])
   })
 })

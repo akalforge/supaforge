@@ -8,6 +8,7 @@ import type { EnvironmentConfig, SupaForgeConfig, SnapshotManifest, SnapshotLaye
 import { DEFAULT_IGNORE_SCHEMAS, RELATION_NOT_FOUND } from './defaults'
 import { introspectSchema } from './schema-introspect'
 import { errMsg } from './utils/error'
+import { ok, warn, dim } from './ui'
 import { SUPABASE_MGMT_API, SUPAFORGE_DIR, SNAPSHOTS_SUBDIR } from './constants'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
@@ -103,6 +104,31 @@ export async function captureSnapshot(options: SnapshotOptions): Promise<Snapsho
   await writeFile(join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2) + '\n')
 
   return { manifest, dir, timestamp }
+}
+
+// ─── Layer Rendering ─────────────────────────────────────────────────────────
+
+/**
+ * Format a snapshot manifest's layers into per-line status strings.
+ *
+ * Shared by `supaforge snapshot` and `supaforge clone` so both surface exactly
+ * what was captured / skipped / errored — instead of a bare "N layers" count.
+ * Lines are returned without leading indentation; callers add their own.
+ */
+export function formatSnapshotLayers(manifest: SnapshotManifest): string[] {
+  const layers = manifest.layers as Record<string, SnapshotLayerInfo>
+  const lines: string[] = []
+  for (const [name, info] of Object.entries(layers)) {
+    if (info.captured) {
+      lines.push(`${ok('✓')} ${name.padEnd(16)} ${info.itemCount} item(s)`)
+    } else if (info.error) {
+      lines.push(`${warn('✗')} ${name.padEnd(16)} ${warn(`error: ${info.error}`)}`)
+    } else {
+      const skipSuffix = info.skipReason ? ` — ${info.skipReason}` : ''
+      lines.push(`${dim('○')} ${name.padEnd(16)} ${dim(`skipped${skipSuffix}`)}`)
+    }
+  }
+  return lines
 }
 
 // ─── Layer Capture Functions ─────────────────────────────────────────────────

@@ -22,8 +22,15 @@ export const SUPABASE_MGMT_API = 'https://api.supabase.com/v1/projects'
 
 // ─── Timeouts ────────────────────────────────────────────────────────────────
 
-/** Timeout for @dbdiff/cli execution (2 minutes). */
-export const DBDIFF_EXEC_TIMEOUT_MS = 120_000
+/**
+ * Default timeout for @dbdiff/cli execution (5 minutes).
+ *
+ * Large Supabase schemas can take several minutes to diff. The previous
+ * 2-minute limit silently killed the process mid-run, surfacing dbdiff's
+ * last progress log line as a bogus "error". Override at runtime with the
+ * SUPAFORGE_DBDIFF_TIMEOUT environment variable (value in seconds).
+ */
+export const DBDIFF_EXEC_TIMEOUT_MS = 300_000
 
 /** Max stdout/stderr buffer for @dbdiff/cli (10 MB). */
 export const DBDIFF_MAX_BUFFER = 10 * 1024 * 1024

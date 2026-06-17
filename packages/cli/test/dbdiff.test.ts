@@ -1,5 +1,53 @@
-import { describe, it, expect } from 'vitest'
-import { parseDbDiffOutput, sqlToIssues, resolveDbDiffBin, classifyStatement, summariseStatement } from '../src/dbdiff.js'
+import { describe, it, expect, afterEach } from 'vitest'
+import {
+  parseDbDiffOutput,
+  sqlToIssues,
+  resolveDbDiffBin,
+  resolveDbDiffTimeoutMs,
+  stripDbDiffNoise,
+  classifyStatement,
+  summariseStatement,
+} from '../src/dbdiff.js'
+import { DBDIFF_EXEC_TIMEOUT_MS } from '../src/constants.js'
+
+describe('resolveDbDiffTimeoutMs', () => {
+  afterEach(() => {
+    delete process.env.SUPAFORGE_DBDIFF_TIMEOUT
+  })
+
+  it('defaults to DBDIFF_EXEC_TIMEOUT_MS when unset', () => {
+    expect(resolveDbDiffTimeoutMs()).toBe(DBDIFF_EXEC_TIMEOUT_MS)
+  })
+
+  it('honours SUPAFORGE_DBDIFF_TIMEOUT (seconds → ms)', () => {
+    process.env.SUPAFORGE_DBDIFF_TIMEOUT = '600'
+    expect(resolveDbDiffTimeoutMs()).toBe(600_000)
+  })
+
+  it('ignores non-numeric / non-positive overrides', () => {
+    process.env.SUPAFORGE_DBDIFF_TIMEOUT = 'abc'
+    expect(resolveDbDiffTimeoutMs()).toBe(DBDIFF_EXEC_TIMEOUT_MS)
+    process.env.SUPAFORGE_DBDIFF_TIMEOUT = '0'
+    expect(resolveDbDiffTimeoutMs()).toBe(DBDIFF_EXEC_TIMEOUT_MS)
+  })
+})
+
+describe('stripDbDiffNoise', () => {
+  it('drops dbdiff info/progress lines like "ℹ Now generating UP migration"', () => {
+    const input = ['ℹ Now generating UP migration', 'ℹ Connecting to server'].join('\n')
+    expect(stripDbDiffNoise(input)).toBe('')
+  })
+
+  it('keeps genuine error lines', () => {
+    const input = ['ℹ Now generating UP migration', 'error: connection refused'].join('\n')
+    expect(stripDbDiffNoise(input)).toBe('error: connection refused')
+  })
+
+  it('drops spinner frames and blank lines', () => {
+    const input = ['⠋ working', '', '✔ done', 'real failure here'].join('\n')
+    expect(stripDbDiffNoise(input)).toBe('real failure here')
+  })
+})
 
 describe('resolveDbDiffBin', () => {
   it('resolves to local binary when @dbdiff/cli is installed', () => {

@@ -53,6 +53,41 @@ export function resolveDbDiffBin(): { command: string; prefixArgs: string[] } {
  *
  * When @dbdiff/cli is not installed, throws with a clear message.
  */
+/**
+ * Resolve the effective dbdiff timeout (ms).
+ *
+ * Honours the SUPAFORGE_DBDIFF_TIMEOUT environment variable (in seconds) so
+ * users with very large schemas can raise the ceiling without a code change.
+ * Falls back to DBDIFF_EXEC_TIMEOUT_MS.
+ */
+export function resolveDbDiffTimeoutMs(): number {
+  const raw = process.env.SUPAFORGE_DBDIFF_TIMEOUT
+  if (raw) {
+    const secs = Number(raw)
+    if (Number.isFinite(secs) && secs > 0) return Math.round(secs * 1000)
+  }
+  return DBDIFF_EXEC_TIMEOUT_MS
+}
+
+/**
+ * Strip @dbdiff/cli progress / spinner noise from captured output.
+ *
+ * dbdiff logs informational lines such as "ℹ Now generating UP migration"
+ * to stdout while it works. When the process is killed (e.g. on timeout)
+ * that last progress line is the only thing in the buffer — surfacing it as
+ * the "error" is misleading. Drop any line that begins with a known
+ * info/spinner glyph and keep only genuine error-looking content.
+ */
+const DBDIFF_NOISE_LINE = /^\s*[ℹ✔✓⚠⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]/u
+
+export function stripDbDiffNoise(text: string): string {
+  return text
+    .split('\n')
+    .filter(line => line.trim() !== '' && !DBDIFF_NOISE_LINE.test(line))
+    .join('\n')
+    .trim()
+}
+
 export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
   const { command, prefixArgs } = resolveDbDiffBin()
   const outputFile = join(tmpdir(), `supaforge-dbdiff-${Date.now()}-${Math.random().toString(36).slice(2)}.sql`)
@@ -88,9 +123,11 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
     }
   }
 
+  const timeoutMs = resolveDbDiffTimeoutMs()
+
   try {
     await execFileAsync(command, args, {
-      timeout: DBDIFF_EXEC_TIMEOUT_MS,
+      timeout: timeoutMs,
       maxBuffer: DBDIFF_MAX_BUFFER,
     })
 
@@ -103,8 +140,10 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
     const output = await readFile(outputFile, 'utf8')
     return parseDbDiffOutput(output)
   } catch (err: unknown) {
+    const errObj = (err ?? {}) as Record<string, unknown>
     const message = errMsg(err)
-    const stderr = String((err as Record<string, unknown>)?.stderr ?? '').trim()
+    const stderr = String(errObj.stderr ?? '').trim()
+    const stdout = String(errObj.stdout ?? '').trim()
     const combined = `${message} ${stderr}`
     if (
       combined.includes('ENOENT') ||
@@ -119,19 +158,40 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
     }
 
     // @dbdiff/cli exits 1 when differences are found (standard diff convention).
-    // The output file is written before exit — read it if it exists.
+    // The output file is written before exit — read it if it has real content.
     const fileExists = await access(outputFile).then(() => true, () => false)
     if (fileExists) {
       const output = await readFile(outputFile, 'utf8')
-      return parseDbDiffOutput(output)
+      const parsed = parseDbDiffOutput(output)
+      if (parsed.up || parsed.down) return parsed
     }
 
-    // No output file written → genuine error (connection refused, timeout, etc.)
-    // Extract the real error from stderr/stdout, stripping the raw
-    // "Command failed: /path/to/node /path/to/dbdiff.js diff ..." prefix
-    // which leaks connection URLs and is unhelpful.
-    const stdout = String((err as Record<string, unknown>)?.stdout ?? '').trim()
-    const realError = stderr || stdout || ''
+    // Timeout / killed process. execFileAsync sets `killed: true` and a SIGTERM
+    // signal when it kills the child on timeout. Previously this fell through and
+    // surfaced dbdiff's last progress line ("ℹ Now generating UP migration") as
+    // the error — hiding the real cause. Report it clearly instead.
+    const timedOut =
+      errObj.killed === true ||
+      errObj.signal === 'SIGTERM' ||
+      errObj.code === 'ETIMEDOUT' ||
+      /ETIMEDOUT|timed out/i.test(combined)
+    if (timedOut) {
+      const secs = Math.round(timeoutMs / 1000)
+      throw new Error(
+        `Schema diff timed out after ${secs}s — the schema is very large or the ` +
+        `database connection is slow.\n` +
+        `  Remediations:\n` +
+        `    • Raise the limit: set SUPAFORGE_DBDIFF_TIMEOUT=600 (seconds) and re-run.\n` +
+        `    • Narrow the scan: diff one layer at a time with --check=schema.\n` +
+        `    • Exclude large internal schemas via "ignoreSchemas" in supaforge.config.json.`,
+      )
+    }
+
+    // No usable output file → genuine error (connection refused, auth, etc.).
+    // Prefer stderr; otherwise fall back to stdout with dbdiff's progress/spinner
+    // noise stripped so an info line never masquerades as the error. Strip the raw
+    // "Command failed: /path/to/node ..." prefix which leaks connection URLs.
+    const realError = stderr || stripDbDiffNoise(stdout)
     const cleanMessage = realError
       ? realError
       : message.replace(/^Command failed:[^\n]*/m, '').trim() || 'dbdiff failed with no error output'

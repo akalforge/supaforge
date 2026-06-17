@@ -3,15 +3,17 @@ import { resolve } from 'node:path'
 import { Flags } from '@oclif/core'
 import pg from 'pg'
 import { BaseCommand } from '../base-command.js'
-import { captureSnapshot } from '../snapshot.js'
+import { captureSnapshot, formatSnapshotLayers } from '../snapshot.js'
 import {
   cloneRemoteToLocal,
   replaceDbName,
   listBranches,
+  reconcileClones,
   deleteBranch,
   addBranchToManifest,
 } from '../branch.js'
 import type { BranchMeta } from '../branch.js'
+import { loadConfig } from '../config.js'
 import { checkPgDumpCompat } from '../pg-tools.js'
 import { startLocalPg, DEFAULT_LOCAL_PORT, LOCAL_PG_USER, LOCAL_PG_PASSWORD } from '../local-pg.js'
 import { ok, warn, dim, cmd, bold } from '../ui.js'
@@ -92,9 +94,26 @@ export default class Clone extends BaseCommand {
   async run(): Promise<void> {
     const { flags } = await this.parse(Clone)
 
-    // ── List clones (no config file needed) ─────────────────────────────────
+    // ── List clones ──────────────────────────────────────────────────────────
+    // The manifest alone misses clones it never recorded (older versions, a
+    // different checkout, or a cleaned .supaforge/). Reconcile it against the
+    // databases that actually exist on the local server so existing clones show
+    // up too — not just freshly-created ones. Config is optional here.
     if (flags.list) {
-      const branches = await listBranches()
+      const softConfig = await loadConfig().catch(() => undefined)
+      const localEnv = softConfig?.environments?.local
+      let localServerUrl: string | undefined
+      let configuredLocalDb: string | undefined
+      if (localEnv?.dbUrl) {
+        localServerUrl = localEnv.dbUrl
+        try {
+          configuredLocalDb = new URL(localEnv.dbUrl).pathname.replace(/^\//, '') || undefined
+        } catch { /* unpar-seable url — skip discovery hint */ }
+      }
+
+      const branches = localServerUrl
+        ? await reconcileClones({ localServerUrl, configuredLocalDb })
+        : (await listBranches()).map(b => ({ ...b, missing: false, discovered: false }))
 
       if (branches.length === 0) {
         this.log(`\n  No clones found. Create one with: ${cmd('supaforge clone --env=<name> --apply')}\n`)
@@ -108,10 +127,14 @@ export default class Clone extends BaseCommand {
 
       this.log(`\n  ${bold(`${branches.length} clone(s):`)}\n`)
       for (const b of branches) {
-        this.log(`    ${bold(b.name)}`)
+        const tags = [
+          b.discovered ? dim('(discovered)') : '',
+          b.missing ? warn('(database missing)') : '',
+        ].filter(Boolean).join(' ')
+        this.log(`    ${bold(b.name)}${tags ? ' ' + tags : ''}`)
         this.log(`      Database: ${b.dbName}`)
         this.log(`      From:     ${b.createdFrom}`)
-        this.log(`      Created:  ${b.createdAt}`)
+        if (b.createdAt) this.log(`      Created:  ${b.createdAt}`)
         this.log(`      Schema:   ${b.schemaOnly ? 'only' : 'full'}`)
         this.log('')
       }
@@ -268,7 +291,12 @@ export default class Clone extends BaseCommand {
     this.log('    [2/4] Capturing remote snapshot...')
     const snapshot = await captureSnapshot({ envName, env, config })
     const capturedCount = Object.values(snapshot.manifest.layers).filter(l => l.captured).length
-    this.log(`      ${ok('✓')} Snapshot captured: ${capturedCount} layers`)
+    this.log(`      ${ok('✓')} Snapshot captured: ${capturedCount} layer(s)`)
+    // Show exactly what was captured / skipped / errored per layer (like supaforge diff),
+    // so the user can see at a glance what made it into the baseline.
+    for (const line of formatSnapshotLayers(snapshot.manifest)) {
+      this.log(`        ${line}`)
+    }
 
     this.log('    [3/4] Storing baseline migration...')
     const migrationsDir = resolve(SUPAFORGE_DIR, MIGRATIONS_SUBDIR)
@@ -318,11 +346,33 @@ export default class Clone extends BaseCommand {
     }
 
     this.log(`\n  ${ok('Clone complete!')}\n`)
+
+    // ── What was NOT cloned (Issue: set expectations before the first diff) ───
+    // The pg_dump pipeline deliberately excludes Supabase-managed schemas and
+    // can't carry platform-managed state (storage objects, edge functions, auth
+    // config, vault secrets). Spelling this out up front explains why the first
+    // diff against the remote is large — it is expected, not a tool failure.
+    this.log(`  ${bold('Not included in this clone')} ${dim('(expected drift on the first diff):')}`)
+    this.log(`    ${dim('•')} Supabase-managed schemas, excluded from the dump so they restore cleanly`)
+    this.log(`      on vanilla Postgres: ${dim(CLONE_EXCLUDE_SCHEMAS.join(', '))}`)
+    this.log(`    ${dim('•')} Platform state that lives outside the SQL dump: storage objects &`)
+    this.log(`      policies, edge functions, auth config, and vault secrets.`)
+    if (flags['schema-only']) {
+      this.log(`    ${dim('•')} Table data — you passed ${cmd('--schema-only')} (structure only).`)
+    }
+    this.log(`    ${dim('These appear as drift below but are managed by Supabase, not your migrations.')}`)
+    this.log('')
+
+    // ── Contextual next steps (Issue: give the exact commands for THIS clone) ─
+    const skipFlags = '--skip=storage --skip=auth --skip=edge-functions --skip=vault --skip=realtime'
     this.log(`  ${bold('Your workflow is now:')}`)
-    this.log(`    1. Develop against the local database`)
-    this.log(`    2. ${cmd('supaforge diff')}            ${dim('— see what drifted')}`)
-    this.log(`    3. ${cmd('supaforge diff --apply')}     ${dim('— push changes to remote')}`)
-    this.log(`    4. ${cmd('supaforge snapshot')}          ${dim('— capture the current state')}`)
+    this.log(`    1. Develop against the local database ${dim(`(${localDbName})`)}`)
+    this.log(`    2. Verify the clone matches "${envName}":`)
+    this.log(`         ${cmd(`supaforge diff --source=${envName} --target=local --detail --include-files`)}`)
+    this.log(`       ${dim('Add')} ${cmd(skipFlags)} ${dim('to hide the Supabase-managed noise above.')}`)
+    this.log(`    3. See what drifted as you work:  ${cmd('supaforge diff')}`)
+    this.log(`    4. Push local changes to "${envName}": ${cmd('supaforge diff --apply')}`)
+    this.log(`    5. Capture the current state:      ${cmd('supaforge snapshot --apply')}`)
     this.log('')
     this.log(renderTip({ command: 'clone', cloneApplied: true, schemaOnly: flags['schema-only'] }))
   }

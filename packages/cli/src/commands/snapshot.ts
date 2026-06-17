@@ -1,15 +1,29 @@
 import { Flags } from '@oclif/core'
 import { BaseCommand } from '../base-command.js'
-import { captureSnapshot, listSnapshots, pruneSnapshots, DEFAULT_KEEP_COUNT } from '../snapshot.js'
+import { captureSnapshot, listSnapshots, pruneSnapshots, formatSnapshotLayers, DEFAULT_KEEP_COUNT } from '../snapshot.js'
 import { backup, listMigrationFiles } from '../migration.js'
 import type { SnapshotManifest } from '../types/config.js'
 import { ok, warn, dim, cmd, bold } from '../ui.js'
 import { renderTip } from '../tips.js'
 
+/** Human-readable layer names captured by a snapshot, shown in the dry-run preview. */
+const SNAPSHOT_LAYERS = [
+  'schema (tables, columns, indexes, constraints)',
+  'rls (row-level security policies)',
+  'edge-functions (via Management API)',
+  'storage (buckets + policies)',
+  'auth (config via Management API)',
+  'cron (pg_cron jobs)',
+  'data (reference tables from checks.data.tables)',
+  'webhooks (supabase_functions hooks)',
+  'extensions (installed Postgres extensions)',
+]
+
 /**
  * Capture and manage environment state snapshots.
  *
- * Default:      capture a snapshot (no dry-run gate — just runs)
+ * Default:      dry-run preview of what would be captured (requires --apply)
+ * --apply:      actually capture the snapshot
  * --migration:  also generate an incremental migration diff (was: backup)
  * --list:       list existing snapshots
  * --prune:      delete old snapshots
@@ -19,13 +33,14 @@ export default class Snapshot extends BaseCommand {
 
   static override examples = [
     '<%= config.bin %> snapshot',
-    '<%= config.bin %> snapshot --env=production',
-    '<%= config.bin %> snapshot --migration',
-    '<%= config.bin %> snapshot --migration --description="added profiles table"',
+    '<%= config.bin %> snapshot --apply',
+    '<%= config.bin %> snapshot --env=production --apply',
+    '<%= config.bin %> snapshot --migration --apply',
+    '<%= config.bin %> snapshot --migration --apply --description="added profiles table"',
     '<%= config.bin %> snapshot --list',
     '<%= config.bin %> snapshot --prune',
     '<%= config.bin %> snapshot --prune --keep=5 --apply',
-    '<%= config.bin %> snapshot --output=./backups',
+    '<%= config.bin %> snapshot --output=./backups --apply',
   ]
 
   static override flags = {
@@ -56,7 +71,7 @@ export default class Snapshot extends BaseCommand {
       min: 1,
     }),
     apply: Flags.boolean({
-      description: 'Confirm destructive action (required for --prune)',
+      description: 'Execute the snapshot (default: dry-run preview). Also required for --prune.',
       default: false,
     }),
     json: Flags.boolean({ description: 'Output results as JSON' }),
@@ -139,6 +154,28 @@ export default class Snapshot extends BaseCommand {
       await this.runPreflight(pre, 'Snapshot')
     }
 
+    // ── Dry-run gate ─────────────────────────────────────────────────────────
+    // Like clone / diff / restore, snapshot is a preview unless --apply is given.
+    if (!flags.apply) {
+      if (flags.json) {
+        this.log(JSON.stringify({ dryRun: true, environment: envName, migration: flags.migration }, null, 2))
+        return
+      }
+      this.log(`\n  ${bold('Snapshot preview')} ${dim('(dry-run)')}\n`)
+      this.log(`    Environment: ${envName}`)
+      this.log(`    Mode:        ${flags.migration ? 'snapshot + incremental migration' : 'snapshot'}`)
+      this.log('')
+      this.log('    Layers that will be captured (when present):')
+      for (const layer of SNAPSHOT_LAYERS) {
+        this.log(`      ${dim('•')} ${layer}`)
+      }
+      this.log('')
+      this.log(`    ${dim('Layers with no data (e.g. no cron, no storage) are skipped automatically.')}`)
+      this.log(`\n    → Add ${cmd('--apply')} to capture the snapshot.\n`)
+      this.log(renderTip({ command: 'snapshot', snapshotMigration: flags.migration, snapshotList: false }))
+      return
+    }
+
     if (flags.migration) {
       // Capture + generate migration (was: backup command)
       this.log(`\nCapturing snapshot of "${envName}" with migration...\n`)
@@ -209,22 +246,8 @@ export default class Snapshot extends BaseCommand {
   }
 
   private logSnapshotResult(manifest: SnapshotManifest): void {
-    const layers = manifest.layers as Record<string, {
-      captured: boolean
-      itemCount: number
-      error?: string
-      skipReason?: string
-    }>
-
-    for (const [name, info] of Object.entries(layers)) {
-      if (info.captured) {
-        this.log(`  ${ok('✓')} ${name.padEnd(16)} ${info.itemCount} item(s)`)
-      } else if (info.error) {
-        this.log(`  ${warn('✗')} ${name.padEnd(16)} ${warn(`error: ${info.error}`)}`)
-      } else {
-        const skipSuffix = info.skipReason ? ` — ${info.skipReason}` : ''
-        this.log(`  ${dim('○')} ${name.padEnd(16)} ${dim(`skipped${skipSuffix}`)}`)
-      }
+    for (const line of formatSnapshotLayers(manifest)) {
+      this.log(`  ${line}`)
     }
   }
 }

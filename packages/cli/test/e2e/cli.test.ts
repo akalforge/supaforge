@@ -257,6 +257,9 @@ describe('CLI e2e: snapshot', () => {
     expect(stdout).toContain('--migration')
     expect(stdout).toContain('--list')
     expect(stdout).toContain('--prune')
+    // snapshot is now dry-run by default and documents --apply
+    expect(stdout).toContain('--apply')
+    expect(stdout).toContain('dry-run')
   })
 
   it('should show --env and --description flags in help', async () => {

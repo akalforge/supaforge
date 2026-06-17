@@ -279,6 +279,96 @@ export async function listBranches(cwd = process.cwd()): Promise<BranchMeta[]> {
   return manifest.branches
 }
 
+/** A clone entry reconciled against the databases that actually exist on the server. */
+export interface ReconciledClone extends BranchMeta {
+  /** Database backing this clone no longer exists on the server. */
+  missing?: boolean
+  /** Found on the server but not previously tracked in branches.json. */
+  discovered?: boolean
+}
+
+/** List database names present on a server (connects to the maintenance `postgres` db). */
+async function listServerDatabases(serverUrl: string): Promise<Set<string>> {
+  const maintenanceUrl = replaceDbName(serverUrl, 'postgres')
+  const client = new pg.Client({ connectionString: maintenanceUrl })
+  try {
+    await client.connect()
+    const { rows } = await client.query(
+      'SELECT datname FROM pg_database WHERE datistemplate = false',
+    )
+    return new Set(rows.map(r => String(r.datname)))
+  } finally {
+    await client.end()
+  }
+}
+
+/**
+ * Reconcile the branches manifest against databases that actually exist on the
+ * local server.
+ *
+ * The manifest (`.supaforge/branches.json`) is gitignored and lives only on the
+ * machine that created the clone, so `clone --list` previously went blind to
+ * clones created in another checkout, by an older version, or after the manifest
+ * was cleaned — it "worked for new clones but not existing ones". This walks the
+ * server and surfaces those existing clone databases as `discovered`, while
+ * flagging tracked entries whose database is gone as `missing`. Discovered
+ * clones are backfilled into the manifest so later commands can act on them.
+ *
+ * Best-effort: when `localServerUrl` is omitted or unreachable, returns the
+ * manifest unchanged.
+ */
+export async function reconcileClones(opts: {
+  localServerUrl?: string
+  /** db name of the configured `local` environment — treated as a clone if present. */
+  configuredLocalDb?: string
+  cwd?: string
+}): Promise<ReconciledClone[]> {
+  const cwd = opts.cwd ?? process.cwd()
+  const manifest = await loadManifest(cwd)
+  const tracked: ReconciledClone[] = manifest.branches.map(b => ({ ...b }))
+
+  if (!opts.localServerUrl) return tracked
+
+  let existing: Set<string>
+  try {
+    existing = await listServerDatabases(opts.localServerUrl)
+  } catch {
+    return tracked // can't reach the server — fall back to manifest as-is
+  }
+
+  // Flag tracked entries whose database has been dropped out from under us.
+  for (const clone of tracked) {
+    if (!existing.has(clone.dbName)) clone.missing = true
+  }
+
+  // Discover clone databases on the server that the manifest doesn't know about.
+  const trackedNames = new Set(tracked.map(c => c.dbName))
+  const discovered: ReconciledClone[] = [...existing]
+    .filter(db =>
+      !trackedNames.has(db) &&
+      (db.startsWith(BRANCH_DB_PREFIX) || db === opts.configuredLocalDb),
+    )
+    .map(db => ({
+      name: db,
+      dbName: db,
+      dbUrl: replaceDbName(opts.localServerUrl!, db),
+      createdFrom: 'unknown',
+      createdAt: new Date().toISOString(),
+      schemaOnly: false,
+      discovered: true,
+    }))
+
+  // Backfill so future operations (clone --delete, etc.) can see them too.
+  if (discovered.length > 0) {
+    manifest.branches.push(
+      ...discovered.map(({ missing: _m, discovered: _d, ...meta }) => meta),
+    )
+    await saveManifest(manifest, cwd).catch(() => {})
+  }
+
+  return [...tracked, ...discovered]
+}
+
 /**
  * Add a branch entry to the manifest.
  * Used by clone.ts which manages its own DB creation pipeline.

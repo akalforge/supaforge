@@ -33,6 +33,14 @@ export function renderSummary(result: ScanResult): string {
 export function renderDetailed(result: ScanResult): string {
   const lines = [renderSummary(result)]
 
+  // Surface errored checks first — a check that couldn't run is more important
+  // to see than the drift it failed to measure. Without this they only appeared
+  // as a one-line "(error: ...)" in the summary with no detail or remediation.
+  for (const lr of result.checks) {
+    if (lr.status !== 'error') continue
+    lines.push(formatErroredCheck(lr))
+  }
+
   for (const lr of result.checks) {
     if (lr.issues.length === 0) continue
     const meta = CHECK_META[lr.check]
@@ -44,6 +52,23 @@ export function renderDetailed(result: ScanResult): string {
     }
   }
 
+  return lines.join('\n')
+}
+
+function formatErroredCheck(lr: CheckResult): string {
+  const meta = CHECK_META[lr.check]
+  const lines: string[] = []
+  lines.push(c('red', `── Layer ${meta.number}: ${meta.label} — could not run ${'─'.repeat(28)}`))
+  lines.push('')
+  lines.push(`  ${c('red', '✖')} ${bold('Check failed — drift for this layer is unknown')}`)
+  const errText = lr.error || 'check failed (no error message captured)'
+  for (const line of errText.split('\n')) {
+    lines.push(`    ${dim(line)}`)
+  }
+  lines.push('')
+  lines.push(`    ${dim('This layer was skipped in the totals above. Fix the error and re-run to')}`)
+  lines.push(`    ${dim('measure its drift; the score treats an errored check as unverified.')}`)
+  lines.push('')
   return lines.join('\n')
 }
 

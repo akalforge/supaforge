@@ -126,6 +126,31 @@ describe('error rendering', () => {
     expect(output).toContain('✓')
   })
 
+  it('surfaces errored checks with detail and remediation in renderDetailed', () => {
+    const output = renderDetailed(errorResult)
+    expect(output).toContain('could not run')
+    expect(output).toContain('Check failed')
+    expect(output).toContain('Command failed')
+    // remediation guidance is present
+    expect(output).toContain('re-run')
+  })
+
+  it('does not leak credentials in errored-check detail', () => {
+    const output = renderDetailed(errorResult)
+    expect(output).not.toContain('password')
+    expect(output).toContain('***')
+  })
+
+  it('shows fallback text in detail when errored check has no message', () => {
+    const noMsg: ScanResult = {
+      ...errorResult,
+      checks: [{ check: 'schema', status: 'error', issues: [], durationMs: 10 }],
+    }
+    const output = renderDetailed(noMsg)
+    expect(output).toContain('could not run')
+    expect(output).toContain('no error message captured')
+  })
+
   it('does not show raw credentials in error output', () => {
     const output = renderSummary(errorResult)
     expect(output).not.toContain('password')

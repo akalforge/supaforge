@@ -1,6 +1,6 @@
 export const CHECK_NAMES = [
   'schema', 'rls', 'rls-coverage', 'edge-functions', 'storage', 'auth', 'cron', 'data',
-  'webhooks', 'realtime', 'vault', 'extensions', 'migrations',
+  'webhooks', 'realtime', 'vault', 'extensions', 'migrations', 'roles',
 ] as const
 
 export type CheckName = (typeof CHECK_NAMES)[number]
@@ -21,6 +21,7 @@ export const CHECK_META: Record<CheckName, { number: number; emoji: string; labe
   'vault':           { number: 11, emoji: '🔐',  label: 'Vault Secrets' },
   'extensions':      { number: 12, emoji: '🧩',  label: 'Postgres Extensions' },
   'migrations':      { number: 13, emoji: '📋',  label: 'Migration History' },
+  'roles':           { number: 14, emoji: '👤',  label: 'Postgres Roles & Grants' },
 }
 
 /** API-based sync action for non-SQL drift fixes. */

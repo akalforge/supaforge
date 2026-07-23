@@ -1,9 +1,11 @@
 name: Release
 
+# Invoked only via workflow_call from manual-release.yml (which bumps the
+# version, pushes the tag, then calls this). A previous `on: push: tags`
+# trigger caused a second, concurrent run per release that raced the
+# workflow_call run and failed with npm E409 "cannot publish over existing
+# version" — the source of the flaky red releases.
 on:
-  push:
-    tags:
-      - 'v*'
   workflow_call:
     inputs:
       tag_name:
@@ -47,10 +49,35 @@ jobs:
         working-directory: packages/cli
         run: npm run build
 
+  # Fail fast on an expired/invalid npm token *before* anything is published or
+  # a GitHub Release is created. npm publish itself is the only step that
+  # authenticates, so without this a bad token would surface late — after a
+  # release already exists for a version that never reached npm.
+  verify-npm-token:
+    name: Verify npm token
+    runs-on: ubuntu-latest
+    needs: [build-and-test]
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          registry-url: 'https://registry.npmjs.org'
+      - name: npm whoami
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if npm whoami --registry=https://registry.npmjs.org; then
+            echo "NPM_TOKEN is valid."
+          else
+            echo "::error::NPM_TOKEN is missing, expired, or invalid — aborting the release before publishing."
+            exit 1
+          fi
+
   create-release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-and-test]
+    needs: [build-and-test, verify-npm-token]
     permissions:
       contents: write
     steps:
@@ -83,7 +110,7 @@ jobs:
   publish-npm:
     name: Publish to npm
     runs-on: ubuntu-latest
-    needs: [build-and-test]
+    needs: [build-and-test, verify-npm-token]
     permissions:
       contents: read
       id-token: write
@@ -121,14 +148,24 @@ jobs:
 
       - name: Publish to npm
         working-directory: packages/cli
-        run: npm publish --provenance --tag ${{ steps.dist-tag.outputs.tag }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set +e
+          out=$(npm publish --provenance --tag ${{ steps.dist-tag.outputs.tag }} 2>&1); code=$?
+          echo "$out"
+          if [ "$code" -ne 0 ]; then
+            if echo "$out" | grep -qiE 'E409|cannot publish over|already exists'; then
+              echo "Version already published to npm — treating as success (idempotent)."
+            else
+              exit "$code"
+            fi
+          fi
 
   publish-gpr:
     name: Publish to GitHub Packages
     runs-on: ubuntu-latest
-    needs: [build-and-test]
+    needs: [build-and-test, verify-npm-token]
     permissions:
       contents: read
       packages: write
@@ -166,6 +203,16 @@ jobs:
 
       - name: Publish to GitHub Packages
         working-directory: packages/cli
-        run: npm publish --tag ${{ steps.dist-tag.outputs.tag }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          out=$(npm publish --tag ${{ steps.dist-tag.outputs.tag }} 2>&1); code=$?
+          echo "$out"
+          if [ "$code" -ne 0 ]; then
+            if echo "$out" | grep -qiE 'E409|cannot publish over|already exists'; then
+              echo "Version already published to GitHub Packages — treating as success (idempotent)."
+            else
+              exit "$code"
+            fi
+          fi

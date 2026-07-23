@@ -10,6 +10,7 @@ import { CHECK_NAMES, CHECK_META } from '../types/drift.js'
 import { ok, warn, dim, cmd } from '../ui.js'
 import { sanitizeForReport } from '../utils/sanitize.js'
 import { renderTip } from '../tips.js'
+import { formatGitHubAnnotations, computeCiExitCode, formatCiSummary, type FailOn } from '../ci.js'
 
 /**
  * Unified drift detection & resolution command.
@@ -17,6 +18,7 @@ import { renderTip } from '../tips.js'
  * Default:   summary of what's drifted (was: scan)
  * --detail:  full SQL diffs (was: diff)
  * --apply:   fix the drift (was: promote)
+ * --ci:      emit GitHub Actions annotations + structured exit codes
  */
 export default class Diff extends BaseCommand {
   static override description = 'Detect drift between Supabase environments and optionally fix it'
@@ -30,6 +32,8 @@ export default class Diff extends BaseCommand {
     '<%= config.bin %> diff --source=staging --target=production',
     '<%= config.bin %> diff --skip=storage --skip=vault',
     '<%= config.bin %> diff --skip=auth --skip=edge-functions --skip=realtime',
+    '<%= config.bin %> diff --ci',
+    '<%= config.bin %> diff --ci --fail-on=warning',
   ]
 
   static override flags = {
@@ -59,6 +63,15 @@ export default class Diff extends BaseCommand {
     json: Flags.boolean({ description: 'Output results as JSON' }),
     source: Flags.string({ char: 's', description: 'Source environment name' }),
     target: Flags.string({ char: 't', description: 'Target environment name' }),
+    ci: Flags.boolean({
+      description: 'CI mode: emit GitHub Actions annotations and use semantic exit codes (0=clean, 1=drift, 2=error)',
+      default: false,
+    }),
+    'fail-on': Flags.string({
+      description: 'Threshold for a non-zero exit in CI mode',
+      options: ['critical', 'warning', 'any'],
+      default: 'critical',
+    }),
   }
 
   async run(): Promise<void> {
@@ -71,8 +84,8 @@ export default class Diff extends BaseCommand {
     const checks = flags.check ? [flags.check as CheckName] : undefined
     const skip = flags.skip?.length ? (flags.skip as CheckName[]) : undefined
 
-    // ── Preflight: verify both databases are reachable ───────────────────────
-    if (!flags.json) {
+    // ── Preflight: verify both databases are reachable ────────────────────────
+    if (!flags.json && !flags.ci) {
       const sourceEnv = config.environments[config.source!]
       const targetEnv = config.environments[config.target!]
       const pre = this.createPreflight('Diff preflight checks')
@@ -81,9 +94,9 @@ export default class Diff extends BaseCommand {
       await this.runPreflight(pre, 'Diff')
     }
 
-    /** Build a progress callback for scan calls. Only active when not --json. */
+    /** Build a progress callback for scan calls. Only active when not --json or --ci. */
     const makeProgress = (): ((event: ScanProgressEvent) => void) | undefined => {
-      if (flags.json) return undefined
+      if (flags.json || flags.ci) return undefined
       process.stdout.write('\n  Scanning...\n')
       return (event: ScanProgressEvent) => {
         const meta = CHECK_META[event.check]
@@ -101,7 +114,7 @@ export default class Diff extends BaseCommand {
       }
     }
 
-    // ── Apply mode (was: promote) ────────────────────────────────────────────
+    // ── Apply mode (was: promote) ───────────────────────────────────────────────
     if (flags.apply) {
       const onProgress = makeProgress()
       const scanResult = await scan(registry, { config, checks, skip, onProgress })
@@ -163,7 +176,7 @@ export default class Diff extends BaseCommand {
       return
     }
 
-    // ── Scan mode (summary or detail) ────────────────────────────────────────
+    // ── Scan mode (summary, detail, CI, or JSON) ────────────────────────────
     const onProgress = makeProgress()
     const result = await scan(registry, { config, checks, skip, onProgress })
     this.setCheckSummaries(result.checks.map(c => ({
@@ -176,6 +189,26 @@ export default class Diff extends BaseCommand {
 
     const driftedChecks = result.checks.filter(c => c.status === 'drifted').map(c => c.check)
     const skippedChecks = result.checks.filter(c => c.status === 'skipped').map(c => c.check)
+
+    // ── CI mode ──────────────────────────────────────────────────────────────
+    if (flags.ci) {
+      const failOn = (flags['fail-on'] ?? 'critical') as FailOn
+      // Annotations go to stderr; the machine-readable summary is the *only*
+      // thing on stdout. This lets a workflow capture a clean JSON artifact
+      // (`supaforge diff --ci > report.json`) while GitHub Actions still renders
+      // the `::error`/`::warning` workflow commands from stderr.
+      const annotations = formatGitHubAnnotations(result)
+      for (const line of annotations) {
+        process.stderr.write(line + '\n')
+      }
+      const summary = formatCiSummary(result)
+      process.stdout.write(JSON.stringify(summary, null, 2) + '\n')
+      const exitCode = computeCiExitCode(result, failOn)
+      if (exitCode !== 0) {
+        this.exit(exitCode)
+      }
+      return
+    }
 
     if (flags.json) {
       this.log(JSON.stringify(result, null, 2))

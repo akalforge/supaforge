@@ -1,0 +1,50 @@
+# Supaforge Drift Check
+# Copy this file to .github/workflows/drift-check.yml in your repository.
+# Runs on every PR to detect drift between your Supabase environments.
+
+name: Supaforge Drift Check
+
+on:
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+# Least privilege: this workflow only reads the repo. Drift results are emitted
+# as GitHub Actions annotations (stdout workflow commands) and an artifact —
+# neither needs extra GITHUB_TOKEN scopes.
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    name: Check for Supabase drift
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install supaforge
+        run: npm install -g supaforge
+
+      - name: Run drift check
+        env:
+          # Add these secrets in GitHub -> Settings -> Secrets and variables -> Actions
+          SUPAFORGE_SOURCE_DB_URL: ${{ secrets.SUPAFORGE_SOURCE_DB_URL }}
+          SUPAFORGE_TARGET_DB_URL: ${{ secrets.SUPAFORGE_TARGET_DB_URL }}
+        run: |
+          # --ci writes GitHub Actions annotations to stderr (rendered in the
+          # run) and the machine-readable JSON summary to stdout, so redirect
+          # stdout into the report the upload step publishes.
+          supaforge diff --ci --fail-on=critical > supaforge-report.json
+
+      - name: Upload drift report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supaforge-drift-report
+          path: supaforge-report.json
+          if-no-files-found: ignore

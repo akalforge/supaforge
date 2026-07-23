@@ -3,15 +3,38 @@ import type { ScanResult, DriftIssue } from './types/drift.js'
 export type FailOn = 'critical' | 'warning' | 'any'
 
 /**
+ * Escape a workflow-command *message* (the text after `::`).
+ *
+ * GitHub Actions uses percent-encoding, not backslash escaping. `%` must be
+ * encoded first so the percent signs introduced by the other replacements are
+ * not double-encoded. Mirrors `@actions/core`'s `escapeData`.
+ */
+function escapeData(value: string): string {
+  return value
+    .replace(/%/g, '%25')
+    .replace(/\r/g, '%0D')
+    .replace(/\n/g, '%0A')
+}
+
+/**
+ * Escape a workflow-command *property* value (e.g. `title=`). In addition to
+ * the message escapes, `:` and `,` must be encoded because they delimit
+ * properties. Mirrors `@actions/core`'s `escapeProperty`.
+ */
+function escapeProperty(value: string): string {
+  return escapeData(value)
+    .replace(/:/g, '%3A')
+    .replace(/,/g, '%2C')
+}
+
+/**
  * Format a DriftIssue as a GitHub Actions annotation line.
  * Spec: https://docs.github.com/en/actions/writing-workflows/choosing-what-your-workflow-does/workflow-commands-for-github-actions#setting-a-notice-message
  */
 export function formatAnnotation(issue: DriftIssue): string {
   const level   = issue.severity === 'critical' ? 'error' : 'warning'
-  const title   = issue.title.replace(/,/g, '\\,')
-  const message = issue.description
-    .replace(/\r/g, '%0D')
-    .replace(/\n/g, '%0A')
+  const title   = escapeProperty(issue.title)
+  const message = escapeData(issue.description)
   return `::${level} title=${title}::${message}`
 }
 

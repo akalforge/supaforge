@@ -60,10 +60,17 @@ describe('formatAnnotation', () => {
     expect(line).toContain('%0A')
   })
 
-  it('escapes commas in title to avoid breaking annotation syntax', () => {
+  it('percent-encodes commas and colons in title to avoid breaking annotation syntax', () => {
     const issue = makeIssue({ title: 'Missing: table, index' })
     const line = formatAnnotation(issue)
-    expect(line).toContain('table\\, index')
+    expect(line).toContain('Missing%3A table%2C index')
+    expect(line).not.toContain('\\')
+  })
+
+  it('escapes percent signs first so encoded sequences are not double-encoded', () => {
+    const issue = makeIssue({ title: '100%,done', description: 'was 50% before' })
+    const line = formatAnnotation(issue)
+    expect(line).toBe('::error title=100%25%2Cdone::was 50%25 before')
   })
 
   it('produces well-formed annotation line', () => {

@@ -37,6 +37,13 @@ permissions:
   id-token: write
   packages: write
 
+# Serialize releases: never run two at once (a double-click or overlapping
+# dispatch would otherwise race to bump/tag/publish). Queue rather than cancel —
+# cancelling mid-release could leave a tag or partial publish behind.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   release:
     name: Bump version & push tag

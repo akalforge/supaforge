@@ -146,21 +146,21 @@ export default class Diff extends BaseCommand {
       }
 
       if (result.applied.length > 0) {
-        this.log(`${ok(`Applied ${result.applied.length} fix(es):`)}`)  
+        this.log(`${ok(`Applied ${result.applied.length} fix(es):`)}`)
         for (const stmt of result.applied) {
           this.log(`  ${ok('✓')} ${dim(`[${stmt.check}]`)} ${stmt.issueId}`)
         }
       }
 
       if (result.skipped.length > 0) {
-        this.log(`\n${dim(`Skipped ${result.skipped.length} issue(s):`)}`)  
+        this.log(`\n${dim(`Skipped ${result.skipped.length} issue(s):`)}`)
         for (const item of result.skipped) {
           this.log(`  ${dim('○')} ${dim(`[${item.check}]`)} ${item.issueId}: ${item.reason}`)
         }
       }
 
       if (result.errors.length > 0) {
-        this.log(`\n${warn(`${result.errors.length} error(s):`)}`)  
+        this.log(`\n${warn(`${result.errors.length} error(s):`)}`)
         for (const item of result.errors) {
           this.log(`  ${warn('✗')} ${dim(`[${item.check}]`)} ${item.issueId}: ${item.error}`)
         }
@@ -193,9 +193,13 @@ export default class Diff extends BaseCommand {
     // ── CI mode ──────────────────────────────────────────────────────────────
     if (flags.ci) {
       const failOn = (flags['fail-on'] ?? 'critical') as FailOn
+      // Annotations go to stderr; the machine-readable summary is the *only*
+      // thing on stdout. This lets a workflow capture a clean JSON artifact
+      // (`supaforge diff --ci > report.json`) while GitHub Actions still renders
+      // the `::error`/`::warning` workflow commands from stderr.
       const annotations = formatGitHubAnnotations(result)
       for (const line of annotations) {
-        process.stdout.write(line + '\n')
+        process.stderr.write(line + '\n')
       }
       const summary = formatCiSummary(result)
       process.stdout.write(JSON.stringify(summary, null, 2) + '\n')

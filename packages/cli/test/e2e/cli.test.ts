@@ -234,6 +234,52 @@ describe('CLI e2e: diff', () => {
       expect(output).toContain('not reachable')
     }
   })
+
+  it('should show --ci and --fail-on flags in help', async () => {
+    const { stdout } = await run(['diff', '--help'])
+    expect(stdout).toContain('--ci')
+    expect(stdout).toContain('--fail-on')
+  })
+
+  it('should reject invalid --fail-on value', async () => {
+    try {
+      await run(['diff', '--ci', '--fail-on=bogus'])
+      expect.unreachable('Should have thrown')
+    } catch (err: any) {
+      const output = (err.stderr || '') + (err.stdout || '')
+      expect(output).toMatch(/Expected.*bogus|must be one of/i)
+    }
+  })
+
+  it('--ci writes clean JSON to stdout and exits 2 on scan error', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-diff-ci-${Date.now()}`)
+    await mkdir(tmpDir, { recursive: true })
+    const config = {
+      environments: {
+        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
+        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
+      },
+      source: 'dev',
+      target: 'prod',
+    }
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
+
+    try {
+      await run(['diff', '--ci'], { cwd: tmpDir })
+      expect.unreachable('Should have exited non-zero — unreachable DBs are a scan error')
+    } catch (err: any) {
+      // Exit code 2 = scan error (per the --ci contract).
+      expect(err.code).toBe(2)
+      // stdout must be *only* the JSON summary — annotations go to stderr — so a
+      // workflow can redirect stdout straight into a report artifact.
+      const parsed = JSON.parse(err.stdout)
+      expect(parsed).toHaveProperty('summary')
+      expect(parsed).toHaveProperty('criticalIssues')
+      expect(parsed).toHaveProperty('warningIssues')
+      expect(err.stdout).not.toContain('::error')
+      expect(err.stdout).not.toContain('::warning')
+    }
+  })
 })
 
 describe('CLI e2e: hukam', () => {

@@ -36,7 +36,10 @@ jobs:
           SUPAFORGE_SOURCE_DB_URL: ${{ secrets.SUPAFORGE_SOURCE_DB_URL }}
           SUPAFORGE_TARGET_DB_URL: ${{ secrets.SUPAFORGE_TARGET_DB_URL }}
         run: |
-          supaforge diff --ci --fail-on=critical
+          # --ci writes GitHub Actions annotations to stderr (rendered in the
+          # run) and the machine-readable JSON summary to stdout, so redirect
+          # stdout into the report the upload step publishes.
+          supaforge diff --ci --fail-on=critical > supaforge-report.json
 
       - name: Upload drift report
         if: always()

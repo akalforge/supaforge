@@ -7,6 +7,7 @@ import {
   stripDbDiffNoise,
   classifyStatement,
   summariseStatement,
+  isDestructiveSql,
 } from '../src/dbdiff.js'
 import { DBDIFF_EXEC_TIMEOUT_MS } from '../src/constants.js'
 
@@ -56,6 +57,39 @@ describe('resolveDbDiffBin', () => {
     expect(command).toBe(process.execPath)
     expect(prefixArgs).toHaveLength(1)
     expect(prefixArgs[0]).toContain('dbdiff.js')
+  })
+})
+
+describe('isDestructiveSql', () => {
+  it('flags statements that destroy rows', () => {
+    expect(isDestructiveSql('DROP TABLE "stale";')).toBe(true)
+    expect(isDestructiveSql('ALTER TABLE "users" DROP COLUMN "bio";')).toBe(true)
+  })
+
+  it('is case- and whitespace-insensitive', () => {
+    expect(isDestructiveSql('  drop table "stale";')).toBe(true)
+    expect(isDestructiveSql('alter table "users" drop column "bio";')).toBe(true)
+  })
+
+  it('does not flag additive or non-row-destroying statements', () => {
+    expect(isDestructiveSql('ALTER TABLE "users" ADD COLUMN "bio" text;')).toBe(false)
+    expect(isDestructiveSql('CREATE TABLE "t" (id int);')).toBe(false)
+    expect(isDestructiveSql('CREATE INDEX idx ON users(bio);')).toBe(false)
+  })
+
+  it('does not flag drops that only lose a definition', () => {
+    // These are recreatable from the migration, so they stay applyable —
+    // matching how @dbdiff/cli splits its linter into errors and warnings.
+    expect(isDestructiveSql('DROP VIEW "v";')).toBe(false)
+    expect(isDestructiveSql('DROP INDEX idx_bio;')).toBe(false)
+    expect(isDestructiveSql('DROP TRIGGER "t" ON "users";')).toBe(false)
+    expect(isDestructiveSql('DROP FUNCTION "f"();')).toBe(false)
+  })
+
+  it('does not flag DROP CONSTRAINT or DROP DEFAULT on a table', () => {
+    expect(isDestructiveSql('ALTER TABLE "users" DROP CONSTRAINT "fk";')).toBe(false)
+    expect(isDestructiveSql('ALTER TABLE "users" ALTER COLUMN "a" DROP DEFAULT;')).toBe(false)
+    expect(isDestructiveSql('ALTER TABLE "users" ALTER COLUMN "a" DROP NOT NULL;')).toBe(false)
   })
 })
 

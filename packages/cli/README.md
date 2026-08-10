@@ -58,6 +58,7 @@ supaforge init --force                  Overwrite existing config file
 supaforge diff                          Summary: what's drifted? (score + pass/fail)
 supaforge diff --detail                 Show detailed SQL diffs
 supaforge diff --apply                  Apply SQL + API fixes to the target environment
+supaforge diff --apply --allow-destructive  Also apply fixes that drop tables/columns
 supaforge diff --check=rls              Limit to a specific check
 supaforge diff --check=rls --apply      Fix only one check
 supaforge diff --skip=storage           Skip a specific check
@@ -101,6 +102,28 @@ supaforge clone --env=prod
 supaforge diff --apply
 supaforge clone --env=prod --apply
 ```
+
+**Destructive fixes need a second opt-in.** Drift that would destroy rows —
+dropping a table, or dropping a column — is always *reported*, but `--apply`
+skips it unless you also pass `--allow-destructive`:
+
+```
+$ supaforge diff --apply
+
+Applied 1 fix(es):
+  ✓ [schema] schema-alter-1
+
+Skipped 1 issue(s):
+  ○ [schema] schema-drop-1: Destructive (drops data) — re-run with --allow-destructive to apply
+```
+
+```bash
+# Also drop the extra table/column
+supaforge diff --apply --allow-destructive
+```
+
+Dropping a view, trigger, function, index or type is not gated — those lose a
+definition the migration can recreate, not data.
 
 ### Snapshot & Clone
 
@@ -414,6 +437,28 @@ supaforge diff                # schema + data checks active out of the box
 ```
 
 The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.
+
+**Schema diff performance.** DBDiff compares table schemas in a constant number
+of round-trips rather than one set per table: it first hashes every table's
+schema in a single query per side and skips the ones that match, then loads the
+remainder in a fixed 7 queries per side. On a Supabase project where most tables
+are unchanged, this is the difference between thousands of round-trips and a
+couple of dozen. Nothing to configure — it is on for Postgres automatically.
+
+If a diff still times out on a very large schema, raise the ceiling rather than
+narrowing the scan:
+
+```bash
+SUPAFORGE_DBDIFF_TIMEOUT=600 supaforge diff    # seconds; default 300
+```
+
+**Destructive changes.** DBDiff refuses by default to generate a migration that
+drops a table or column. SupaForge passes `--allow-destructive` when invoking it,
+because detecting an extra table on the target is the whole point of a drift
+check — reporting it must not be a hard failure. The safety gate is applied at
+*apply* time instead, in `promote()`, which skips those statements unless you
+pass `--allow-destructive` to SupaForge itself. See
+[Safe by Default](#safe-by-default).
 
 ## License
 

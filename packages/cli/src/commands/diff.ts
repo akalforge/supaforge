@@ -56,6 +56,10 @@ export default class Diff extends BaseCommand {
       description: 'Apply SQL fixes to resolve drift in the target environment',
       default: false,
     }),
+    'allow-destructive': Flags.boolean({
+      description: 'With --apply, also run fixes that drop tables or columns (destroys data)',
+      default: false,
+    }),
     'include-files': Flags.boolean({
       description: 'Include file-level drift detection in storage check',
       default: false,
@@ -138,6 +142,7 @@ export default class Diff extends BaseCommand {
         scanResult,
         checks,
         dryRun: false,
+        allowDestructive: flags['allow-destructive'],
       })
 
       if (flags.json) {

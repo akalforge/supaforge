@@ -1,6 +1,7 @@
 import pg from 'pg'
 import type { ScanResult, SyncAction } from './types/drift'
 import { errMsg } from './utils/error'
+import { isDestructiveSql } from './dbdiff'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
@@ -13,6 +14,14 @@ export interface PromoteOptions {
   checks?: string[]
   /** Dry-run mode — print SQL without executing */
   dryRun?: boolean
+  /**
+   * Permit statements that destroy data (DROP TABLE, DROP COLUMN).
+   *
+   * Off by default: those are reported as drift but skipped at apply time, so
+   * `supaforge diff --apply` can never drop a table or column without the user
+   * asking for it. Set by the `--allow-destructive` flag.
+   */
+  allowDestructive?: boolean
   /** Fetch function for API-based sync actions (defaults to globalThis.fetch) */
   fetchFn?: FetchFn
 }
@@ -24,7 +33,14 @@ export interface PromoteResult {
 }
 
 export async function promote(options: PromoteOptions): Promise<PromoteResult> {
-  const { dbUrl, scanResult, checks, dryRun = false, fetchFn = globalThis.fetch.bind(globalThis) } = options
+  const {
+    dbUrl,
+    scanResult,
+    checks,
+    dryRun = false,
+    allowDestructive = false,
+    fetchFn = globalThis.fetch.bind(globalThis),
+  } = options
 
   const result: PromoteResult = { applied: [], skipped: [], errors: [] }
 
@@ -37,6 +53,14 @@ export async function promote(options: PromoteOptions): Promise<PromoteResult> {
 
     for (const issue of checkResult.issues) {
       if (issue.sql?.up) {
+        if (!allowDestructive && isDestructiveSql(issue.sql.up)) {
+          result.skipped.push({
+            check: checkResult.check,
+            issueId: issue.id,
+            reason: 'Destructive (drops data) — re-run with --allow-destructive to apply',
+          })
+          continue
+        }
         sqlStatements.push({ check: checkResult.check, issueId: issue.id, sql: issue.sql.up })
       } else if (issue.action) {
         apiActions.push({ check: checkResult.check, issueId: issue.id, action: issue.action })

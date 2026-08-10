@@ -145,6 +145,54 @@ describe('promote', () => {
     expect(result.applied[0].check).toBe('rls')
   })
 
+  it('skips destructive statements unless allowDestructive is set', async () => {
+    // @dbdiff/cli now returns these (SupaForge passes --allow-destructive so
+    // drift is *reported*), so the safety gate has to live here at apply time.
+    const scanResult = makeScanResult({
+      checks: [
+        {
+          check: 'schema',
+          status: 'drifted',
+          durationMs: 10,
+          issues: [
+            {
+              id: 'schema-drop-1',
+              check: 'schema',
+              severity: 'critical',
+              title: 'Extra table: stale',
+              description: 'x',
+              sql: { up: 'DROP TABLE "stale";', down: '' },
+            },
+            {
+              id: 'schema-alter-1',
+              check: 'schema',
+              severity: 'warning',
+              title: 'Table altered: users',
+              description: 'x',
+              sql: { up: 'ALTER TABLE "users" ADD COLUMN "bio" text;', down: '' },
+            },
+          ],
+        },
+      ],
+    })
+
+    const guarded = await promote({ dbUrl: 'postgres://unused', scanResult, dryRun: true })
+    expect(guarded.applied).toHaveLength(1)
+    expect(guarded.applied[0].issueId).toBe('schema-alter-1')
+    expect(guarded.skipped).toHaveLength(1)
+    expect(guarded.skipped[0].issueId).toBe('schema-drop-1')
+    expect(guarded.skipped[0].reason).toContain('--allow-destructive')
+
+    const opted = await promote({
+      dbUrl: 'postgres://unused',
+      scanResult,
+      dryRun: true,
+      allowDestructive: true,
+    })
+    expect(opted.applied).toHaveLength(2)
+    expect(opted.skipped).toHaveLength(0)
+  })
+
   it('skips clean checks', async () => {
     const scanResult = makeScanResult({
       checks: [

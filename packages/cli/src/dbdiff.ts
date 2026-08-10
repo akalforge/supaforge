@@ -100,6 +100,14 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
     `--type=${options.type}`,
     '--include=both',
     '--nocomments',
+    // @dbdiff/cli >= 3.0.0-rc.3 refuses to emit a migration containing
+    // DROP TABLE or DROP COLUMN unless this is passed, exiting non-zero and
+    // writing no output file. SupaForge is a *detection* tool: an extra table
+    // or column on the target is the single most common form of drift, and it
+    // has to be reported rather than turned into a hard failure. The safety
+    // gate belongs at apply time instead — see isDestructiveSql()/promote(),
+    // which skip these statements unless the user opts in explicitly.
+    '--allow-destructive',
     `--output=${outputFile}`,
   ]
 
@@ -205,6 +213,20 @@ const UP_MARKER = '-- ==================== UP ===================='
 const DOWN_MARKER = '-- ==================== DOWN ===================='
 
 const DROP_TYPES = ['drop', 'drop-view', 'drop-function', 'drop-trigger', 'drop-type', 'drop-sequence']
+
+/**
+ * Does this statement destroy data if executed?
+ *
+ * Deliberately narrower than DROP_TYPES: dropping a view, function, trigger or
+ * type loses a definition that the migration can recreate, whereas dropping a
+ * table or a column loses rows. Only the latter is gated at apply time, which
+ * mirrors how @dbdiff/cli splits its own linter into errors and warnings.
+ */
+export function isDestructiveSql(sql: string): boolean {
+  const upper = sql.toUpperCase().trimStart()
+  if (upper.startsWith('DROP TABLE')) return true
+  return upper.startsWith('ALTER TABLE') && /\bDROP\s+COLUMN\b/.test(upper)
+}
 
 export function parseDbDiffOutput(output: string): DbDiffResult {
   const upIdx = output.indexOf(UP_MARKER)

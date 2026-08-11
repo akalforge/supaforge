@@ -94,7 +94,7 @@ How SupaForge maps to every standard Supabase module (see [Supabase Features](ht
 
 | Supabase Module | Feature | SupaForge Check | Notes |
 |---|---|---|---|
-| **Database** | Postgres schema | ✅ Schema | Tables, columns, indexes, constraints, views, triggers, functions, sequences |
+| **Database** | Postgres schema | ✅ Schema | Tables, columns, indexes, constraints, views, triggers, functions, sequences, enum types |
 | | Reference / seed data | ✅ Data | Row-level diff for all public tables (configurable) |
 | | Database webhooks | ✅ Webhooks | `supabase_functions.hooks` + `pg_net` extension |
 | | Postgres extensions | ✅ Extensions | Enabled/disabled detection via `pg_extension` |
@@ -150,6 +150,10 @@ supaforge mcp                             Start MCP stdio server for AI agents
 ```
 
 > All commands that modify state preview by default. Add `--apply` to execute.
+>
+> Fixes that destroy rows — dropping a table or a column — are always reported
+> but never applied by `--apply` alone. They are listed as skipped unless you
+> also pass `--allow-destructive`.
 
 ## MCP Integration (AI Agents)
 

@@ -70,6 +70,23 @@ export function resolveDbDiffTimeoutMs(): number {
 }
 
 /**
+ * Resolve the PHP memory limit to hand to @dbdiff/cli, if any.
+ *
+ * @dbdiff/cli caps itself at 1G by default, which is ample for most Supabase
+ * projects but can be exceeded by a very large schema or a wide data diff.
+ * SUPAFORGE_DBDIFF_MEMORY passes straight through to `--memory-limit`, taking
+ * the same values dbdiff accepts: "512M", "2G", or "-1" for unlimited.
+ *
+ * Returns undefined when unset or malformed, leaving dbdiff on its own default
+ * rather than forwarding a value it would reject.
+ */
+export function resolveDbDiffMemoryLimit(): string | undefined {
+  const raw = process.env.SUPAFORGE_DBDIFF_MEMORY?.trim()
+  if (!raw) return undefined
+  return /^-?\d+[KMG]?$/i.test(raw) ? raw : undefined
+}
+
+/**
  * Strip @dbdiff/cli progress / spinner noise from captured output.
  *
  * dbdiff logs informational lines such as "ℹ Now generating UP migration"
@@ -88,40 +105,63 @@ export function stripDbDiffNoise(text: string): string {
     .trim()
 }
 
-export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
-  const { command, prefixArgs } = resolveDbDiffBin()
-  const outputFile = join(tmpdir(), `supaforge-dbdiff-${Date.now()}-${Math.random().toString(36).slice(2)}.sql`)
-
+/**
+ * Build the full @dbdiff/cli argument list for a diff run.
+ *
+ * Split out of runDbDiff() so the flag surface is one readable unit and can be
+ * asserted directly in tests, rather than only through a spawned process.
+ */
+export function buildDbDiffArgs(options: DbDiffOptions, outputFile: string): string[] {
   const args = [
-    ...prefixArgs,
     'diff',
     `--server1-url=${options.sourceUrl}`,
     `--server2-url=${options.targetUrl}`,
     `--type=${options.type}`,
-    '--include=both',
+    // Was hardcoded to 'both', silently ignoring options.include. Every caller
+    // passes 'both' (sqlToIssues pairs each UP statement with its DOWN
+    // counterpart, so it needs both directions), but the option was part of the
+    // public interface and did nothing.
+    `--include=${options.include}`,
     '--nocomments',
+    // @dbdiff/cli >= 3.0.0-rc.3 refuses to emit a migration containing
+    // DROP TABLE or DROP COLUMN unless this is passed, exiting non-zero and
+    // writing no output file. SupaForge is a *detection* tool: an extra table
+    // or column on the target is the single most common form of drift, and it
+    // has to be reported rather than turned into a hard failure. The safety
+    // gate belongs at apply time instead — see isDestructiveSql()/promote(),
+    // which skip these statements unless the user opts in explicitly.
+    '--allow-destructive',
     `--output=${outputFile}`,
+  ]
+
+  const memoryLimit = resolveDbDiffMemoryLimit()
+  if (memoryLimit) {
+    args.push(`--memory-limit=${memoryLimit}`)
+  }
+
+  // Both --tables and --ignore-tables take one comma-separated list, so the
+  // ignoreSchemas globs (auth.*, storage.*) have to merge into any existing
+  // --ignore-tables value rather than be appended as a second flag.
+  const ignore = [
+    ...(options.ignoreTables ?? []),
+    ...(options.ignoreSchemas ?? []).map(s => `${s}.*`),
   ]
 
   if (options.tables?.length) {
     args.push(`--tables=${options.tables.join(',')}`)
   }
-
-  if (options.ignoreTables?.length) {
-    args.push(`--ignore-tables=${options.ignoreTables.join(',')}`)
+  if (ignore.length) {
+    args.push(`--ignore-tables=${ignore.join(',')}`)
   }
 
-  // Convert ignoreSchemas to --ignore-tables glob patterns (e.g. auth.* , storage.*)
-  if (options.ignoreSchemas?.length) {
-    const schemaGlobs = options.ignoreSchemas.map(s => `${s}.*`)
-    const existing = args.find(a => a.startsWith('--ignore-tables='))
-    if (existing) {
-      const idx = args.indexOf(existing)
-      args[idx] = `${existing},${schemaGlobs.join(',')}`
-    } else {
-      args.push(`--ignore-tables=${schemaGlobs.join(',')}`)
-    }
-  }
+  return args
+}
+
+export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
+  const { command, prefixArgs } = resolveDbDiffBin()
+  const outputFile = join(tmpdir(), `supaforge-dbdiff-${Date.now()}-${Math.random().toString(36).slice(2)}.sql`)
+
+  const args = [...prefixArgs, ...buildDbDiffArgs(options, outputFile)]
 
   const timeoutMs = resolveDbDiffTimeoutMs()
 
@@ -205,6 +245,20 @@ const UP_MARKER = '-- ==================== UP ===================='
 const DOWN_MARKER = '-- ==================== DOWN ===================='
 
 const DROP_TYPES = ['drop', 'drop-view', 'drop-function', 'drop-trigger', 'drop-type', 'drop-sequence']
+
+/**
+ * Does this statement destroy data if executed?
+ *
+ * Deliberately narrower than DROP_TYPES: dropping a view, function, trigger or
+ * type loses a definition that the migration can recreate, whereas dropping a
+ * table or a column loses rows. Only the latter is gated at apply time, which
+ * mirrors how @dbdiff/cli splits its own linter into errors and warnings.
+ */
+export function isDestructiveSql(sql: string): boolean {
+  const upper = sql.toUpperCase().trimStart()
+  if (upper.startsWith('DROP TABLE')) return true
+  return upper.startsWith('ALTER TABLE') && /\bDROP\s+COLUMN\b/.test(upper)
+}
 
 export function parseDbDiffOutput(output: string): DbDiffResult {
   const upIdx = output.indexOf(UP_MARKER)

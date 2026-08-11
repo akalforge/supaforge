@@ -1,6 +1,7 @@
 import pg from 'pg'
 import type { ScanResult, SyncAction } from './types/drift'
 import { errMsg } from './utils/error'
+import { isDestructiveSql } from './dbdiff'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
@@ -13,6 +14,14 @@ export interface PromoteOptions {
   checks?: string[]
   /** Dry-run mode — print SQL without executing */
   dryRun?: boolean
+  /**
+   * Permit statements that destroy data (DROP TABLE, DROP COLUMN).
+   *
+   * Off by default: those are reported as drift but skipped at apply time, so
+   * `supaforge diff --apply` can never drop a table or column without the user
+   * asking for it. Set by the `--allow-destructive` flag.
+   */
+  allowDestructive?: boolean
   /** Fetch function for API-based sync actions (defaults to globalThis.fetch) */
   fetchFn?: FetchFn
 }
@@ -23,74 +32,99 @@ export interface PromoteResult {
   errors: { check: string; issueId: string; error: string }[]
 }
 
-export async function promote(options: PromoteOptions): Promise<PromoteResult> {
-  const { dbUrl, scanResult, checks, dryRun = false, fetchFn = globalThis.fetch.bind(globalThis) } = options
+interface PlannedWork {
+  sqlStatements: { check: string; issueId: string; sql: string }[]
+  apiActions: { check: string; issueId: string; action: SyncAction }[]
+  skipped: { check: string; issueId: string; reason: string }[]
+}
 
-  const result: PromoteResult = { applied: [], skipped: [], errors: [] }
+/**
+ * Sort a scan result's issues into what can be run as SQL, what needs an API
+ * call, and what has to be skipped.
+ *
+ * Kept separate from promote() so the decision of *what* to apply is one
+ * self-contained, directly testable pass, and promote() is left to the
+ * execution.
+ */
+export function planWork(
+  scanResult: ScanResult,
+  checks?: string[],
+  allowDestructive = false,
+): PlannedWork {
+  const plan: PlannedWork = { sqlStatements: [], apiActions: [], skipped: [] }
 
-  const sqlStatements: { check: string; issueId: string; sql: string }[] = []
-  const apiActions: { check: string; issueId: string; action: SyncAction }[] = []
+  const relevant = scanResult.checks.filter(
+    c => c.status === 'drifted' && (!checks || checks.includes(c.check)),
+  )
 
-  for (const checkResult of scanResult.checks) {
-    if (checkResult.status !== 'drifted') continue
-    if (checks && !checks.includes(checkResult.check)) continue
-
+  for (const checkResult of relevant) {
     for (const issue of checkResult.issues) {
-      if (issue.sql?.up) {
-        sqlStatements.push({ check: checkResult.check, issueId: issue.id, sql: issue.sql.up })
-      } else if (issue.action) {
-        apiActions.push({ check: checkResult.check, issueId: issue.id, action: issue.action })
-      } else {
-        result.skipped.push({
-          check: checkResult.check,
-          issueId: issue.id,
-          reason: 'No SQL fix or API action available',
-        })
-      }
-    }
-  }
+      const at = { check: checkResult.check, issueId: issue.id }
 
-  if (dryRun) {
-    for (const stmt of sqlStatements) {
-      result.applied.push({ check: stmt.check, issueId: stmt.issueId, sql: stmt.sql })
-    }
-    for (const act of apiActions) {
-      result.applied.push({ check: act.check, issueId: act.issueId, action: act.action.label })
-    }
-    return result
-  }
-
-  // Execute SQL statements
-  if (sqlStatements.length > 0) {
-    const client = new pg.Client({ connectionString: dbUrl })
-    await client.connect()
-    try {
-      for (const stmt of sqlStatements) {
-        try {
-          await client.query(stmt.sql)
-          result.applied.push({ check: stmt.check, issueId: stmt.issueId, sql: stmt.sql })
-        } catch (err) {
-          result.errors.push({
-            check: stmt.check,
-            issueId: stmt.issueId,
-            error: errMsg(err),
-          })
+      if (!issue.sql?.up) {
+        if (issue.action) {
+          plan.apiActions.push({ ...at, action: issue.action })
+        } else {
+          plan.skipped.push({ ...at, reason: 'No SQL fix or API action available' })
         }
+        continue
       }
-    } finally {
-      await client.end()
+
+      if (!allowDestructive && isDestructiveSql(issue.sql.up)) {
+        plan.skipped.push({
+          ...at,
+          reason: 'Destructive (drops data) — re-run with --allow-destructive to apply',
+        })
+        continue
+      }
+
+      plan.sqlStatements.push({ ...at, sql: issue.sql.up })
     }
   }
 
-  // Execute API-based sync actions
-  for (const act of apiActions) {
+  return plan
+}
+
+/**
+ * Run the planned SQL against the target on a single connection.
+ *
+ * One failing statement is recorded and the rest still run — a drift fix set is
+ * a list of independent repairs, not a transaction.
+ */
+async function executeSql(
+  dbUrl: string,
+  statements: PlannedWork['sqlStatements'],
+  result: PromoteResult,
+): Promise<void> {
+  if (statements.length === 0) return
+
+  const client = new pg.Client({ connectionString: dbUrl })
+  await client.connect()
+  try {
+    for (const stmt of statements) {
+      try {
+        await client.query(stmt.sql)
+        result.applied.push({ check: stmt.check, issueId: stmt.issueId, sql: stmt.sql })
+      } catch (err) {
+        result.errors.push({ check: stmt.check, issueId: stmt.issueId, error: errMsg(err) })
+      }
+    }
+  } finally {
+    await client.end()
+  }
+}
+
+/** Run the planned API-based sync actions, recording per-action failures. */
+async function executeApiActions(
+  actions: PlannedWork['apiActions'],
+  fetchFn: FetchFn,
+  result: PromoteResult,
+): Promise<void> {
+  for (const act of actions) {
     try {
       const init: RequestInit = {
         method: act.action.method,
-        headers: {
-          'Content-Type': 'application/json',
-          ...act.action.headers,
-        },
+        headers: { 'Content-Type': 'application/json', ...act.action.headers },
       }
       if (act.action.body !== undefined) {
         init.body = JSON.stringify(act.action.body)
@@ -104,13 +138,36 @@ export async function promote(options: PromoteOptions): Promise<PromoteResult> {
 
       result.applied.push({ check: act.check, issueId: act.issueId, action: act.action.label })
     } catch (err) {
-      result.errors.push({
-        check: act.check,
-        issueId: act.issueId,
-        error: errMsg(err),
-      })
+      result.errors.push({ check: act.check, issueId: act.issueId, error: errMsg(err) })
     }
   }
+}
+
+export async function promote(options: PromoteOptions): Promise<PromoteResult> {
+  const {
+    dbUrl,
+    scanResult,
+    checks,
+    dryRun = false,
+    allowDestructive = false,
+    fetchFn = globalThis.fetch.bind(globalThis),
+  } = options
+
+  const { sqlStatements, apiActions, skipped } = planWork(scanResult, checks, allowDestructive)
+  const result: PromoteResult = { applied: [], skipped, errors: [] }
+
+  if (dryRun) {
+    for (const stmt of sqlStatements) {
+      result.applied.push({ check: stmt.check, issueId: stmt.issueId, sql: stmt.sql })
+    }
+    for (const act of apiActions) {
+      result.applied.push({ check: act.check, issueId: act.issueId, action: act.action.label })
+    }
+    return result
+  }
+
+  await executeSql(dbUrl, sqlStatements, result)
+  await executeApiActions(apiActions, fetchFn, result)
 
   return result
 }

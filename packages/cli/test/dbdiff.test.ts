@@ -7,6 +7,9 @@ import {
   stripDbDiffNoise,
   classifyStatement,
   summariseStatement,
+  isDestructiveSql,
+  resolveDbDiffMemoryLimit,
+  buildDbDiffArgs,
 } from '../src/dbdiff.js'
 import { DBDIFF_EXEC_TIMEOUT_MS } from '../src/constants.js'
 
@@ -56,6 +59,129 @@ describe('resolveDbDiffBin', () => {
     expect(command).toBe(process.execPath)
     expect(prefixArgs).toHaveLength(1)
     expect(prefixArgs[0]).toContain('dbdiff.js')
+  })
+})
+
+describe('buildDbDiffArgs', () => {
+  const base = {
+    sourceUrl: 'postgres://s',
+    targetUrl: 'postgres://t',
+    type: 'schema' as const,
+    include: 'both' as const,
+  }
+
+  afterEach(() => {
+    delete process.env.SUPAFORGE_DBDIFF_MEMORY
+  })
+
+  it('always passes --allow-destructive so drops are reported, not fatal', () => {
+    // Without this, @dbdiff/cli >= 3.0.0-rc.3 exits non-zero and writes no
+    // output whenever the target has an extra table or column.
+    expect(buildDbDiffArgs(base, '/tmp/o.sql')).toContain('--allow-destructive')
+  })
+
+  it('honours the include option instead of hardcoding both', () => {
+    expect(buildDbDiffArgs({ ...base, include: 'up' }, '/tmp/o.sql')).toContain('--include=up')
+    expect(buildDbDiffArgs(base, '/tmp/o.sql')).toContain('--include=both')
+  })
+
+  it('passes the core flags', () => {
+    const args = buildDbDiffArgs(base, '/tmp/o.sql')
+    expect(args[0]).toBe('diff')
+    expect(args).toContain('--server1-url=postgres://s')
+    expect(args).toContain('--server2-url=postgres://t')
+    expect(args).toContain('--type=schema')
+    expect(args).toContain('--nocomments')
+    expect(args).toContain('--output=/tmp/o.sql')
+  })
+
+  it('omits --memory-limit unless SUPAFORGE_DBDIFF_MEMORY is set', () => {
+    expect(buildDbDiffArgs(base, '/tmp/o.sql').some(a => a.startsWith('--memory-limit'))).toBe(false)
+    process.env.SUPAFORGE_DBDIFF_MEMORY = '2G'
+    expect(buildDbDiffArgs(base, '/tmp/o.sql')).toContain('--memory-limit=2G')
+  })
+
+  it('merges ignoreSchemas globs into a single --ignore-tables flag', () => {
+    // dbdiff takes one comma-separated list, so these must not be two flags.
+    const args = buildDbDiffArgs(
+      { ...base, ignoreTables: ['cache_x'], ignoreSchemas: ['auth', 'storage'] },
+      '/tmp/o.sql',
+    )
+    const ignore = args.filter(a => a.startsWith('--ignore-tables='))
+    expect(ignore).toEqual(['--ignore-tables=cache_x,auth.*,storage.*'])
+  })
+
+  it('emits --ignore-tables from ignoreSchemas alone', () => {
+    const args = buildDbDiffArgs({ ...base, ignoreSchemas: ['auth'] }, '/tmp/o.sql')
+    expect(args).toContain('--ignore-tables=auth.*')
+  })
+
+  it('omits --tables and --ignore-tables when nothing is filtered', () => {
+    const args = buildDbDiffArgs(base, '/tmp/o.sql')
+    expect(args.some(a => a.startsWith('--tables='))).toBe(false)
+    expect(args.some(a => a.startsWith('--ignore-tables='))).toBe(false)
+  })
+})
+
+describe('resolveDbDiffMemoryLimit', () => {
+  afterEach(() => {
+    delete process.env.SUPAFORGE_DBDIFF_MEMORY
+  })
+
+  it('is undefined when unset, leaving dbdiff on its own 1G default', () => {
+    expect(resolveDbDiffMemoryLimit()).toBeUndefined()
+  })
+
+  it('passes through the values dbdiff accepts', () => {
+    for (const v of ['512M', '2G', '1024K', '-1', '2g']) {
+      process.env.SUPAFORGE_DBDIFF_MEMORY = v
+      expect(resolveDbDiffMemoryLimit()).toBe(v)
+    }
+  })
+
+  it('trims surrounding whitespace', () => {
+    process.env.SUPAFORGE_DBDIFF_MEMORY = '  2G  '
+    expect(resolveDbDiffMemoryLimit()).toBe('2G')
+  })
+
+  it('ignores malformed values rather than forwarding a rejected flag', () => {
+    for (const v of ['', 'lots', '2GB', '2 G', '1G;rm -rf /']) {
+      process.env.SUPAFORGE_DBDIFF_MEMORY = v
+      expect(resolveDbDiffMemoryLimit()).toBeUndefined()
+    }
+  })
+})
+
+describe('isDestructiveSql', () => {
+  it('flags statements that destroy rows', () => {
+    expect(isDestructiveSql('DROP TABLE "stale";')).toBe(true)
+    expect(isDestructiveSql('ALTER TABLE "users" DROP COLUMN "bio";')).toBe(true)
+  })
+
+  it('is case- and whitespace-insensitive', () => {
+    expect(isDestructiveSql('  drop table "stale";')).toBe(true)
+    expect(isDestructiveSql('alter table "users" drop column "bio";')).toBe(true)
+  })
+
+  it('does not flag additive or non-row-destroying statements', () => {
+    expect(isDestructiveSql('ALTER TABLE "users" ADD COLUMN "bio" text;')).toBe(false)
+    expect(isDestructiveSql('CREATE TABLE "t" (id int);')).toBe(false)
+    expect(isDestructiveSql('CREATE INDEX idx ON users(bio);')).toBe(false)
+  })
+
+  it('does not flag drops that only lose a definition', () => {
+    // These are recreatable from the migration, so they stay applyable —
+    // matching how @dbdiff/cli splits its linter into errors and warnings.
+    expect(isDestructiveSql('DROP VIEW "v";')).toBe(false)
+    expect(isDestructiveSql('DROP INDEX idx_bio;')).toBe(false)
+    expect(isDestructiveSql('DROP TRIGGER "t" ON "users";')).toBe(false)
+    expect(isDestructiveSql('DROP FUNCTION "f"();')).toBe(false)
+  })
+
+  it('does not flag DROP CONSTRAINT or DROP DEFAULT on a table', () => {
+    expect(isDestructiveSql('ALTER TABLE "users" DROP CONSTRAINT "fk";')).toBe(false)
+    expect(isDestructiveSql('ALTER TABLE "users" ALTER COLUMN "a" DROP DEFAULT;')).toBe(false)
+    expect(isDestructiveSql('ALTER TABLE "users" ALTER COLUMN "a" DROP NOT NULL;')).toBe(false)
   })
 })
 

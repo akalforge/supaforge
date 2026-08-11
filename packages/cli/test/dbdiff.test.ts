@@ -8,6 +8,7 @@ import {
   classifyStatement,
   summariseStatement,
   isDestructiveSql,
+  resolveDbDiffMemoryLimit,
 } from '../src/dbdiff.js'
 import { DBDIFF_EXEC_TIMEOUT_MS } from '../src/constants.js'
 
@@ -57,6 +58,35 @@ describe('resolveDbDiffBin', () => {
     expect(command).toBe(process.execPath)
     expect(prefixArgs).toHaveLength(1)
     expect(prefixArgs[0]).toContain('dbdiff.js')
+  })
+})
+
+describe('resolveDbDiffMemoryLimit', () => {
+  afterEach(() => {
+    delete process.env.SUPAFORGE_DBDIFF_MEMORY
+  })
+
+  it('is undefined when unset, leaving dbdiff on its own 1G default', () => {
+    expect(resolveDbDiffMemoryLimit()).toBeUndefined()
+  })
+
+  it('passes through the values dbdiff accepts', () => {
+    for (const v of ['512M', '2G', '1024K', '-1', '2g']) {
+      process.env.SUPAFORGE_DBDIFF_MEMORY = v
+      expect(resolveDbDiffMemoryLimit()).toBe(v)
+    }
+  })
+
+  it('trims surrounding whitespace', () => {
+    process.env.SUPAFORGE_DBDIFF_MEMORY = '  2G  '
+    expect(resolveDbDiffMemoryLimit()).toBe('2G')
+  })
+
+  it('ignores malformed values rather than forwarding a rejected flag', () => {
+    for (const v of ['', 'lots', '2GB', '2 G', '1G;rm -rf /']) {
+      process.env.SUPAFORGE_DBDIFF_MEMORY = v
+      expect(resolveDbDiffMemoryLimit()).toBeUndefined()
+    }
   })
 })
 

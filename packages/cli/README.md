@@ -445,11 +445,16 @@ remainder in a fixed 7 queries per side. On a Supabase project where most tables
 are unchanged, this is the difference between thousands of round-trips and a
 couple of dozen. Nothing to configure — it is on for Postgres automatically.
 
-If a diff still times out on a very large schema, raise the ceiling rather than
+If a diff still struggles on a very large schema, raise the ceilings rather than
 narrowing the scan:
 
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SUPAFORGE_DBDIFF_TIMEOUT` | `300` | Seconds before a diff is abandoned |
+| `SUPAFORGE_DBDIFF_MEMORY` | dbdiff's own `1G` | Passed to `--memory-limit`; takes `512M`, `2G`, or `-1` for unlimited |
+
 ```bash
-SUPAFORGE_DBDIFF_TIMEOUT=600 supaforge diff    # seconds; default 300
+SUPAFORGE_DBDIFF_TIMEOUT=600 SUPAFORGE_DBDIFF_MEMORY=2G supaforge diff
 ```
 
 **Destructive changes.** DBDiff refuses by default to generate a migration that

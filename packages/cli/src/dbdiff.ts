@@ -70,6 +70,23 @@ export function resolveDbDiffTimeoutMs(): number {
 }
 
 /**
+ * Resolve the PHP memory limit to hand to @dbdiff/cli, if any.
+ *
+ * @dbdiff/cli caps itself at 1G by default, which is ample for most Supabase
+ * projects but can be exceeded by a very large schema or a wide data diff.
+ * SUPAFORGE_DBDIFF_MEMORY passes straight through to `--memory-limit`, taking
+ * the same values dbdiff accepts: "512M", "2G", or "-1" for unlimited.
+ *
+ * Returns undefined when unset or malformed, leaving dbdiff on its own default
+ * rather than forwarding a value it would reject.
+ */
+export function resolveDbDiffMemoryLimit(): string | undefined {
+  const raw = process.env.SUPAFORGE_DBDIFF_MEMORY?.trim()
+  if (!raw) return undefined
+  return /^-?\d+[KMG]?$/i.test(raw) ? raw : undefined
+}
+
+/**
  * Strip @dbdiff/cli progress / spinner noise from captured output.
  *
  * dbdiff logs informational lines such as "ℹ Now generating UP migration"
@@ -98,7 +115,11 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
     `--server1-url=${options.sourceUrl}`,
     `--server2-url=${options.targetUrl}`,
     `--type=${options.type}`,
-    '--include=both',
+    // Was hardcoded to 'both', silently ignoring options.include. Every caller
+    // passes 'both' (sqlToIssues pairs each UP statement with its DOWN
+    // counterpart, so it needs both directions), but the option was part of the
+    // public interface and did nothing.
+    `--include=${options.include}`,
     '--nocomments',
     // @dbdiff/cli >= 3.0.0-rc.3 refuses to emit a migration containing
     // DROP TABLE or DROP COLUMN unless this is passed, exiting non-zero and
@@ -110,6 +131,11 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
     '--allow-destructive',
     `--output=${outputFile}`,
   ]
+
+  const memoryLimit = resolveDbDiffMemoryLimit()
+  if (memoryLimit) {
+    args.push(`--memory-limit=${memoryLimit}`)
+  }
 
   if (options.tables?.length) {
     args.push(`--tables=${options.tables.join(',')}`)

@@ -105,12 +105,14 @@ export function stripDbDiffNoise(text: string): string {
     .trim()
 }
 
-export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
-  const { command, prefixArgs } = resolveDbDiffBin()
-  const outputFile = join(tmpdir(), `supaforge-dbdiff-${Date.now()}-${Math.random().toString(36).slice(2)}.sql`)
-
+/**
+ * Build the full @dbdiff/cli argument list for a diff run.
+ *
+ * Split out of runDbDiff() so the flag surface is one readable unit and can be
+ * asserted directly in tests, rather than only through a spawned process.
+ */
+export function buildDbDiffArgs(options: DbDiffOptions, outputFile: string): string[] {
   const args = [
-    ...prefixArgs,
     'diff',
     `--server1-url=${options.sourceUrl}`,
     `--server2-url=${options.targetUrl}`,
@@ -137,25 +139,29 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
     args.push(`--memory-limit=${memoryLimit}`)
   }
 
+  // Both --tables and --ignore-tables take one comma-separated list, so the
+  // ignoreSchemas globs (auth.*, storage.*) have to merge into any existing
+  // --ignore-tables value rather than be appended as a second flag.
+  const ignore = [
+    ...(options.ignoreTables ?? []),
+    ...(options.ignoreSchemas ?? []).map(s => `${s}.*`),
+  ]
+
   if (options.tables?.length) {
     args.push(`--tables=${options.tables.join(',')}`)
   }
-
-  if (options.ignoreTables?.length) {
-    args.push(`--ignore-tables=${options.ignoreTables.join(',')}`)
+  if (ignore.length) {
+    args.push(`--ignore-tables=${ignore.join(',')}`)
   }
 
-  // Convert ignoreSchemas to --ignore-tables glob patterns (e.g. auth.* , storage.*)
-  if (options.ignoreSchemas?.length) {
-    const schemaGlobs = options.ignoreSchemas.map(s => `${s}.*`)
-    const existing = args.find(a => a.startsWith('--ignore-tables='))
-    if (existing) {
-      const idx = args.indexOf(existing)
-      args[idx] = `${existing},${schemaGlobs.join(',')}`
-    } else {
-      args.push(`--ignore-tables=${schemaGlobs.join(',')}`)
-    }
-  }
+  return args
+}
+
+export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
+  const { command, prefixArgs } = resolveDbDiffBin()
+  const outputFile = join(tmpdir(), `supaforge-dbdiff-${Date.now()}-${Math.random().toString(36).slice(2)}.sql`)
+
+  const args = [...prefixArgs, ...buildDbDiffArgs(options, outputFile)]
 
   const timeoutMs = resolveDbDiffTimeoutMs()
 

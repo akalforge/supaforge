@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
 import type { DriftIssue } from './types/drift'
-import { errMsg, friendlyDbError } from './utils/error'
+import { errMsg, friendlyDbError, DiagnosticError } from './utils/error'
 import { DBDIFF_EXEC_TIMEOUT_MS, DBDIFF_MAX_BUFFER } from './constants'
 
 const execFileAsync = promisify(execFile)
@@ -192,7 +192,7 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
       combined.includes('could not determine executable') ||
       combined.includes('404')
     ) {
-      throw new Error(
+      throw new DiagnosticError(
         '@dbdiff/cli is not installed. Install it with: npm install @dbdiff/cli',
       )
     }
@@ -217,7 +217,7 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
       /ETIMEDOUT|timed out/i.test(combined)
     if (timedOut) {
       const secs = Math.round(timeoutMs / 1000)
-      throw new Error(
+      throw new DiagnosticError(
         `Schema diff timed out after ${secs}s — the schema is very large or the ` +
         `database connection is slow.\n` +
         `  Remediations:\n` +

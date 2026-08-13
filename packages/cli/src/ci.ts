@@ -75,14 +75,26 @@ export function formatCiSummary(result: ScanResult): {
   timestamp: string
   score: number
   summary: ScanResult['summary']
+  /**
+   * Checks that failed to run. Empty on a healthy scan.
+   *
+   * Without this a reader of the uploaded artifact saw only a clean summary
+   * and had no way to tell that a check never ran — the exit code carried
+   * that signal, but the artifact did not (issue #29).
+   */
+  errors: Array<{ check: string; message: string }>
   criticalIssues: Array<{ check: string; id: string; title: string }>
   warningIssues: Array<{ check: string; id: string; title: string }>
 } {
   const criticalIssues: Array<{ check: string; id: string; title: string }> = []
   const warningIssues:  Array<{ check: string; id: string; title: string }> = []
+  const errors: Array<{ check: string; message: string }> = []
 
-  for (const check of result.checks) {
-    for (const issue of check.issues) {
+  for (const check of result.checks ?? []) {
+    if (check?.status === 'error') {
+      errors.push({ check: check.check, message: check.error ?? 'Check failed with no error message' })
+    }
+    for (const issue of check?.issues ?? []) {
       const entry = { check: check.check, id: issue.id, title: issue.title }
       if (issue.severity === 'critical') {
         criticalIssues.push(entry)
@@ -96,6 +108,7 @@ export function formatCiSummary(result: ScanResult): {
     timestamp: result.timestamp,
     score: result.score,
     summary: result.summary,
+    errors,
     criticalIssues,
     warningIssues,
   }

@@ -12,6 +12,8 @@ export interface TipContext {
   driftedChecks?: CheckName[]
   /** diff: checks that were skipped (via --skip or config). */
   skippedChecks?: CheckName[]
+  /** diff: checks that failed to run. Drift is unknown for these. */
+  erroredChecks?: CheckName[]
   /** diff: whether --detail was used. */
   detail?: boolean
   /** diff: whether --apply was used. */
@@ -38,7 +40,7 @@ interface Tip {
 
 function diffTips(ctx: TipContext): Tip[] {
   const tips: Tip[] = []
-  const { driftTotal = 0, driftedChecks = [], detail, apply, singleCheck, skippedChecks = [] } = ctx
+  const { driftTotal = 0, driftedChecks = [], detail, apply, singleCheck, skippedChecks = [], erroredChecks = [] } = ctx
 
   if (apply) {
     // Post-apply tips
@@ -68,12 +70,7 @@ function diffTips(ctx: TipContext): Tip[] {
       tips.push({ text: `Fix one layer at a time: ${cmd(`--check=${driftedChecks[0]} --apply`)}.` })
     }
   } else if (driftTotal === 0) {
-    // Clean
-    tips.push({ text: `Environments are in sync — run ${cmd('supaforge snapshot')} to capture this state.` })
-    tips.push({ text: `Wire this into CI: ${cmd('supaforge diff')} exits 1 on critical drift.` })
-    if (!singleCheck) {
-      tips.push({ text: `Deep-dive a specific layer: ${cmd('supaforge diff --check=rls --detail')}.` })
-    }
+    tips.push(...noDriftTips(erroredChecks, singleCheck))
   }
 
   return tips
@@ -142,6 +139,37 @@ const GENERAL_TIPS: Tip[] = [
  * Pick the most relevant tip for the current context.
  * Returns null when no tip applies (e.g. --json mode — caller should gate on that).
  */
+/**
+ * Tips for a scan that found no drift.
+ *
+ * "No drift" and "nothing was measured" look identical in the totals but mean
+ * opposite things, so they get different advice. Telling a user their
+ * environments are in sync when the only check errored is the most actively
+ * misleading output the tool can produce (issue #29).
+ *
+ * Extracted from pickTip rather than added as another branch: the extra
+ * condition took that function from 17 to 21 cognitive complexity.
+ */
+function noDriftTips(erroredChecks: CheckName[], singleCheck?: CheckName): Array<{ text: string }> {
+  if (erroredChecks.length > 0) {
+    const noun = erroredChecks.length === 1 ? 'check' : 'checks'
+    const names = erroredChecks.join(', ')
+    return [
+      { text: `${erroredChecks.length} ${noun} could not run (${names}) — drift is unknown, not zero.` },
+      { text: `Re-run with ${cmd('--detail')} to see why, then fix the cause before trusting this result.` },
+    ]
+  }
+
+  const tips = [
+    { text: `Environments are in sync — run ${cmd('supaforge snapshot')} to capture this state.` },
+    { text: `Wire this into CI: ${cmd('supaforge diff')} exits 1 on critical drift.` },
+  ]
+  if (!singleCheck) {
+    tips.push({ text: `Deep-dive a specific layer: ${cmd('supaforge diff --check=rls --detail')}.` })
+  }
+  return tips
+}
+
 export function pickTip(ctx: TipContext, seed?: number): string | null {
   let pool: Tip[]
 

@@ -3,6 +3,19 @@ import { CHECK_META } from './types/drift'
 import { CHECK_LINE_PADDING } from './constants'
 import { ok, warn, dim, bold, c } from './ui'
 
+/**
+ * Number of checks that failed to run.
+ *
+ * Defensive against a malformed or partial ScanResult — an older cached
+ * report, or a hand-built object in a hook — where `checks` may be missing
+ * or not an array. Reporting zero errored checks is the safe fallback for
+ * rendering; it never invents an error that is not there.
+ */
+export function countErrored(result: Pick<ScanResult, 'checks'>): number {
+  if (!Array.isArray(result?.checks)) return 0
+  return result.checks.filter(c => c?.status === 'error').length
+}
+
 export function renderSummary(result: ScanResult): string {
   const lines: string[] = ['']
 
@@ -10,11 +23,29 @@ export function renderSummary(result: ScanResult): string {
   const driftedCount = result.checks.filter(l => l.status === 'drifted').length
   const checkNoun = driftedCount === 1 ? 'check' : 'checks'
 
-  lines.push(
-    result.summary.total > 0
-      ? `${bold('SupaForge scan complete:')} ${warn(`${result.summary.total} drift ${noun}`)} found across ${driftedCount} ${checkNoun}.`
-      : `${bold('SupaForge scan complete:')} ${ok('no drift detected. ✓')}`,
-  )
+  // A check that errored measured nothing. Reporting that as "no drift
+  // detected" told users the environments matched when in truth the
+  // comparison never ran (issue #29).
+  const erroredCount = countErrored(result)
+  const erroredNoun = erroredCount === 1 ? 'check' : 'checks'
+
+  if (result.summary.total > 0) {
+    lines.push(
+      `${bold('SupaForge scan complete:')} ${warn(`${result.summary.total} drift ${noun}`)} found across ${driftedCount} ${checkNoun}.`,
+    )
+  } else if (erroredCount > 0) {
+    lines.push(
+      `${bold('SupaForge scan complete:')} ${warn(`${erroredCount} ${erroredNoun} could not complete`)} — drift is unknown.`,
+    )
+  } else {
+    lines.push(`${bold('SupaForge scan complete:')} ${ok('no drift detected. ✓')}`)
+  }
+
+  // Drift was found *and* something failed: say so, or the count reads as the
+  // whole picture.
+  if (result.summary.total > 0 && erroredCount > 0) {
+    lines.push(warn(`${erroredCount} further ${erroredNoun} could not complete — drift may be understated.`))
+  }
   lines.push(`${dim('Source:')} ${result.source} ${dim('→')} ${dim('Target:')} ${result.target}`)
   lines.push('')
 

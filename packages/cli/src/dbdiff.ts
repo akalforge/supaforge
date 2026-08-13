@@ -326,10 +326,22 @@ export function sqlToIssues(
 
   if (upStatements.length === 0) return []
 
+  const merged = mergeRoutineReplacements(upStatements, downStatements)
+
   // Generate one issue per UP statement, paired with its DOWN counterpart
-  return upStatements.map((upSql, i) => {
-    const downSql = downStatements[i] ?? ''
+  return merged.map(({ up: upSql, down: downSql, modifiedRoutine }, i) => {
     const type = classifyStatement(upSql)
+
+    if (modifiedRoutine) {
+      return {
+        id: `${check}-alter-function-${i + 1}`,
+        check,
+        severity: 'warning' as const,
+        title: `Function modified: ${modifiedRoutine}`,
+        description: 'Function body differs between source and target.',
+        sql: { up: upSql, down: downSql },
+      }
+    }
 
     return {
       id: `${check}-${type}-${i + 1}`,
@@ -340,6 +352,67 @@ export function sqlToIssues(
       sql: { up: upSql, down: downSql },
     }
   })
+}
+
+interface MergedStatement {
+  up: string
+  down: string
+  /** Set when this entry is a DROP+CREATE pair replacing one routine. */
+  modifiedRoutine?: string
+}
+
+/**
+ * Collapse `DROP FUNCTION` + `CREATE [OR REPLACE] FUNCTION` pairs for the same
+ * routine into a single entry.
+ *
+ * dbdiff replaces a changed function by emitting both statements. Treating them
+ * as independent issues reported one modified function twice — once as a
+ * CRITICAL "Extra function" and once as a WARNING "Function missing" — when it
+ * is neither extra nor missing (issue #35). On a real diff that inflated 105
+ * genuine differences into 149 reported issues, and dragged the drift score
+ * down via the bogus criticals.
+ *
+ * Only a DROP followed by a CREATE for the same routine is merged; an
+ * unpaired DROP is still a genuine "Extra function".
+ */
+export function mergeRoutineReplacements(
+  upStatements: string[],
+  downStatements: string[],
+): MergedStatement[] {
+  const createdRoutines = new Map<string, number>()
+  upStatements.forEach((sql, i) => {
+    if (classifyStatement(sql) === 'create-function') {
+      createdRoutines.set(routineKey(sql), i)
+    }
+  })
+
+  const absorbed = new Set<number>()
+  const out: MergedStatement[] = []
+
+  upStatements.forEach((upSql, i) => {
+    if (absorbed.has(i)) return
+
+    const down = downStatements[i] ?? ''
+    if (classifyStatement(upSql) !== 'drop-function') {
+      out.push({ up: upSql, down })
+      return
+    }
+
+    const createIdx = createdRoutines.get(routineKey(upSql))
+    if (createIdx === undefined || createIdx <= i) {
+      out.push({ up: upSql, down })
+      return
+    }
+
+    absorbed.add(createIdx)
+    out.push({
+      up: `${upSql}\n${upStatements[createIdx]}`,
+      down: [down, downStatements[createIdx] ?? ''].filter(Boolean).join('\n'),
+      modifiedRoutine: extractRoutineName(upStatements[createIdx]),
+    })
+  })
+
+  return out
 }
 
 /**
@@ -538,14 +611,14 @@ export function summariseStatement(sql: string, check: 'schema' | 'data'): strin
 
   // Functions / procedures
   if (upper.startsWith('CREATE FUNCTION') || upper.startsWith('CREATE OR REPLACE FUNCTION')) {
-    return `Function missing: ${extractName(sql, /FUNCTION\s+["'`]?(\w+)["'`]?/i)}`
+    return `Function missing: ${extractRoutineName(sql)}`
   }
-  if (upper.startsWith('ALTER FUNCTION')) return `Function altered: ${extractName(sql, /FUNCTION\s+["'`]?(\w+)["'`]?/i)}`
-  if (upper.startsWith('DROP FUNCTION')) return `Extra function: ${extractName(sql, /FUNCTION\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('ALTER FUNCTION')) return `Function altered: ${extractRoutineName(sql)}`
+  if (upper.startsWith('DROP FUNCTION')) return `Extra function: ${extractRoutineName(sql)}`
   if (upper.startsWith('CREATE PROCEDURE') || upper.startsWith('CREATE OR REPLACE PROCEDURE')) {
-    return `Procedure missing: ${extractName(sql, /PROCEDURE\s+["'`]?(\w+)["'`]?/i)}`
+    return `Procedure missing: ${extractRoutineName(sql)}`
   }
-  if (upper.startsWith('DROP PROCEDURE')) return `Extra procedure: ${extractName(sql, /PROCEDURE\s+["'`]?(\w+)["'`]?/i)}`
+  if (upper.startsWith('DROP PROCEDURE')) return `Extra procedure: ${extractRoutineName(sql)}`
 
   // Triggers
   if (upper.startsWith('CREATE TRIGGER') || upper.startsWith('CREATE OR REPLACE TRIGGER')) {
@@ -584,4 +657,51 @@ export function summariseStatement(sql: string, check: 'schema' | 'data'): strin
 
 function extractName(sql: string, pattern: RegExp): string {
   return sql.match(pattern)?.[1] ?? 'unknown'
+}
+
+/**
+ * Extract a routine name from a FUNCTION or PROCEDURE statement.
+ *
+ * A bare `/FUNCTION\s+"?(\w+)"?/` gets this wrong in both directions
+ * (issue #35): it returns "IF" for `DROP FUNCTION IF EXISTS "f"`, and the
+ * schema qualifier "public" for `CREATE OR REPLACE FUNCTION public.f(...)`.
+ * Neither title named the routine at all.
+ *
+ * Skips an optional IF EXISTS, then takes the optionally schema-qualified,
+ * optionally quoted identifier, normalising `"public" . "f"` to `public.f`.
+ */
+export function extractRoutineName(sql: string): string {
+  const head = /\b(?:FUNCTION|PROCEDURE)\s+(?:IF\s+EXISTS\s+)?/i.exec(sql)
+  if (!head) return 'unknown'
+
+  // Matched piecewise rather than as one expression. A combined pattern needs
+  // an optional quote on both sides of each identifier ("?[\w$]+"?), and that
+  // ambiguity backtracks super-linearly on adversarial input — a real concern
+  // for SQL arriving from an external process.
+  let rest = sql.slice(head.index + head[0].length)
+  const parts: string[] = []
+
+  for (let depth = 0; depth < 2; depth++) {
+    const ident = /^(?:"([^"]*)"|([\w$]+))/.exec(rest)
+    if (!ident) break
+    parts.push(ident[1] ?? ident[2])
+    rest = rest.slice(ident[0].length)
+
+    const dot = /^\s*\.\s*/.exec(rest)
+    if (!dot) break
+    rest = rest.slice(dot[0].length)
+  }
+
+  return parts.length > 0 ? parts.join('.') : 'unknown'
+}
+
+/**
+ * Key a routine by its unqualified name, for pairing a DROP with the CREATE
+ * that replaces it. dbdiff emits the DROP unqualified (`DROP FUNCTION IF
+ * EXISTS "f"`) and the CREATE qualified (`CREATE OR REPLACE FUNCTION
+ * public.f(...)`), so the schema has to come off before they can be matched.
+ */
+function routineKey(sql: string): string {
+  const name = extractRoutineName(sql)
+  return name.slice(name.lastIndexOf('.') + 1).toLowerCase()
 }

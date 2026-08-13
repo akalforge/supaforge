@@ -10,6 +10,8 @@ import {
   isDestructiveSql,
   resolveDbDiffMemoryLimit,
   buildDbDiffArgs,
+  extractRoutineName,
+  mergeRoutineReplacements,
 } from '../src/dbdiff.js'
 import { DBDIFF_EXEC_TIMEOUT_MS } from '../src/constants.js'
 
@@ -638,5 +640,120 @@ describe('sqlToIssues — cross-schema FK filtering', () => {
     }, 'schema', ['auth'])
     // Still shows as an issue — caller must provide ignoredSchemaTables to suppress it
     expect(issues).toHaveLength(1)
+  })
+})
+
+// ── Regression: issue #35 ─────────────────────────────────────────────────
+// "Schema check double-counts modified functions and mislabels them as
+// missing / extra". A function present on both sides with a differing body
+// was reported twice — once CRITICAL "Extra function: IF", once WARNING
+// "Function missing: public" — and neither title named the function.
+
+describe('extractRoutineName (issue #35)', () => {
+  it('skips IF EXISTS instead of returning the IF keyword', () => {
+    expect(extractRoutineName('DROP FUNCTION IF EXISTS "example_fn";')).toBe('example_fn')
+    expect(extractRoutineName('DROP FUNCTION if exists example_fn;')).toBe('example_fn')
+  })
+
+  it('keeps the schema qualifier instead of returning it alone', () => {
+    expect(
+      extractRoutineName('CREATE OR REPLACE FUNCTION public.example_fn() RETURNS integer AS $$ SELECT 1 $$;'),
+    ).toBe('public.example_fn')
+  })
+
+  it('handles quoting on either side of the dot', () => {
+    expect(extractRoutineName('DROP FUNCTION "public"."my_fn";')).toBe('public.my_fn')
+    expect(extractRoutineName('DROP FUNCTION public."my_fn";')).toBe('public.my_fn')
+  })
+
+  it('handles unqualified and procedure forms', () => {
+    expect(extractRoutineName('DROP FUNCTION "plain_fn";')).toBe('plain_fn')
+    expect(extractRoutineName('DROP PROCEDURE IF EXISTS public.do_thing;')).toBe('public.do_thing')
+  })
+
+  it('returns unknown rather than throwing on unrecognised SQL', () => {
+    expect(extractRoutineName('ALTER TABLE "t" ADD COLUMN "c" text;')).toBe('unknown')
+  })
+})
+
+describe('routine titles name the routine (issue #35)', () => {
+  it('no longer reports the IF keyword as the function name', () => {
+    const title = summariseStatement('DROP FUNCTION IF EXISTS "example_fn";', 'schema')
+    expect(title).toBe('Extra function: example_fn')
+    expect(title).not.toContain('IF')
+  })
+
+  it('no longer reports the schema qualifier as the function name', () => {
+    const title = summariseStatement(
+      'CREATE OR REPLACE FUNCTION public.example_fn() RETURNS integer AS $$ SELECT 1 $$;',
+      'schema',
+    )
+    expect(title).toBe('Function missing: public.example_fn')
+  })
+})
+
+describe('mergeRoutineReplacements (issue #35)', () => {
+  const DROP = 'DROP FUNCTION IF EXISTS "example_fn";'
+  const CREATE = 'CREATE OR REPLACE FUNCTION public.example_fn() RETURNS integer AS $$ SELECT 2 $$;'
+
+  it('collapses a DROP + CREATE pair for the same routine into one entry', () => {
+    const merged = mergeRoutineReplacements([DROP, CREATE], ['', ''])
+    expect(merged).toHaveLength(1)
+    expect(merged[0].modifiedRoutine).toBe('public.example_fn')
+    expect(merged[0].up).toContain('DROP FUNCTION')
+    expect(merged[0].up).toContain('CREATE OR REPLACE FUNCTION')
+  })
+
+  it('leaves an unpaired DROP alone — that is a genuine extra function', () => {
+    const merged = mergeRoutineReplacements([DROP], [''])
+    expect(merged).toHaveLength(1)
+    expect(merged[0].modifiedRoutine).toBeUndefined()
+  })
+
+  it('leaves an unpaired CREATE alone — that is a genuine missing function', () => {
+    const merged = mergeRoutineReplacements([CREATE], [''])
+    expect(merged).toHaveLength(1)
+    expect(merged[0].modifiedRoutine).toBeUndefined()
+  })
+
+  it('does not pair a DROP with a CREATE for a different routine', () => {
+    const other = 'CREATE OR REPLACE FUNCTION public.other_fn() RETURNS void AS $$ SELECT $$;'
+    const merged = mergeRoutineReplacements([DROP, other], ['', ''])
+    expect(merged).toHaveLength(2)
+    expect(merged.every(m => m.modifiedRoutine === undefined)).toBe(true)
+  })
+
+  it('leaves non-routine statements untouched', () => {
+    const stmts = ['ALTER TABLE "t" ADD COLUMN "c" text;', 'DROP TABLE "old";']
+    expect(mergeRoutineReplacements(stmts, ['', ''])).toHaveLength(2)
+  })
+})
+
+describe('sqlToIssues routine reporting (issue #35)', () => {
+  const up = [
+    'DROP FUNCTION IF EXISTS "example_fn";',
+    'CREATE OR REPLACE FUNCTION public.example_fn() RETURNS integer AS $$ SELECT 2 $$;',
+  ].join('\n')
+
+  it('reports a modified function once, as a warning, correctly named', () => {
+    const issues = sqlToIssues({ up, down: '' }, 'schema')
+    expect(issues).toHaveLength(1)
+    expect(issues[0].title).toBe('Function modified: public.example_fn')
+    // Was CRITICAL via the bogus "Extra function", which inflated the
+    // critical count and dragged the drift score down.
+    expect(issues[0].severity).toBe('warning')
+  })
+
+  it('keeps both statements in the fix so the replacement still applies', () => {
+    const issues = sqlToIssues({ up, down: '' }, 'schema')
+    expect(issues[0].sql?.up).toContain('DROP FUNCTION')
+    expect(issues[0].sql?.up).toContain('CREATE OR REPLACE FUNCTION')
+  })
+
+  it('still reports a genuinely extra function as critical', () => {
+    const issues = sqlToIssues({ up: 'DROP FUNCTION IF EXISTS "gone_fn";', down: '' }, 'schema')
+    expect(issues).toHaveLength(1)
+    expect(issues[0].severity).toBe('critical')
+    expect(issues[0].title).toBe('Extra function: gone_fn')
   })
 })

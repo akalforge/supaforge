@@ -4,6 +4,7 @@ import {
   parseFilename,
   diffMigrations,
   readLocalMigrations,
+  resolveMigrationsMode,
   DEFAULT_MIGRATIONS_DIR,
 } from '../../src/checks/migrations.js'
 import type { CheckContext } from '../../src/checks/base.js'
@@ -141,8 +142,8 @@ describe('diffMigrations', () => {
     expect(diffMigrations([], [])).toHaveLength(0)
   })
 
-  it('all local files are unapplied when DB has no records', () => {
-    const issues = diffMigrations(local, [])
+  it('reports every local file in warn mode when DB has no records', () => {
+    const issues = diffMigrations(local, [], 'warn')
     expect(issues).toHaveLength(3)
     expect(issues.every(i => i.id.startsWith('migration-unapplied'))).toBe(true)
   })
@@ -161,12 +162,12 @@ describe('diffMigrations', () => {
   })
 
   it('mark-applied SQL uses ON CONFLICT DO NOTHING', () => {
-    const issues = diffMigrations(local.slice(0, 1), [])
+    const issues = diffMigrations(local.slice(0, 1), [], 'warn')
     expect(issues[0].sql?.up).toContain('ON CONFLICT (version) DO NOTHING')
   })
 
   it('mark-applied SQL uses MIGRATIONS_TABLE constant', () => {
-    const issues = diffMigrations(local.slice(0, 1), [])
+    const issues = diffMigrations(local.slice(0, 1), [], 'warn')
     expect(issues[0].sql?.up).toContain('supabase_migrations.schema_migrations')
     expect(issues[0].sql?.down).toContain('supabase_migrations.schema_migrations')
   })
@@ -175,7 +176,7 @@ describe('diffMigrations', () => {
     const malicious: LocalMigration[] = [
       { version: "001'; DROP TABLE users; --", name: 'exploit', filename: "001'; DROP TABLE users; --.sql" },
     ]
-    const issues = diffMigrations(malicious, [])
+    const issues = diffMigrations(malicious, [], 'warn')
     const sql = issues[0].sql?.up ?? ''
     // quoteLiteral doubles single quotes — verify no unescaped injection
     expect(sql).toContain("'001''; DROP TABLE users; --'")
@@ -186,13 +187,13 @@ describe('diffMigrations', () => {
     const malicious: LocalMigration[] = [
       { version: '001', name: "test' OR '1'='1", filename: "001_test.sql" },
     ]
-    const issues = diffMigrations(malicious, [])
+    const issues = diffMigrations(malicious, [], 'warn')
     const sql = issues[0].sql?.up ?? ''
     expect(sql).toContain("'test'' OR ''1''=''1'")
   })
 
   it('delete SQL uses quoteLiteral for version', () => {
-    const issues = diffMigrations(local.slice(0, 1), [])
+    const issues = diffMigrations(local.slice(0, 1), [], 'warn')
     // Should be quoted with single quotes via quoteLiteral
     expect(issues[0].sql?.down).toContain("WHERE version = '001'")
   })
@@ -230,9 +231,12 @@ describe('MigrationsCheck', () => {
     const check = new MigrationsCheck(queryFn, readDirFn)
     const issues = await check.scan(mockContext())
 
-    expect(issues).toHaveLength(2)
+    // Default 'auto' mode: nothing tracked at all, so one INFO about the
+    // workflow rather than a warning per file (issue #31).
+    expect(issues).toHaveLength(1)
     expect(issues[0].check).toBe('migrations')
-    expect(issues[0].severity).toBe('warning')
+    expect(issues[0].severity).toBe('info')
+    expect(issues[0].id).toBe('migration-workflow-untracked')
   })
 
   it('returns clean when files match DB records', async () => {
@@ -252,9 +256,11 @@ describe('MigrationsCheck', () => {
     const check = new MigrationsCheck(queryFn, readDirFn)
     const issues = await check.scan(mockContext())
 
-    // All local files reported as unapplied
+    // The tracking table does not exist, so nothing is tracked — same shape
+    // as the untracked workflow, reported once (issue #31).
     expect(issues).toHaveLength(1)
-    expect(issues[0].id).toBe('migration-unapplied-001')
+    expect(issues[0].id).toBe('migration-workflow-untracked')
+    expect(issues[0].severity).toBe('info')
   })
 
   it('queries the target DB, not the source', async () => {
@@ -271,5 +277,109 @@ describe('MigrationsCheck', () => {
   it('name property is migrations', () => {
     const check = new MigrationsCheck(async () => [], async () => [])
     expect(check.name).toBe('migrations')
+  })
+})
+
+// ── Regression: issue #31 ─────────────────────────────────────────────────
+// "Migration history check reports false positives for manually-applied
+// migrations". schema_migrations is a Supabase CLI convention, not a database
+// requirement — projects applying migrations via psql never populate it, so
+// every local file was reported as unapplied on every scan.
+
+describe('untracked migration workflow (issue #31)', () => {
+  const local: LocalMigration[] = [
+    { version: '001', name: 'initial', filename: '001_initial.sql' },
+    { version: '002', name: 'add_users', filename: '002_add_users.sql' },
+    { version: '003', name: 'add_roles', filename: '003_add_roles.sql' },
+  ]
+
+  it('reports one INFO instead of a warning per file when nothing is tracked', () => {
+    const issues = diffMigrations(local, [])
+    expect(issues).toHaveLength(1)
+    expect(issues[0].severity).toBe('info')
+    expect(issues[0].id).toBe('migration-workflow-untracked')
+    expect(issues[0].title).toContain('3 local files')
+  })
+
+  it('explains how to record or silence them', () => {
+    const [issue] = diffMigrations(local, [])
+    expect(issue.description).toContain('migrate baseline')
+    expect(issue.description).toContain('checks.migrations.mode')
+  })
+
+  it('singularises for a lone migration file', () => {
+    const issues = diffMigrations(local.slice(0, 1), [])
+    expect(issues[0].title).toContain('1 local file')
+  })
+
+  it('does NOT collapse when some migrations are tracked — that is real drift', () => {
+    // A project that tracks some and missed others has genuine drift, and
+    // must still get one actionable warning per missing file.
+    const issues = diffMigrations(local, [{ version: '001', name: 'initial' }])
+    expect(issues).toHaveLength(2)
+    expect(issues.every(i => i.severity === 'warning')).toBe(true)
+    expect(issues.every(i => i.id.startsWith('migration-unapplied'))).toBe(true)
+  })
+
+  it('stays silent when there are no local files either', () => {
+    expect(diffMigrations([], [])).toHaveLength(0)
+  })
+})
+
+describe('checks.migrations.mode (issue #31)', () => {
+  const local: LocalMigration[] = [
+    { version: '001', name: 'initial', filename: '001_initial.sql' },
+  ]
+
+  it('warn forces a per-file warning even when nothing is tracked', () => {
+    const issues = diffMigrations(local, [], 'warn')
+    expect(issues).toHaveLength(1)
+    expect(issues[0].severity).toBe('warning')
+    expect(issues[0].id).toBe('migration-unapplied-001')
+  })
+
+  it('ignore suppresses the check entirely, including untracked DB records', () => {
+    expect(diffMigrations(local, [], 'ignore')).toEqual([])
+    expect(diffMigrations([], [{ version: '999', name: 'mystery' }], 'ignore')).toEqual([])
+  })
+
+  it('ignore short-circuits before any DB query or directory read', async () => {
+    // Defensive: a user disabling the check should not pay for it, and a
+    // broken migrations dir or unreachable DB must not surface an error.
+    let queried = false
+    let readDir = false
+    const queryFn: QueryFn = async () => { queried = true; return [] }
+    const readDirFn: ReadDirFn = async () => { readDir = true; return ['001_x.sql'] }
+
+    const check = new MigrationsCheck(queryFn, readDirFn)
+    const issues = await check.scan(mockContext({ checks: { migrations: { mode: 'ignore' } } }))
+
+    expect(issues).toEqual([])
+    expect(queried).toBe(false)
+    expect(readDir).toBe(false)
+  })
+
+  it('warn mode is honoured through the check', async () => {
+    const readDirFn: ReadDirFn = async () => ['001_setup.sql', '002_data.sql']
+    const queryFn: QueryFn = async () => []
+    const check = new MigrationsCheck(queryFn, readDirFn)
+    const issues = await check.scan(mockContext({ checks: { migrations: { mode: 'warn' } } }))
+    expect(issues).toHaveLength(2)
+    expect(issues.every(i => i.severity === 'warning')).toBe(true)
+  })
+})
+
+describe('resolveMigrationsMode', () => {
+  it('accepts the documented modes', () => {
+    expect(resolveMigrationsMode('auto')).toBe('auto')
+    expect(resolveMigrationsMode('warn')).toBe('warn')
+    expect(resolveMigrationsMode('ignore')).toBe('ignore')
+  })
+
+  it('falls back to auto rather than throwing on a bad config value', () => {
+    // A typo in a config file should not take the whole scan down.
+    for (const bad of [undefined, null, '', 'WARN', 'off', 42, {}, []]) {
+      expect(resolveMigrationsMode(bad)).toBe('auto')
+    }
   })
 })

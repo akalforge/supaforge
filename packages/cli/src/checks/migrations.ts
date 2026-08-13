@@ -5,6 +5,7 @@ import type { DriftIssue } from '../types/drift.js'
 import { MIGRATIONS_TABLE } from '../constants.js'
 import { quoteLiteral } from '../utils/sql.js'
 import { Check, type CheckContext } from './base.js'
+import type { MigrationsMode } from '../types/config.js'
 
 export const DEFAULT_MIGRATIONS_DIR = 'supabase/migrations'
 
@@ -44,13 +45,17 @@ export class MigrationsCheck extends Check {
 
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     const dir = ctx.config.checks?.migrations?.dir ?? DEFAULT_MIGRATIONS_DIR
+    const mode = resolveMigrationsMode(ctx.config.checks?.migrations?.mode)
+
+    // Nothing to read or query when the check is switched off entirely.
+    if (mode === 'ignore') return []
 
     const [local, db] = await Promise.all([
       readLocalMigrations(dir, this.readDirFn),
       this.fetchDbMigrations(ctx.target.dbUrl),
     ])
 
-    return diffMigrations(local, db)
+    return diffMigrations(local, db, mode)
   }
 
   private async fetchDbMigrations(dbUrl: string): Promise<MigrationRecord[]> {
@@ -94,17 +99,64 @@ export async function readLocalMigrations(
   return migrations
 }
 
+const MIGRATIONS_MODES: MigrationsMode[] = ['auto', 'warn', 'ignore']
+
+/**
+ * Normalise the configured mode.
+ *
+ * An unrecognised value falls back to 'auto' rather than throwing — a typo in
+ * a config file should not take the whole scan down, and 'auto' is the least
+ * surprising default.
+ */
+export function resolveMigrationsMode(raw: unknown): MigrationsMode {
+  return MIGRATIONS_MODES.includes(raw as MigrationsMode) ? (raw as MigrationsMode) : 'auto'
+}
+
+/**
+ * One INFO describing a project that applies migrations outside the Supabase
+ * CLI, instead of one warning per file.
+ *
+ * schema_migrations is a Supabase CLI convention, not a database requirement.
+ * Projects that apply migrations via psql or the SQL editor never populate it,
+ * so every local file was reported as "unapplied" on every scan — all false
+ * positives, and enough of them to drown the rest of the layer (issue #31).
+ */
+function untrackedWorkflowIssue(local: LocalMigration[]): DriftIssue {
+  const noun = local.length === 1 ? 'file' : 'files'
+  return {
+    id: 'migration-workflow-untracked',
+    check: 'migrations',
+    severity: 'info',
+    title: `Untracked migration workflow: ${local.length} local ${noun}, none recorded`,
+    description:
+      `${MIGRATIONS_TABLE} is empty while ${local.length} migration ${noun} exist locally. ` +
+      'That is the normal shape for a project applying migrations outside the Supabase CLI ' +
+      '(psql, the SQL editor, or another tool), so each file is not reported separately. ' +
+      'Run `supaforge migrate baseline` to record them as applied, or set ' +
+      'checks.migrations.mode to "warn" to report every file, or "ignore" to disable this check.',
+    sourceValue: `${local.length} local migration ${noun}`,
+  }
+}
+
 export function diffMigrations(
   local: LocalMigration[],
   db: MigrationRecord[],
+  mode: MigrationsMode = 'auto',
 ): DriftIssue[] {
+  if (mode === 'ignore') return []
+
   const issues: DriftIssue[] = []
   const dbMap = new Map(db.map(r => [r.version, r]))
   const localMap = new Map(local.map(m => [m.version, m]))
+  const unapplied = local.filter(m => !dbMap.has(m.version))
 
-  // Local files not recorded in DB (unapplied)
-  for (const migration of local) {
-    if (!dbMap.has(migration.version)) {
+  // Nothing tracked at all, but files on disk: report the workflow once
+  // rather than each file. Requires db to be *entirely* empty — a project
+  // that tracks some migrations and missed others has genuine drift.
+  if (mode === 'auto' && db.length === 0 && unapplied.length > 0) {
+    issues.push(untrackedWorkflowIssue(local))
+  } else {
+    for (const migration of unapplied) {
       issues.push({
         id: `migration-unapplied-${migration.version}`,
         check: 'migrations',

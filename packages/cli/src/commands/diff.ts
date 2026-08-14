@@ -109,6 +109,8 @@ export default class Diff extends BaseCommand {
         if (event.phase === 'check:start') {
           process.stdout.write(`  ▶ ${idx} ${label}...\n`)
         } else {
+          // Clear any in-place detail line before the final result line.
+          if (process.stdout.isTTY) process.stdout.write('\r\u001b[2K')
           const dur = `${(event.durationMs / 1000).toFixed(1)}s`
           const issues = event.status === 'error' ? warn('error')
             : event.status === 'skipped' ? dim('skipped')
@@ -118,10 +120,24 @@ export default class Diff extends BaseCommand {
       }
     }
 
+    /**
+     * Render fine-grained progress from within a check, in place.
+     *
+     * A ~100s schema diff on one static spinner line reads as a hang
+     * (issue #29). Only used on a TTY — piped or CI output would otherwise
+     * accumulate thousands of partial lines.
+     */
+    const makeDetail = (): ((check: CheckName, detail: string) => void) | undefined => {
+      if (flags.json || flags.ci || !process.stdout.isTTY) return undefined
+      return (_check, detail) => {
+        process.stdout.write(`\r\u001b[2K    ${dim(detail)}`)
+      }
+    }
+
     // ── Apply mode (was: promote) ───────────────────────────────────────────────
     if (flags.apply) {
       const onProgress = makeProgress()
-      const scanResult = await scan(registry, { config, checks, skip, onProgress })
+      const scanResult = await scan(registry, { config, checks, skip, onProgress, onDetail: makeDetail() })
       this.setCheckSummaries(scanResult.checks.map(c => ({
         check: c.check,
         status: c.status,
@@ -183,7 +199,7 @@ export default class Diff extends BaseCommand {
 
     // ── Scan mode (summary, detail, CI, or JSON) ────────────────────────────
     const onProgress = makeProgress()
-    const result = await scan(registry, { config, checks, skip, onProgress })
+    const result = await scan(registry, { config, checks, skip, onProgress, onDetail: makeDetail() })
     this.setCheckSummaries(result.checks.map(c => ({
       check: c.check,
       status: c.status,

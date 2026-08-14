@@ -12,6 +12,7 @@ import {
   buildDbDiffArgs,
   extractRoutineName,
   mergeRoutineReplacements,
+  parseDbDiffProgress,
 } from '../src/dbdiff.js'
 import { DBDIFF_EXEC_TIMEOUT_MS } from '../src/constants.js'
 
@@ -755,5 +756,44 @@ describe('sqlToIssues routine reporting (issue #35)', () => {
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('critical')
     expect(issues[0].title).toBe('Extra function: gone_fn')
+  })
+})
+
+// ── Issue #29 remainder ───────────────────────────────────────────────────
+
+describe('resolveDbDiffTimeoutMs precedence (issue #29)', () => {
+  afterEach(() => { delete process.env.SUPAFORGE_DBDIFF_TIMEOUT })
+
+  it('uses the per-environment config value when no env var is set', () => {
+    expect(resolveDbDiffTimeoutMs(900)).toBe(900_000)
+  })
+
+  it('lets the env var win over config — it is the runtime escape hatch', () => {
+    process.env.SUPAFORGE_DBDIFF_TIMEOUT = '120'
+    expect(resolveDbDiffTimeoutMs(900)).toBe(120_000)
+  })
+
+  it('falls back to the default when config is absent or nonsensical', () => {
+    for (const bad of [undefined, 0, -5, NaN, Infinity]) {
+      expect(resolveDbDiffTimeoutMs(bad as number)).toBe(DBDIFF_EXEC_TIMEOUT_MS)
+    }
+  })
+})
+
+describe('parseDbDiffProgress (issue #29)', () => {
+  it('extracts the table from dbdiff progress lines', () => {
+    expect(parseDbDiffProgress('ℹ Now calculating schema diff for table `users`')).toBe('users')
+    expect(parseDbDiffProgress('Now calculating schema diff for table "orders"')).toBe('orders')
+  })
+
+  it('handles schema-qualified names', () => {
+    expect(parseDbDiffProgress('calculating schema diff for table `public.users`')).toBe('public.users')
+  })
+
+  it('returns null for unrelated output, so nothing is miscounted', () => {
+    expect(parseDbDiffProgress('ℹ Now generating UP migration')).toBeNull()
+    expect(parseDbDiffProgress('Pre-scan: skipped 284 / 291 unchanged tables')).toBeNull()
+    expect(parseDbDiffProgress('')).toBeNull()
+    expect(parseDbDiffProgress('random noise')).toBeNull()
   })
 })

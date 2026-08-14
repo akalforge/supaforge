@@ -19,6 +19,16 @@ export interface DbDiffOptions {
   ignoreTables?: string[]
   /** Schemas to exclude — converted to --ignore-tables=schema.* glob patterns. */
   ignoreSchemas?: string[]
+  /**
+   * Seconds before the diff is abandoned, from the target environment's
+   * checks.schema.timeout. SUPAFORGE_DBDIFF_TIMEOUT still wins over this.
+   */
+  timeoutSeconds?: number
+  /**
+   * Called as dbdiff reports progress on individual tables, so a long schema
+   * diff reads as working rather than hung (issue #29).
+   */
+  onProgress?: (progress: { table: string; tablesSeen: number }) => void
 }
 
 export interface DbDiffResult {
@@ -60,13 +70,31 @@ export function resolveDbDiffBin(): { command: string; prefixArgs: string[] } {
  * users with very large schemas can raise the ceiling without a code change.
  * Falls back to DBDIFF_EXEC_TIMEOUT_MS.
  */
-export function resolveDbDiffTimeoutMs(): number {
+export function resolveDbDiffTimeoutMs(configuredSeconds?: number): number {
+  // Precedence: env var > per-environment config > default. The env var is the
+  // runtime escape hatch, so it has to beat a committed config value.
   const raw = process.env.SUPAFORGE_DBDIFF_TIMEOUT
   if (raw) {
     const secs = Number(raw)
     if (Number.isFinite(secs) && secs > 0) return Math.round(secs * 1000)
   }
+  if (Number.isFinite(configuredSeconds) && (configuredSeconds as number) > 0) {
+    return Math.round((configuredSeconds as number) * 1000)
+  }
   return DBDIFF_EXEC_TIMEOUT_MS
+}
+
+/**
+ * dbdiff logs a line per table as it works. Recognising them turns a silent
+ * multi-minute spinner into visible progress.
+ *
+ * Matches both the per-table diff line and the batch pre-scan summary, and is
+ * tolerant of the ANSI colour codes dbdiff emits.
+ */
+const DBDIFF_TABLE_LINE = /calculating schema diff for table [`"']?([\w.$]+)/i
+
+export function parseDbDiffProgress(line: string): string | null {
+  return DBDIFF_TABLE_LINE.exec(line)?.[1] ?? null
 }
 
 /**
@@ -157,19 +185,66 @@ export function buildDbDiffArgs(options: DbDiffOptions, outputFile: string): str
   return args
 }
 
+/**
+ * Forward dbdiff's per-table log lines to a progress callback.
+ *
+ * Entirely best-effort: any failure here must never affect the diff itself,
+ * so every step is guarded. A missing stdout (possible if the process dies
+ * immediately) simply means no progress is reported.
+ */
+function attachProgress(
+  running: { child?: { stdout?: NodeJS.ReadableStream | null } },
+  onProgress?: (progress: { table: string; tablesSeen: number }) => void,
+): void {
+  if (!onProgress) return
+  try {
+    const stdout = running.child?.stdout
+    if (!stdout) return
+
+    let buffer = ''
+    let tablesSeen = 0
+    stdout.on('data', (chunk: Buffer | string) => {
+      try {
+        buffer += String(chunk)
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+        for (const line of lines) {
+          const table = parseDbDiffProgress(line)
+          if (table) {
+            tablesSeen++
+            onProgress({ table, tablesSeen })
+          }
+        }
+      } catch {
+        // Progress reporting is cosmetic — never let it break the run.
+      }
+    })
+    stdout.on('error', () => {})
+  } catch {
+    // Same: cosmetic only.
+  }
+}
+
 export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
   const { command, prefixArgs } = resolveDbDiffBin()
   const outputFile = join(tmpdir(), `supaforge-dbdiff-${Date.now()}-${Math.random().toString(36).slice(2)}.sql`)
 
   const args = [...prefixArgs, ...buildDbDiffArgs(options, outputFile)]
 
-  const timeoutMs = resolveDbDiffTimeoutMs()
+  const timeoutMs = resolveDbDiffTimeoutMs(options.timeoutSeconds)
 
   try {
-    await execFileAsync(command, args, {
+    const running = execFileAsync(command, args, {
       timeout: timeoutMs,
       maxBuffer: DBDIFF_MAX_BUFFER,
     })
+
+    // Attach to the child's stdout for progress without changing how it is
+    // executed — promisified execFile exposes the ChildProcess as `.child`,
+    // so timeout, maxBuffer and every error path stay exactly as they were.
+    attachProgress(running, options.onProgress)
+
+    await running
 
     // When schemas are identical, dbdiff exits 0 but doesn't write the file
     const fileExists = await access(outputFile).then(() => true, () => false)

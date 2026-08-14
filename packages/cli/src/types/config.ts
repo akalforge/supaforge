@@ -1,7 +1,26 @@
 export type MigrationsMode = 'auto' | 'warn' | 'ignore'
 
+/**
+ * Per-environment check overrides.
+ *
+ * A check can be fine against a fast local clone and hopeless against a
+ * remote environment over a VPN, so a single top-level setting is too coarse
+ * (issue #29). These apply on top of the top-level `checks` config.
+ */
+export interface EnvironmentChecksConfig {
+  /** Checks to skip when this environment is the target. Unioned with the top-level list. */
+  exclude?: string[]
+  /** Schema-check overrides for this environment. */
+  schema?: {
+    /** Seconds before the schema/data diff is abandoned. Overrides the global default. */
+    timeout?: number
+  }
+}
+
 export interface EnvironmentConfig {
   dbUrl: string
+  /** Check overrides applied when this environment is the diff target. */
+  checks?: EnvironmentChecksConfig
   projectRef?: string
   /** Personal access token for Supabase Management API (auth config, edge functions). */
   accessToken?: string

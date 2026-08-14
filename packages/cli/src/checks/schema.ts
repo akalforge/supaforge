@@ -34,6 +34,10 @@ export class SchemaCheck extends Check {
           targetUrl: ctx.target.dbUrl,
           type: 'schema',
           include: 'both',
+          timeoutSeconds: ctx.target?.checks?.schema?.timeout,
+          onProgress: ctx.onDetail
+            ? ({ table, tablesSeen }) => ctx.onDetail?.(`${tablesSeen} tables · ${table}`)
+            : undefined,
           ignoreSchemas,
         }),
         this.fetchIgnoredSchemaTables(ctx.target.dbUrl, ignoreSchemas),

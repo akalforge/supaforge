@@ -236,11 +236,45 @@ some migrations and missed others has genuine drift and still gets one warning
 per missing file. To adopt the tracking table instead, `supaforge migrate
 baseline` records existing files as applied without executing them.
 
+### Per-environment check config
+
+A check can be fine against a fast local clone and hopeless against a remote
+environment over a VPN, so `checks` can also be set per environment. These apply
+when that environment is the **target** — the side every check reads from — and
+are unioned with the top-level `checks.exclude` rather than replacing it:
+
+```json
+{
+  "environments": {
+    "local":      { "dbUrl": "$LOCAL_DATABASE_URL" },
+    "production": {
+      "dbUrl": "$PRODUCTION_DATABASE_URL",
+      "checks": {
+        "exclude": ["storage"],
+        "schema": { "timeout": 900 }
+      }
+    }
+  }
+}
+```
+
+| Field | Description |
+| --- | --- |
+| `checks.exclude` | Checks to skip when this environment is the target. |
+| `checks.schema.timeout` | Seconds before the schema/data diff is abandoned, for this environment. |
+
+Timeout precedence is `SUPAFORGE_DBDIFF_TIMEOUT` → `checks.schema.timeout` →
+the 600s default, so the environment variable stays a runtime escape hatch that
+beats a committed value.
+
+The MCP server accepts a `skip` argument on `scan_drift` for the same reason —
+an agent can avoid a slow layer without editing the project config.
+
 ### Environment variables
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SUPAFORGE_DBDIFF_TIMEOUT` | `300` | Seconds before the schema/data diff is abandoned. Raise it for very large schemas. |
+| `SUPAFORGE_DBDIFF_TIMEOUT` | `600` | Seconds before the schema/data diff is abandoned. Overrides `checks.schema.timeout`. |
 | `SUPAFORGE_DBDIFF_MEMORY` | dbdiff's own `1G` | Passed to `@dbdiff/cli --memory-limit`. Takes `512M`, `2G`, or `-1` for unlimited. |
 
 ```bash

@@ -54,8 +54,11 @@ describe('constants', () => {
   })
 
   describe('timeouts', () => {
-    it('DBDIFF_EXEC_TIMEOUT_MS is 5 minutes', () => {
-      expect(DBDIFF_EXEC_TIMEOUT_MS).toBe(300_000)
+    it('DBDIFF_EXEC_TIMEOUT_MS is 10 minutes', () => {
+      // Raised from 5 minutes for issue #29: the schema pre-scan made the
+      // common case much faster, so runs still near the ceiling are the ones
+      // that most need headroom, and a timeout costs the whole layer.
+      expect(DBDIFF_EXEC_TIMEOUT_MS).toBe(600_000)
     })
 
     it('PG_PIPELINE_TIMEOUT_MS is 30 minutes', () => {

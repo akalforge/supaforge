@@ -17,6 +17,34 @@ export interface ScanOptions {
   /** Blacklist: skip these checks (CLI --skip flag). Merged with config.checks.exclude. */
   skip?: CheckName[]
   onProgress?: (event: ScanProgressEvent) => void
+  /** Fine-grained progress from within a single check, e.g. "42 tables · users". */
+  onDetail?: (check: CheckName, detail: string) => void
+}
+
+/**
+ * Checks to skip: the top-level `checks.exclude` unioned with the target
+ * environment's own `checks.exclude`.
+ *
+ * Per-environment because a check can be fine against a fast local clone and
+ * hopeless against a remote environment (issue #29). Keyed on the *target*,
+ * which is the environment every check reads from.
+ *
+ * Tolerates a malformed config — a non-array or an unknown environment name
+ * yields no extra exclusions rather than throwing, so a bad config narrows
+ * nothing instead of taking the scan down.
+ */
+export function resolveExcludedChecks(config: SupaForgeConfig): CheckName[] {
+  const lists = [config?.checks?.exclude, config?.environments?.[config?.target ?? '']?.checks?.exclude]
+  const out: CheckName[] = []
+  for (const list of lists) {
+    if (!Array.isArray(list)) continue
+    for (const name of list) {
+      if (typeof name === 'string' && (CHECK_NAMES as readonly string[]).includes(name)) {
+        out.push(name as CheckName)
+      }
+    }
+  }
+  return out
 }
 
 export async function scan(
@@ -25,8 +53,7 @@ export async function scan(
   bus?: HookBus,
 ): Promise<ScanResult> {
   const { config } = options
-  const configExclude = (config.checks?.exclude ?? []) as CheckName[]
-  const skipSet = new Set([...(options.skip ?? []), ...configExclude])
+  const skipSet = new Set([...(options.skip ?? []), ...resolveExcludedChecks(config)])
   const checksToScan = (options.checks ?? [...CHECK_NAMES]).filter(n => !skipSet.has(n))
 
   const source = config.environments[config.source!]
@@ -44,6 +71,13 @@ export async function scan(
 
     options.onProgress?.({ phase: 'check:start', check: name, index: i, total })
 
+    // Sub-check progress (e.g. the schema diff's table counter) is reported
+    // through the same channel, tagged with the owning check.
+    const checkCtx = {
+      ...ctx,
+      onDetail: options.onDetail ? (detail: string) => options.onDetail?.(name, detail) : undefined,
+    }
+
     if (!check) {
       results.push({ check: name, status: 'skipped', issues: [], durationMs: 0 })
       options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'skipped', issueCount: 0, durationMs: 0 })
@@ -54,7 +88,7 @@ export async function scan(
     const start = performance.now()
 
     try {
-      const issues = await check.scan(ctx)
+      const issues = await check.scan(checkCtx)
       const durationMs = Math.round(performance.now() - start)
       const status = issues.length > 0 ? 'drifted' : 'clean'
       results.push({ check: name, status, issues, durationMs })

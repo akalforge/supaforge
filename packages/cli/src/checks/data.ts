@@ -47,6 +47,7 @@ export class DataCheck extends Check {
         type: 'data',
         include: 'both',
         tables: changed,
+        timeoutSeconds: ctx.target?.checks?.schema?.timeout,
       })
       return sqlToIssues(result, 'data')
     } catch (err) {

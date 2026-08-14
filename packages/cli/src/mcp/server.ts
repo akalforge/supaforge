@@ -67,9 +67,17 @@ export function createServer(cwd = process.cwd()): McpServer {
           .array(z.enum(CHECK_NAMES))
           .optional()
           .describe('Limit scan to specific checks (e.g. ["rls", "rls-coverage"]).'),
+        skip: z
+          .array(z.enum(CHECK_NAMES))
+          .optional()
+          .describe(
+            'Skip specific checks, the equivalent of the CLI --skip flag. ' +
+            'Unioned with checks.exclude from the config file. Use this to avoid ' +
+            'a slow or failing layer without editing the project config.',
+          ),
       },
     },
-    async ({ configPath, source, target, checks }) => {
+    async ({ configPath, source, target, checks, skip }) => {
       try {
         const effectiveCwd = configPath ? resolve(configPath, '..') : cwd
         const raw = JSON.parse(await readFile(resolve(effectiveCwd, 'supaforge.config.json'), 'utf-8'))
@@ -85,7 +93,11 @@ export function createServer(cwd = process.cwd()): McpServer {
         }
 
         const registry = createDefaultRegistry()
-        const result: ScanResult = await scan(registry, { config, checks: checks as CheckName[] | undefined })
+        const result: ScanResult = await scan(registry, {
+          config,
+          checks: checks as CheckName[] | undefined,
+          skip: skip as CheckName[] | undefined,
+        })
         setLastScanResult(result)
 
         return { content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }] }

@@ -485,12 +485,21 @@ narrowing the scan:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SUPAFORGE_DBDIFF_TIMEOUT` | `300` | Seconds before a diff is abandoned |
+| `SUPAFORGE_DBDIFF_TIMEOUT` | `600` | Seconds before a diff is abandoned. Overrides `checks.schema.timeout` |
 | `SUPAFORGE_DBDIFF_MEMORY` | dbdiff's own `1G` | Passed to `--memory-limit`; takes `512M`, `2G`, or `-1` for unlimited |
 
 ```bash
 SUPAFORGE_DBDIFF_TIMEOUT=600 SUPAFORGE_DBDIFF_MEMORY=2G supaforge diff
 ```
+
+**Per-environment overrides.** `checks.exclude` and `checks.schema.timeout` can
+be set on an individual environment, applying when it is the diff target and
+unioned with the top-level config. Timeout precedence is
+`SUPAFORGE_DBDIFF_TIMEOUT` → `checks.schema.timeout` → the 600s default.
+
+**Progress.** On a TTY the schema check reports a live table counter while it
+runs, so a long diff reads as working rather than hung. Suppressed under
+`--json`, `--ci`, and when output is piped.
 
 **Destructive changes.** DBDiff refuses by default to generate a migration that
 drops a table or column. SupaForge passes `--allow-destructive` when invoking it,

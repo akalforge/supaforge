@@ -142,3 +142,50 @@ describe('pickTip — general pool fallback', () => {
     expect(pickTip(ctx, SEED)).not.toBeNull()
   })
 })
+
+// ── Regression: issue #29 ─────────────────────────────────────────────────
+// With the only check errored, the tip read "Environments are in sync — run
+// supaforge snapshot to capture this state." Nothing had been compared.
+
+describe('renderTip with errored checks (issue #29)', () => {
+  const errored: TipContext = {
+    command: 'diff', detail: false, driftTotal: 0, erroredChecks: ['schema'],
+  }
+
+  it('never says environments are in sync when a check could not run', () => {
+    const out = renderTip(errored)
+    expect(out).not.toContain('in sync')
+  })
+
+  it('says drift is unknown and names the failed check', () => {
+    // renderTip draws one tip from the pool, so assert across the pool.
+    const seen = new Set<string>()
+    for (let seed = 0; seed < 12; seed++) seen.add(String(pickTip(errored, seed)))
+    const pool = [...seen].join(' ')
+    expect(pool).toContain('unknown')
+    expect(pool).toContain('schema')
+  })
+
+  it('every tip offered for an errored scan avoids implying success', () => {
+    for (let seed = 0; seed < 12; seed++) {
+      const tip = String(pickTip(errored, seed))
+      expect(tip).not.toContain('in sync')
+      expect(tip).not.toContain('capture this state')
+    }
+  })
+
+  it('still offers the in-sync tip on a genuinely clean scan', () => {
+    const clean: TipContext = { command: 'diff', detail: false, driftTotal: 0, erroredChecks: [] }
+    // pickTip rotates, so check the pool rather than a single draw.
+    const seen = new Set<string>()
+    for (let seed = 0; seed < 12; seed++) seen.add(String(pickTip(clean, seed)))
+    expect([...seen].join(' ')).toContain('in sync')
+  })
+
+  it('treats a missing erroredChecks as none, for older callers', () => {
+    const legacy: TipContext = { command: 'diff', detail: false, driftTotal: 0 }
+    const seen = new Set<string>()
+    for (let seed = 0; seed < 12; seed++) seen.add(String(pickTip(legacy, seed)))
+    expect([...seen].join(' ')).toContain('in sync')
+  })
+})

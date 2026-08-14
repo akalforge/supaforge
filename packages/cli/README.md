@@ -182,6 +182,41 @@ cp .env.example .env
 | `source` / `target` | Yes | Environment names to compare. Source = truth, target = to be synced. |
 | `checks.data.tables` | No | Tables to include in row-level data drift detection. |
 | `checks.exclude` | No | Checks to always skip (e.g. `["storage","auth","vault"]`). Useful for clone environments where these checks produce noise. Can also be overridden per-run with `--skip`. |
+| `checks.migrations.dir` | No | Directory holding migration files. Defaults to `supabase/migrations`. |
+| `checks.migrations.mode` | No | How to report local migration files with no row in `schema_migrations` — `auto` (default), `warn`, or `ignore`. See [Migration history](#migration-history). |
+
+### Migration history
+
+Layer 13 compares migration files in `supabase/migrations/` against the
+`supabase_migrations.schema_migrations` table on the target.
+
+That table is a Supabase CLI convention, not a database requirement. A project
+that applies migrations another way — `psql`, the SQL editor, another migration
+tool — never populates it, so every local file looks unapplied. Reporting each
+one individually is noise, not drift.
+
+`checks.migrations.mode` controls this:
+
+| Mode | Behaviour |
+| --- | --- |
+| `auto` *(default)* | If the tracking table is **empty** but local files exist, report a single INFO noting an untracked migration workflow. Otherwise warn per file. |
+| `warn` | Always warn per unrecorded file, even when nothing is tracked. |
+| `ignore` | Report nothing from this check. No migration directory read, no query. |
+
+```json
+{
+  "checks": {
+    "migrations": { "mode": "ignore" }
+  }
+}
+```
+
+The collapse in `auto` only applies when *nothing at all* is tracked. A project
+that records some migrations and missed others has genuine drift, and still gets
+one actionable warning per missing file.
+
+To adopt the tracking table rather than silence the check, `supaforge migrate
+baseline` records existing files as applied without executing them.
 
 Sensitive values (`dbUrl`, `accessToken`) support `$VAR` and `${VAR}` syntax — expanded from environment variables at runtime. Store actual credentials in `.env` (already in `.gitignore`).
 

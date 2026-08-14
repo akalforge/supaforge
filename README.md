@@ -216,6 +216,37 @@ Create `supaforge.config.json` in your project root:
 
 Supabase internal schemas (`auth`, `storage`, `realtime`, `vault`, etc.) are ignored by default.
 
+`checks.migrations.mode` controls how Layer 13 reports local migration files
+with no row in `supabase_migrations.schema_migrations`. That table is a Supabase
+CLI convention, not a database requirement, so projects applying migrations via
+`psql` or the SQL editor never populate it:
+
+| Mode | Behaviour |
+| --- | --- |
+| `auto` *(default)* | Tracking table empty but local files exist → one INFO noting an untracked migration workflow, instead of a warning per file. Otherwise warn per file. |
+| `warn` | Always warn per unrecorded file. |
+| `ignore` | Report nothing from this check at all. |
+
+```json
+{ "checks": { "migrations": { "mode": "ignore" } } }
+```
+
+The collapse only applies when *nothing* is tracked — a project that recorded
+some migrations and missed others has genuine drift and still gets one warning
+per missing file. To adopt the tracking table instead, `supaforge migrate
+baseline` records existing files as applied without executing them.
+
+### Environment variables
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SUPAFORGE_DBDIFF_TIMEOUT` | `300` | Seconds before the schema/data diff is abandoned. Raise it for very large schemas. |
+| `SUPAFORGE_DBDIFF_MEMORY` | dbdiff's own `1G` | Passed to `@dbdiff/cli --memory-limit`. Takes `512M`, `2G`, or `-1` for unlimited. |
+
+```bash
+SUPAFORGE_DBDIFF_TIMEOUT=600 SUPAFORGE_DBDIFF_MEMORY=2G supaforge diff
+```
+
 `checks.exclude` permanently skips the listed checks on every `diff`/`hukam`/`sync` run — useful when diffing against a clone where checks like `storage`, `auth`, `edge-functions`, `vault`, and `realtime` have no local equivalent and produce only noise. The `--skip` CLI flag does the same on a one-off basis; both are merged at runtime.
 
 ## Extending with Hooks

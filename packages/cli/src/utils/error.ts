@@ -35,6 +35,34 @@ export function errMsg(err: unknown): string {
   return redactUrls(raw)
 }
 
+/**
+ * An error whose message is already written for the user — it has been
+ * diagnosed, and usually carries remediation steps.
+ *
+ * friendlyDbError() passes these through untouched instead of pattern-matching
+ * them into a generic connection error. Without this, any accurate message that
+ * happens to mention a timeout (including one telling the user which timeout
+ * env var to raise) got rewritten into advice to check their host and port.
+ */
+export class DiagnosticError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DiagnosticError'
+  }
+}
+
+/**
+ * Structural check rather than `instanceof`.
+ *
+ * The CLI and its tests can load a module through more than one path (src vs
+ * dist, ESM vs CJS interop), which yields two distinct class identities and
+ * makes `instanceof` silently false. Matching on the name keeps the guard
+ * working across those boundaries.
+ */
+export function isDiagnosticError(err: unknown): boolean {
+  return err instanceof DiagnosticError || (err instanceof Error && err.name === 'DiagnosticError')
+}
+
 // ─── Connection Error Patterns ───────────────────────────────────────────────
 
 /** Known patterns matched against error messages, checked in order. */
@@ -48,7 +76,12 @@ const CONNECTION_ERROR_PATTERNS: Array<{ test: (msg: string) => boolean; build: 
     build: (host) => `Cannot resolve hostname ${host} — check the database URL in your config.`,
   },
   {
-    test: (m) => /ETIMEDOUT|timeout/i.test(m),
+    // Deliberately narrow. A bare /timeout/i also matches our own remediation
+    // text — "set SUPAFORGE_DBDIFF_TIMEOUT=600" contains "TIMEOUT" — which is
+    // how an accurate "Schema diff timed out after Ns" message was being
+    // rewritten into a wrong "check the host and port" one (issue #29).
+    // DiagnosticError below is the primary guard; this is defence in depth.
+    test: (m) => /ETIMEDOUT|connection timed out|timeout expired|statement timeout/i.test(m),
     build: (host) => `Connection to ${host} timed out — verify the host and port are correct and that the server is reachable.`,
   },
   {
@@ -87,11 +120,23 @@ function extractHost(dbUrl: string): string {
  */
 export function friendlyDbError(err: unknown, dbUrl?: string): string {
   const raw = errMsg(err)
+
+  // Already a message written for the user, with its own diagnosis and
+  // remediation — translating it again can only make it worse, and did:
+  // the schema-diff timeout message was being replaced by a connection
+  // error naming a host that was demonstrably reachable (issue #29).
+  if (isDiagnosticError(err)) return raw
+
   const host = dbUrl ? extractHost(dbUrl) : 'the configured host'
 
   for (const pattern of CONNECTION_ERROR_PATTERNS) {
-    if (pattern.test(raw)) {
-      return pattern.build(host)
+    try {
+      if (pattern.test(raw)) {
+        return pattern.build(host)
+      }
+    } catch {
+      // A malformed host or an unexpected pattern failure must never turn a
+      // reportable error into a crash — fall through to the raw message.
     }
   }
 

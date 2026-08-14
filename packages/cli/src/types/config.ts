@@ -1,3 +1,5 @@
+export type MigrationsMode = 'auto' | 'warn' | 'ignore'
+
 export interface EnvironmentConfig {
   dbUrl: string
   projectRef?: string
@@ -9,7 +11,19 @@ export interface EnvironmentConfig {
 
 export interface ChecksConfig {
   data?: { tables: string[] }
-  migrations?: { dir?: string }
+  migrations?: {
+    dir?: string
+    /**
+     * How to report local migration files with no row in schema_migrations.
+     *
+     * - `auto` (default) — if the tracking table is empty but local files
+     *   exist, report one INFO noting an untracked migration workflow rather
+     *   than a warning per file. Otherwise warn per file as usual.
+     * - `warn` — always warn per file, even when nothing is tracked.
+     * - `ignore` — report nothing from this check at all.
+     */
+    mode?: MigrationsMode
+  }
   /** Checks to always skip, regardless of CLI flags. Useful in config for clone environments. */
   exclude?: string[]
 }

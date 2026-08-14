@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { renderSummary, renderDetailed } from '../src/render.js'
+import { renderSummary, renderDetailed, countErrored } from '../src/render.js'
 import type { ScanResult } from '../src/types/drift.js'
 
 const cleanResult: ScanResult = {
@@ -334,3 +334,74 @@ describe('action display in renderDetailed', () => {
   })
 })
 
+
+// ── Regression: issue #29 ─────────────────────────────────────────────────
+// A scan whose only check errored printed "no drift detected. ✓" and scored
+// 97/100. Nothing had been measured, but the output read as a clean run.
+
+const erroredOnly: ScanResult = {
+  timestamp: '2026-03-21T00:00:00.000Z',
+  source: 'dev',
+  target: 'prod',
+  checks: [
+    { check: 'schema', status: 'error', issues: [], durationMs: 5000, error: 'Schema diff timed out after 5s' },
+  ],
+  score: 97,
+  summary: { total: 0, critical: 0, warning: 0, info: 0 },
+}
+
+describe('renderSummary with errored checks (issue #29)', () => {
+  it('never claims no drift when a check could not run', () => {
+    const out = renderSummary(erroredOnly)
+    expect(out).not.toContain('no drift detected')
+    expect(out).toContain('could not complete')
+    expect(out).toContain('drift is unknown')
+  })
+
+  it('still reports a genuinely clean scan as clean', () => {
+    expect(renderSummary(cleanResult)).toContain('no drift detected')
+  })
+
+  it('flags that drift may be understated when both drift and errors occur', () => {
+    const mixed: ScanResult = {
+      ...erroredOnly,
+      checks: [
+        ...erroredOnly.checks,
+        { check: 'rls', status: 'drifted', issues: [
+          { id: 'rls-1', check: 'rls', severity: 'critical', title: 'x', description: 'y' },
+        ], durationMs: 10 },
+      ],
+      summary: { total: 1, critical: 1, warning: 0, info: 0 },
+    }
+    const out = renderSummary(mixed)
+    expect(out).toContain('1 drift issue')
+    expect(out).toContain('drift may be understated')
+  })
+
+  it('pluralises the errored-check noun', () => {
+    const two: ScanResult = {
+      ...erroredOnly,
+      checks: [
+        erroredOnly.checks[0],
+        { check: 'rls', status: 'error', issues: [], durationMs: 1, error: 'boom' },
+      ],
+    }
+    expect(renderSummary(two)).toContain('2 checks could not complete')
+    expect(renderSummary(erroredOnly)).toContain('1 check could not complete')
+  })
+})
+
+describe('countErrored', () => {
+  it('counts only errored checks', () => {
+    expect(countErrored(erroredOnly)).toBe(1)
+    expect(countErrored(cleanResult)).toBe(0)
+  })
+
+  it('tolerates a malformed or partial result rather than throwing', () => {
+    // Defensive: an older cached report or a hand-built object from a hook.
+    expect(countErrored({ checks: undefined as never })).toBe(0)
+    expect(countErrored({ checks: null as never })).toBe(0)
+    expect(countErrored({ checks: 'nope' as never })).toBe(0)
+    expect(countErrored({ checks: [null as never] })).toBe(0)
+  })
+})

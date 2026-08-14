@@ -246,3 +246,48 @@ describe('formatCiSummary', () => {
     expect(summary.criticalIssues[0].check).toBe('rls')
   })
 })
+
+// ── Regression: issue #29 ─────────────────────────────────────────────────
+// --ci exits 2 on an errored check, but the JSON artifact carried no error
+// field. Anyone reading the uploaded report rather than the exit code saw a
+// clean summary and no indication that a check had never run.
+
+describe('formatCiSummary error signal (issue #29)', () => {
+  const withError: ScanResult = {
+    timestamp: '2026-03-21T00:00:00.000Z',
+    source: 'dev',
+    target: 'prod',
+    checks: [
+      { check: 'schema', status: 'error', issues: [], durationMs: 5000, error: 'Schema diff timed out after 5s' },
+      { check: 'rls', status: 'clean', issues: [], durationMs: 10 },
+    ],
+    score: 97,
+    summary: { total: 0, critical: 0, warning: 0, info: 0 },
+  }
+
+  it('reports the errored check and its message', () => {
+    const out = formatCiSummary(withError)
+    expect(out.errors).toHaveLength(1)
+    expect(out.errors[0].check).toBe('schema')
+    expect(out.errors[0].message).toContain('timed out')
+  })
+
+  it('emits an empty array on a healthy scan, so the field is always present', () => {
+    const clean: ScanResult = { ...withError, checks: [withError.checks[1]], score: 100 }
+    expect(formatCiSummary(clean).errors).toEqual([])
+  })
+
+  it('substitutes a message when a check errored without one', () => {
+    const noMessage: ScanResult = {
+      ...withError,
+      checks: [{ check: 'schema', status: 'error', issues: [], durationMs: 1 }],
+    }
+    const out = formatCiSummary(noMessage)
+    expect(out.errors).toHaveLength(1)
+    expect(out.errors[0].message).toBeTruthy()
+  })
+
+  it('tolerates a malformed result rather than throwing', () => {
+    expect(() => formatCiSummary({ ...withError, checks: undefined as never })).not.toThrow()
+  })
+})

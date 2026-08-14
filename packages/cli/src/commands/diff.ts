@@ -194,6 +194,9 @@ export default class Diff extends BaseCommand {
 
     const driftedChecks = result.checks.filter(c => c.status === 'drifted').map(c => c.check)
     const skippedChecks = result.checks.filter(c => c.status === 'skipped').map(c => c.check)
+    // A check that errored measured nothing — surfaced so the summary and tips
+    // never present an unmeasured scan as a clean one (issue #29).
+    const erroredChecks = result.checks.filter(c => c.status === 'error').map(c => c.check)
 
     // ── CI mode ──────────────────────────────────────────────────────────────
     if (flags.ci) {
@@ -225,6 +228,7 @@ export default class Diff extends BaseCommand {
         driftTotal: result.summary.total,
         driftedChecks,
         skippedChecks,
+        erroredChecks,
         singleCheck: checks?.[0],
       }))
     } else {
@@ -241,10 +245,16 @@ export default class Diff extends BaseCommand {
         driftTotal: result.summary.total,
         driftedChecks,
         skippedChecks,
+        erroredChecks,
         singleCheck: checks?.[0],
       }))
     }
 
+    // Exit code deliberately unchanged for an errored check: `--ci` is the
+    // documented contract for scripting and already exits 2 in that case
+    // (0=clean, 1=drift, 2=error). Making plain `diff` exit non-zero here
+    // would break every non-CI caller for a signal that already has a
+    // supported home. The misleading *output* is fixed above instead.
     if (result.summary.critical > 0) {
       this.exit(1)
     }

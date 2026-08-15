@@ -10,6 +10,7 @@ import {
   isDestructiveSql,
   resolveDbDiffMemoryLimit,
   buildDbDiffArgs,
+  extractRoutineArgs,
   extractRoutineName,
   mergeRoutineReplacements,
   parseDbDiffProgress,
@@ -727,6 +728,111 @@ describe('mergeRoutineReplacements (issue #35)', () => {
   it('leaves non-routine statements untouched', () => {
     const stmts = ['ALTER TABLE "t" ADD COLUMN "c" text;', 'DROP TABLE "old";']
     expect(mergeRoutineReplacements(stmts, ['', ''])).toHaveLength(2)
+  })
+})
+
+describe('mergeRoutineReplacements with overloaded routines (@dbdiff/cli 3.0.0-rc.7)', () => {
+  // Verbatim from `dbdiff --driver=pgsql` 3.0.0-rc.7 against two PostgreSQL 16
+  // databases whose three `dist` overloads all differ. Before rc.7 the adapter
+  // never saw this: dbdiff collapsed overloads onto one name and emitted a
+  // single pair. Now it emits one pair per overload, argument-qualified.
+  const up = [
+    'DROP FUNCTION IF EXISTS "dist"(bigint,bigint);',
+    'CREATE OR REPLACE FUNCTION public.dist(a bigint, b bigint)\n RETURNS bigint\n LANGUAGE sql\nAS $function$ SELECT a * b; $function$;',
+    'DROP FUNCTION IF EXISTS "dist"(integer,integer);',
+    'CREATE OR REPLACE FUNCTION public.dist(a integer, b integer)\n RETURNS integer\n LANGUAGE sql\nAS $function$ SELECT a - b; $function$;',
+    'DROP FUNCTION IF EXISTS "dist"(text,text);',
+    'CREATE OR REPLACE FUNCTION public.dist(a text, b text)\n RETURNS text\n LANGUAGE sql\nAS $function$ SELECT a || b; $function$;',
+  ]
+  const down = up.map(() => '')
+
+  it('reports one modified-routine entry per overload, not five entries', () => {
+    const merged = mergeRoutineReplacements(up, down)
+    expect(merged).toHaveLength(3)
+    expect(merged.every(m => m.modifiedRoutine !== undefined)).toBe(true)
+  })
+
+  it('pairs each DROP with its own CREATE, not with the last one', () => {
+    const merged = mergeRoutineReplacements(up, down)
+
+    // The failure this guards against attached the text body to the bigint
+    // drop, so the applied migration removed two overloads permanently.
+    expect(merged[0].up).toContain('"dist"(bigint,bigint)')
+    expect(merged[0].up).toContain('SELECT a * b;')
+    expect(merged[0].up).not.toContain('SELECT a || b;')
+
+    expect(merged[1].up).toContain('"dist"(integer,integer)')
+    expect(merged[1].up).toContain('SELECT a - b;')
+
+    expect(merged[2].up).toContain('"dist"(text,text)')
+    expect(merged[2].up).toContain('SELECT a || b;')
+  })
+
+  it('consumes each CREATE once so none is duplicated across entries', () => {
+    const merged = mergeRoutineReplacements(up, down)
+    const bodies = merged.map(m => /SELECT a [*|-]+ b;/.exec(m.up)?.[0])
+    expect(new Set(bodies).size).toBe(3)
+  })
+
+  it('distinguishes the overloads by argument signature in the title', () => {
+    const merged = mergeRoutineReplacements(up, down)
+    expect(merged.map(m => m.modifiedRoutine)).toEqual([
+      'public.dist(bigint,bigint)',
+      'public.dist(integer,integer)',
+      'public.dist(text,text)',
+    ])
+  })
+
+  it('still merges a bare DROP with no argument list (MySQL, pre-rc.7)', () => {
+    const merged = mergeRoutineReplacements(
+      [
+        'DROP FUNCTION IF EXISTS "example_fn";',
+        'CREATE OR REPLACE FUNCTION public.example_fn() RETURNS integer AS $$ SELECT 2 $$;',
+      ],
+      ['', ''],
+    )
+    expect(merged).toHaveLength(1)
+    expect(merged[0].modifiedRoutine).toBe('public.example_fn')
+  })
+
+  it('keeps an overload unpaired when only its DROP is present', () => {
+    const merged = mergeRoutineReplacements(
+      [
+        'DROP FUNCTION IF EXISTS "dist"(bigint,bigint);',
+        'DROP FUNCTION IF EXISTS "dist"(text,text);',
+        'CREATE OR REPLACE FUNCTION public.dist(a text, b text) RETURNS text AS $$ SELECT a $$;',
+      ],
+      ['', '', ''],
+    )
+    expect(merged).toHaveLength(2)
+    expect(merged[0].modifiedRoutine).toBeUndefined()
+    expect(merged[1].modifiedRoutine).toBe('public.dist(text,text)')
+  })
+})
+
+describe('extractRoutineArgs', () => {
+  it('returns the argument list of an argument-qualified DROP', () => {
+    expect(extractRoutineArgs('DROP FUNCTION IF EXISTS "dist"(bigint,bigint);')).toBe('(bigint,bigint)')
+  })
+
+  it('returns empty for a bare DROP', () => {
+    expect(extractRoutineArgs('DROP FUNCTION IF EXISTS "dist";')).toBe('')
+  })
+
+  it('returns empty for a zero-argument routine written without parens', () => {
+    expect(extractRoutineArgs('DROP PROCEDURE IF EXISTS "do_thing";')).toBe('')
+  })
+
+  it('keeps an empty argument list distinct from an absent one', () => {
+    expect(extractRoutineArgs('DROP FUNCTION IF EXISTS "f"();')).toBe('()')
+  })
+
+  it('handles types that carry their own parens', () => {
+    expect(extractRoutineArgs('DROP FUNCTION IF EXISTS "f"(numeric(10,2),text);')).toBe('(numeric(10,2),text)')
+  })
+
+  it('returns empty rather than a truncated list when parens are unbalanced', () => {
+    expect(extractRoutineArgs('DROP FUNCTION IF EXISTS "f"(text;')).toBe('')
   })
 })
 

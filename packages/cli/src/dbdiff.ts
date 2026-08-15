@@ -319,7 +319,10 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
 const UP_MARKER = '-- ==================== UP ===================='
 const DOWN_MARKER = '-- ==================== DOWN ===================='
 
-const DROP_TYPES = ['drop', 'drop-view', 'drop-function', 'drop-trigger', 'drop-type', 'drop-sequence']
+const CREATE_FUNCTION = 'create-function'
+const DROP_FUNCTION = 'drop-function'
+
+const DROP_TYPES = ['drop', 'drop-view', DROP_FUNCTION, 'drop-trigger', 'drop-type', 'drop-sequence']
 
 /**
  * Does this statement destroy data if executed?
@@ -449,15 +452,38 @@ interface MergedStatement {
  *
  * Only a DROP followed by a CREATE for the same routine is merged; an
  * unpaired DROP is still a genuine "Extra function".
+ *
+ * Postgres allows overloading, so one name can own several DROP+CREATE pairs
+ * whose argument types differ. They cannot be told apart by name, and the
+ * statements do not agree on a signature to match them by (see `routineKey`),
+ * so pairing goes by position:
+ *
+ * - Adjacent DROP+CREATE always merge. dbdiff renders a changed routine from a
+ *   single diff object, so the two statements come out together — adjacency is
+ *   what a replacement actually looks like.
+ * - A non-adjacent pair merges only when that name has exactly one DROP and one
+ *   CREATE in the batch, where there is nothing to confuse it with. This is
+ *   the case issue #35 was about.
+ *
+ * Anything else stays unmerged and is reported as a genuine extra or missing
+ * routine, which is the safe direction: over-reporting is noise, whereas a
+ * wrong pairing writes a migration that drops an overload and recreates a
+ * different one in its place.
  */
 export function mergeRoutineReplacements(
   upStatements: string[],
   downStatements: string[],
 ): MergedStatement[] {
-  const createdRoutines = new Map<string, number>()
+  // Per name, the indices of the CREATEs still up for grabs, in source order.
+  const unclaimedCreates = new Map<string, number[]>()
+  const dropCounts = new Map<string, number>()
   upStatements.forEach((sql, i) => {
-    if (classifyStatement(sql) === 'create-function') {
-      createdRoutines.set(routineKey(sql), i)
+    const type = classifyStatement(sql)
+    const key = routineKey(sql)
+    if (type === CREATE_FUNCTION) {
+      unclaimedCreates.set(key, [...(unclaimedCreates.get(key) ?? []), i])
+    } else if (type === DROP_FUNCTION) {
+      dropCounts.set(key, (dropCounts.get(key) ?? 0) + 1)
     }
   })
 
@@ -468,13 +494,15 @@ export function mergeRoutineReplacements(
     if (absorbed.has(i)) return
 
     const down = downStatements[i] ?? ''
-    if (classifyStatement(upSql) !== 'drop-function') {
+    if (classifyStatement(upSql) !== DROP_FUNCTION) {
       out.push({ up: upSql, down })
       return
     }
 
-    const createIdx = createdRoutines.get(routineKey(upSql))
-    if (createIdx === undefined || createIdx <= i) {
+    const key = routineKey(upSql)
+    const unambiguous = dropCounts.get(key) === 1 && unclaimedCreates.get(key)?.length === 1
+    const createIdx = claimCreateFor(unclaimedCreates, key, i, unambiguous)
+    if (createIdx === undefined) {
       out.push({ up: upSql, down })
       return
     }
@@ -483,11 +511,34 @@ export function mergeRoutineReplacements(
     out.push({
       up: `${upSql}\n${upStatements[createIdx]}`,
       down: [down, downStatements[createIdx] ?? ''].filter(Boolean).join('\n'),
-      modifiedRoutine: extractRoutineName(upStatements[createIdx]),
+      modifiedRoutine: extractRoutineName(upStatements[createIdx]) + extractRoutineArgs(upSql),
     })
   })
 
   return out
+}
+
+/**
+ * Claim the CREATE that replaces the DROP at `dropIdx`, removing it so a later
+ * DROP of the same name cannot claim it too.
+ *
+ * Normally that is the immediately following statement. When `unambiguous` —
+ * one DROP and one CREATE for this name in the whole batch — any later CREATE
+ * will do, since there is no second candidate to get it wrong.
+ */
+function claimCreateFor(
+  unclaimed: Map<string, number[]>,
+  key: string,
+  dropIdx: number,
+  unambiguous: boolean,
+): number | undefined {
+  const queue = unclaimed.get(key)
+  if (!queue) return undefined
+
+  const at = queue.findIndex((idx) => (unambiguous ? idx > dropIdx : idx === dropIdx + 1))
+  if (at === -1) return undefined
+
+  return queue.splice(at, 1)[0]
 }
 
 /**
@@ -632,11 +683,11 @@ export function classifyStatement(sql: string): string {
   if (upper.startsWith('ALTER VIEW')) return 'alter-view'
   if (upper.startsWith('DROP VIEW')) return 'drop-view'
   // Functions / procedures
-  if (upper.startsWith('CREATE FUNCTION') || upper.startsWith('CREATE OR REPLACE FUNCTION')) return 'create-function'
+  if (upper.startsWith('CREATE FUNCTION') || upper.startsWith('CREATE OR REPLACE FUNCTION')) return CREATE_FUNCTION
   if (upper.startsWith('ALTER FUNCTION')) return 'alter-function'
-  if (upper.startsWith('DROP FUNCTION')) return 'drop-function'
-  if (upper.startsWith('CREATE PROCEDURE') || upper.startsWith('CREATE OR REPLACE PROCEDURE')) return 'create-function'
-  if (upper.startsWith('DROP PROCEDURE')) return 'drop-function'
+  if (upper.startsWith('DROP FUNCTION')) return DROP_FUNCTION
+  if (upper.startsWith('CREATE PROCEDURE') || upper.startsWith('CREATE OR REPLACE PROCEDURE')) return CREATE_FUNCTION
+  if (upper.startsWith('DROP PROCEDURE')) return DROP_FUNCTION
   // Triggers
   if (upper.startsWith('CREATE TRIGGER') || upper.startsWith('CREATE OR REPLACE TRIGGER')) return 'create-trigger'
   if (upper.startsWith('ALTER TRIGGER')) return 'alter-trigger'
@@ -771,10 +822,40 @@ export function extractRoutineName(sql: string): string {
 }
 
 /**
- * Key a routine by its unqualified name, for pairing a DROP with the CREATE
- * that replaces it. dbdiff emits the DROP unqualified (`DROP FUNCTION IF
- * EXISTS "f"`) and the CREATE qualified (`CREATE OR REPLACE FUNCTION
- * public.f(...)`), so the schema has to come off before they can be matched.
+ * Extract the argument list of a `DROP FUNCTION`, parens included.
+ *
+ * @dbdiff/cli >= 3.0.0-rc.7 qualifies the DROP with the argument types so an
+ * overloaded routine can be dropped unambiguously — `DROP FUNCTION IF EXISTS
+ * "dist"(bigint,bigint)`. Earlier versions emitted a bare name, and MySQL has
+ * no overloading, so both return ''.
+ *
+ * Scanned rather than matched. The types can themselves contain parens
+ * (`numeric(10,2)`), so this counts depth instead of taking the first `)`.
+ */
+export function extractRoutineArgs(sql: string): string {
+  const open = sql.indexOf('(')
+  if (open === -1) return ''
+
+  let depth = 0
+  for (let i = open; i < sql.length; i++) {
+    if (sql[i] === '(') depth++
+    else if (sql[i] === ')' && --depth === 0) return sql.slice(open, i + 1)
+  }
+  return ''
+}
+
+/**
+ * Key a routine for pairing a DROP with the CREATE that replaces it.
+ *
+ * The unqualified, lowercased name — dbdiff emits the DROP unqualified (`DROP
+ * FUNCTION IF EXISTS "f"`) and the CREATE qualified (`CREATE OR REPLACE
+ * FUNCTION public.f(...)`), so the schema has to come off before they match.
+ *
+ * Deliberately excludes the argument types even though the DROP now carries
+ * them, because the CREATE does not: it comes from `pg_get_functiondef`, which
+ * renders parameter names and defaults (`f(a text, b text DEFAULT 'x')`) rather
+ * than the bare type list `regprocedure` gives the DROP. Overloads therefore
+ * share a key, and `mergeRoutineReplacements` separates them by position.
  */
 function routineKey(sql: string): string {
   const name = extractRoutineName(sql)

@@ -473,6 +473,14 @@ supaforge diff                # schema + data checks active out of the box
 
 The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.
 
+**Overloaded functions.** Postgres lets several functions share a name with
+different argument types. Each overload is compared and reported separately, and
+is identified by its signature — `Function modified: public.dist(text,text)` —
+so two overloads of one name are distinguishable in the output and the generated
+migration touches only the one that actually drifted. This needs
+`@dbdiff/cli` 3.0.0-rc.7 or newer; earlier versions saw only one overload per
+name and missed drift in the rest.
+
 **Schema diff performance.** DBDiff compares table schemas in a constant number
 of round-trips rather than one set per table: it first hashes every table's
 schema in a single query per side and skips the ones that match, then loads the

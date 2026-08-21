@@ -93,6 +93,25 @@ policy, storage bucket and cron job. A scoped run says so before it starts:
   Scoped to only orders — applies to the schema and data checks; other layers are unfiltered.
 ```
 
+**Dependants of an excluded table.** dbdiff's `--tables` covers *tables*, so a
+scoped fix set still arrives carrying the views, triggers and indexes hanging
+off the tables it excluded. With `--apply`, those are skipped with a reason
+naming the table rather than attempted and failed:
+
+```
+○ [schema] schema-create-view-2: Depends on table 'orders', excluded by --tables
+```
+
+**Scoping to something other than a table.** `--tables` has no way to express
+"these two tables and these three functions". `--only` does, by taking the
+issue ids `--json` already reports:
+
+```bash
+supaforge diff --check=schema --json > plan.json
+supaforge diff --apply --only=schema-create-function-7,schema-create-trigger-6
+supaforge diff --apply --only='schema-create-*'
+```
+
 Combine with `--check=schema` when you want the run itself narrowed too.
 
 ### Drift score vs posture score
@@ -209,7 +228,10 @@ supaforge init --force                  Overwrite existing config file
 supaforge diff                          Summary: what's drifted? (score + pass/fail)
 supaforge diff --detail                 Show detailed SQL diffs
 supaforge diff --apply                  Apply SQL + API fixes to the target environment
+supaforge diff --apply --dry-run        Print the fixes in execution order, run nothing
 supaforge diff --apply --allow-destructive  Also apply fixes that drop tables/columns
+supaforge diff --apply --no-transaction Apply statement by statement, keeping partial progress
+supaforge diff --apply --only=<id,...>  Apply only these issue ids (globs allowed)
 supaforge diff --check=rls              Limit to a specific check
 supaforge diff --check=rls --apply      Fix only one check
 supaforge diff --skip=storage           Skip a specific check
@@ -275,6 +297,50 @@ supaforge diff --apply --allow-destructive
 
 Dropping a view, trigger, function, index or type is not gated — those lose a
 definition the migration can recreate, not data.
+
+**Fixes run in dependency order.** A function is created before the trigger
+that executes it, a column before the index and view that read it, tables
+before their foreign keys, and dependants are dropped before what they depend
+on. `@dbdiff/cli` emits statements in the order it walks the catalogue, and
+applying that order directly failed on sets that were perfectly valid. Preview
+the order without running anything:
+
+```bash
+supaforge diff --apply --dry-run
+```
+
+```
+Would apply 3 fix(es), in this order:
+  1. [schema] schema-alter-2
+     ALTER TABLE "orders" ADD COLUMN "status" text DEFAULT 'pending'::text;
+  2. [schema] schema-create-function-7
+     CREATE OR REPLACE FUNCTION public.touch_updated() RETURNS trigger ...
+  3. [schema] schema-create-trigger-6
+     CREATE TRIGGER trg_orders_touch BEFORE UPDATE ON public.orders ...
+
+  Nothing was executed. Drop --dry-run to apply.
+```
+
+**An apply is all-or-nothing.** PostgreSQL supports transactional DDL, so the
+SQL fix set runs in one transaction: if any statement fails, every statement is
+rolled back and the target is left exactly as it was. A partial apply would
+leave a shared environment matching neither the source nor its own previous
+state.
+
+```
+Rolled back 5 fix(es) — the target is unchanged:
+  ↩ [schema] schema-alter-3
+  ...
+1 error(s):
+  ✗ [schema] schema-create-view-6: relation "active_orders" already exists
+
+  Nothing was written. Re-run with --no-transaction to apply the fixes that do work.
+```
+
+Pass `--no-transaction` (or its alias `--continue-on-error`) to run each fix on
+its own and keep whatever succeeds. API-based fixes — storage buckets, auth
+config — are not transactional, so they are not attempted at all when the SQL
+batch rolls back.
 
 ### Snapshot & Clone
 

@@ -622,3 +622,34 @@ export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<stri
 
   return localDbUrl
 }
+
+/**
+ * Is this environment a local clone SupaForge made?
+ *
+ * Matched against the clone manifest by database name, with the
+ * `supaforge_branch_` prefix as a fallback for a clone whose manifest entry
+ * was never written or has since been lost (the manifest is gitignored and
+ * lives only on the machine that created it).
+ *
+ * Best-effort by design: a malformed or missing manifest answers "no" rather
+ * than throwing, because the only caller uses this to word a hint.
+ */
+export async function isCloneDatabase(dbUrl: string | undefined, cwd = process.cwd()): Promise<boolean> {
+  if (!dbUrl) return false
+
+  let dbName: string
+  try {
+    dbName = new URL(dbUrl).pathname.replace(/^\//, '')
+  } catch {
+    return false
+  }
+  if (!dbName) return false
+  if (dbName.startsWith(BRANCH_DB_PREFIX)) return true
+
+  try {
+    const manifest = await loadManifest(cwd)
+    return manifest.branches.some(b => b.dbName === dbName)
+  } catch {
+    return false
+  }
+}

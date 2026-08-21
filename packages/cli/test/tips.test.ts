@@ -189,3 +189,53 @@ describe('renderTip with errored checks (issue #29)', () => {
     expect([...seen].join(' ')).toContain('in sync')
   })
 })
+
+/**
+ * Issue #48 (4): on a clone → remote diff, "push all fixes to the target in one
+ * shot" means reshaping a shared remote to match a vanilla-PostgreSQL copy,
+ * dropping the roles and policies the clone never had. The tip has to stop
+ * reading as a recommendation in that direction.
+ */
+describe('pickTip — diff: --apply advice depends on the direction (issue #48)', () => {
+  const drifted: TipContext['driftedChecks'] = ['schema', 'roles']
+
+  function allTips(ctx: TipContext): string {
+    return [0, 1, 2, 3, 4, 5].map(s => pickTip(ctx, s) ?? '').join(' ')
+  }
+
+  it('recommends --apply plainly when the source is not a clone', () => {
+    const combined = allTips({ command: 'diff', detail: false, driftTotal: 3, driftedChecks: drifted })
+    expect(combined).toMatch(/push all fixes to the target in one shot/)
+  })
+
+  it('warns instead of recommending when the source is a clone', () => {
+    const ctx: TipContext = {
+      command: 'diff', detail: false, driftTotal: 3, driftedChecks: drifted, sourceIsClone: true,
+    }
+    const combined = allTips(ctx)
+    expect(combined).not.toMatch(/push all fixes to the target in one shot/)
+    expect(combined).toMatch(/Source is a local clone/)
+    expect(combined).toMatch(/roles, grants and policies the clone never had/)
+  })
+
+  it('points a clone diff at a scoped dry run rather than a bare apply', () => {
+    const ctx: TipContext = {
+      command: 'diff', detail: false, driftTotal: 3, driftedChecks: drifted, sourceIsClone: true,
+    }
+    expect(allTips(ctx)).toMatch(/--check=schema --apply --dry-run/)
+  })
+
+  it('carries the same warning into --detail mode', () => {
+    const ctx: TipContext = {
+      command: 'diff', detail: true, driftTotal: 3, driftedChecks: drifted, sourceIsClone: true,
+    }
+    const combined = allTips(ctx)
+    expect(combined).toMatch(/Source is a local clone/)
+    expect(combined).not.toMatch(/execute all the SQL fixes above/)
+  })
+
+  it('still names --apply in --detail mode when the source is not a clone', () => {
+    const ctx: TipContext = { command: 'diff', detail: true, driftTotal: 3, driftedChecks: drifted }
+    expect(allTips(ctx)).toMatch(/execute all the SQL fixes above/)
+  })
+})

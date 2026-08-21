@@ -2,6 +2,8 @@ import type { HookBus } from './hooks'
 import type { CheckRegistry } from './checks/registry'
 import type { SupaForgeConfig } from './types/config'
 import type { CheckName, CheckResult, ScanResult } from './types/drift'
+import type { TableFilter } from './utils/table-filter'
+import { resolveTableFilter } from './utils/table-filter'
 import { CHECK_NAMES } from './types/drift'
 import { computeScore, computePostureScore, summarize } from './scoring'
 import type { Check, CheckContext } from './checks/base'
@@ -21,6 +23,11 @@ export interface ScanOptions {
   onProgress?: (event: ScanProgressEvent) => void
   /** Fine-grained progress from within a single check, e.g. "42 tables · users". */
   onDetail?: (check: CheckName, detail: string) => void
+  /**
+   * Scope the schema and data comparisons to a subset of tables (issue #43).
+   * Merged with the config's own `checks.tables` / `checks.excludeTables`.
+   */
+  tableFilter?: TableFilter
 }
 
 /**
@@ -100,7 +107,8 @@ export async function scan(
 
   const source = config.environments[config.source!]
   const target = config.environments[config.target!]
-  const ctx = { source, target, config }
+  const tableFilter = options.tableFilter ?? resolveTableFilter(config)
+  const ctx = { source, target, config, tableFilter }
 
   await bus?.emit('supaforge.scan.before', ctx)
 

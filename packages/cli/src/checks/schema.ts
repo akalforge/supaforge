@@ -39,6 +39,11 @@ export class SchemaCheck extends Check {
             ? ({ table, tablesSeen }) => ctx.onDetail?.(`${tablesSeen} tables · ${table}`)
             : undefined,
           ignoreSchemas,
+          // dbdiff takes the include/exclude lists natively, globs and all, so
+          // the scope is enforced in the diff itself rather than by discarding
+          // findings afterwards (issue #43).
+          ...(ctx.tableFilter?.tables?.length ? { tables: ctx.tableFilter.tables } : {}),
+          ...(ctx.tableFilter?.excludeTables?.length ? { ignoreTables: ctx.tableFilter.excludeTables } : {}),
         }),
         this.fetchIgnoredSchemaTables(ctx.target.dbUrl, ignoreSchemas),
       ])

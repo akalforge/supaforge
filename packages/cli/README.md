@@ -49,6 +49,52 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 | Vault Secrets | `vault.secrets` | ✅ | SQL (`vault.create_secret` / `vault.update_secret`) |
 | Postgres Extensions | `pg_extension` | ✅ | SQL (CREATE/DROP EXTENSION) |
 
+
+### Scoping a diff to specific tables
+
+`--check` / `--skip` select whole layers. `--tables` / `--exclude-tables` scope
+*within* the schema and data layers, which is what makes it possible to promote
+a reviewed subset between environments rather than applying everything a layer
+found:
+
+```bash
+supaforge diff --tables=orders,order_items          # only these two
+supaforge diff --tables='billing_*' --exclude-tables='*_audit'
+supaforge diff --tables=orders --apply              # promote just this table
+```
+
+Both flags are repeatable and comma-separated, and take the same `*` / `?`
+globs `@dbdiff/cli` supports. The scope is enforced inside the diff itself —
+dbdiff is told what to compare — rather than by generating everything and
+discarding findings afterwards.
+
+The equivalent config keys make a scope repeatable:
+
+```json
+{
+  "checks": {
+    "tables": ["orders", "order_items"],
+    "excludeTables": ["*_audit", "*_log"]
+  }
+}
+```
+
+**Precedence.** `--tables` *overrides* `checks.tables` — asking for one table on
+the command line must not be widened by a broader list in config.
+`--exclude-tables` is *unioned* with `checks.excludeTables`, the same way
+`--skip` merges with `checks.exclude`: an exclusion is a safety rail, so both
+sources excluding more is never the surprising direction.
+
+**Which layers it reaches.** A table is a concept the schema and data checks
+have and the others do not, so `diff --tables=orders` still compares every RLS
+policy, storage bucket and cron job. A scoped run says so before it starts:
+
+```
+  Scoped to only orders — applies to the schema and data checks; other layers are unfiltered.
+```
+
+Combine with `--check=schema` when you want the run itself narrowed too.
+
 ### Drift score vs posture score
 
 Twelve of the fourteen checks compare source against target. Two do not:

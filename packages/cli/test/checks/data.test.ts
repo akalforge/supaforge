@@ -107,3 +107,82 @@ describe('DataCheck', () => {
     await expect(check.scan(mockContext())).rejects.toThrow('Connection refused')
   })
 })
+
+// ─── issue #43: the data layer narrows its own configured list ──────────────
+
+describe('DataCheck honours the table filter (issue #43)', () => {
+  const configured = ['plans', 'plan_features', 'plans_audit']
+
+  function ctxWith(tableFilter?: CheckContext['tableFilter']): CheckContext {
+    return {
+      source: { dbUrl: 'postgres://source' },
+      target: { dbUrl: 'postgres://target' },
+      config: {
+        environments: { dev: { dbUrl: '' }, prod: { dbUrl: '' } },
+        source: 'dev',
+        target: 'prod',
+        checks: { data: { tables: configured } },
+      },
+      ...(tableFilter ? { tableFilter } : {}),
+    }
+  }
+
+  /**
+   * Fingerprints are computed one table at a time with the name inlined into
+   * the SQL, so the tables actually read are recovered from the statements.
+   */
+  function capturingQueryFn(): { tablesRead: () => string[]; queryFn: QueryFn } {
+    const sqls: string[] = []
+    let callCount = 0
+    const queryFn: QueryFn = async (_url, sql) => {
+      sqls.push(sql)
+      callCount++
+      // Always differ, so nothing is short-circuited as unchanged.
+      return [{ row_count: 10, size_bytes: String(callCount % 2 === 0 ? 1024 : 2048) }]
+    }
+    return {
+      queryFn,
+      tablesRead: () => [...new Set(configured.filter(t => sqls.some(q => q.includes(t))))],
+    }
+  }
+
+  it('only fingerprints the tables in scope', async () => {
+    // Narrowed before the checksum pass, not after — otherwise an excluded
+    // table is still read from both databases for nothing.
+    const { queryFn, tablesRead } = capturingQueryFn()
+    await new DataCheck(async () => ({ up: '', down: '' }), queryFn).scan(ctxWith({ tables: ['plans'] }))
+    expect(tablesRead()).toEqual(['plans'])
+  })
+
+  it('applies globs from the filter', async () => {
+    const { queryFn, tablesRead } = capturingQueryFn()
+    await new DataCheck(async () => ({ up: '', down: '' }), queryFn).scan(ctxWith({ excludeTables: ['*_audit'] }))
+    expect(tablesRead()).toEqual(['plans', 'plan_features'])
+  })
+
+  it('passes only the in-scope tables to dbdiff', async () => {
+    const calls: Array<string[] | undefined> = []
+    const { queryFn } = capturingQueryFn()
+    const runFn = async (opts: { tables?: string[] }) => {
+      calls.push(opts.tables)
+      return { up: '', down: '' }
+    }
+    await new DataCheck(runFn as never, queryFn).scan(ctxWith({ tables: ['plans'] }))
+    expect(calls[0]).toEqual(['plans'])
+  })
+
+  it('is unchanged when no filter is set', async () => {
+    const { queryFn, tablesRead } = capturingQueryFn()
+    await new DataCheck(async () => ({ up: '', down: '' }), queryFn).scan(ctxWith())
+    expect(tablesRead()).toEqual(configured)
+  })
+
+  it('skips with a reason when the filter excludes every configured table', async () => {
+    // Not a clean pass: nothing was compared. Same distinction issue #42 drew.
+    const check = new DataCheck(async () => ({ up: '', down: '' }), mockChangedQueryFn())
+    await expect(check.scan(ctxWith({ tables: ['not_configured'] }))).rejects.toThrow(CheckSkipped)
+    await expect(check.scan(ctxWith({ tables: ['not_configured'] })))
+      .rejects.toThrow('no configured data tables match')
+  })
+
+})

@@ -29,6 +29,21 @@ export interface EnvironmentConfig {
 }
 
 export interface ChecksConfig {
+  /**
+   * Only compare these tables in the schema and data layers. Supports
+   * @dbdiff/cli globs (`billing_*`). Undefined means all tables.
+   *
+   * The `--tables` flag overrides this rather than merging with it: asking for
+   * one table on the command line must not be widened by a broader list in
+   * config (issue #43).
+   */
+  tables?: string[]
+  /**
+   * Never compare these tables. Applied after `tables`, and unioned with the
+   * `--exclude-tables` flag — an exclusion is a safety rail, so both sources
+   * excluding more is never the surprising direction.
+   */
+  excludeTables?: string[]
   data?: { tables: string[] }
   migrations?: {
     dir?: string

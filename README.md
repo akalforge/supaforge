@@ -278,6 +278,23 @@ are scored separately as a **posture score**, so a genuinely synchronised pair
 reaches `Drift score: 100/100` even when it carries pre-existing findings on
 both sides. The findings keep their severity and a critical one still fails CI.
 
+### Scoping a diff to specific tables
+
+`--check` / `--skip` select whole layers; `--tables` / `--exclude-tables` scope
+within the schema and data layers, so a reviewed subset can be promoted rather
+than applying everything a layer found.
+
+```bash
+supaforge diff --tables=orders,order_items
+supaforge diff --tables='billing_*' --exclude-tables='*_audit'
+supaforge diff --tables=orders --apply
+```
+
+Both are repeatable, comma-separated, and support `@dbdiff/cli` globs. The
+config equivalents are `checks.tables` and `checks.excludeTables`; `--tables`
+overrides the former, `--exclude-tables` is unioned with the latter. A scoped
+run prints what it is scoped to before it starts.
+
 ### Environment variables
 
 | Variable | Default | Purpose |

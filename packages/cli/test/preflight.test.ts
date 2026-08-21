@@ -9,9 +9,13 @@ interface ClientBehaviour {
 
 const clientQueue: ClientBehaviour[] = []
 
+/** Config each pg.Client was constructed with, so the bounds can be asserted. */
+const clientConfigs: Array<Record<string, unknown>> = []
+
 vi.mock('pg', () => ({
   default: {
-    Client: vi.fn(() => {
+    Client: vi.fn((config: Record<string, unknown>) => {
+      clientConfigs.push(config)
       const behaviour = clientQueue.shift() ?? {}
       return {
         connect: vi.fn(async () => {
@@ -31,13 +35,24 @@ vi.mock('../src/local-pg.js', () => ({
   detectRuntime: vi.fn(async () => null),
 }))
 
-import { checkConnection, buildLocalHints, Preflight } from '../src/preflight.js'
+import {
+  checkConnection,
+  buildLocalHints,
+  buildConnectionHints,
+  buildTimeoutHints,
+  describeTimeout,
+  Preflight,
+} from '../src/preflight.js'
+import pg from 'pg'
 import { detectRuntime } from '../src/local-pg.js'
+import { DB_CONNECT_TIMEOUT_MS, DB_PROBE_TIMEOUT_MS } from '../src/constants.js'
 
 describe('checkConnection', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     clientQueue.length = 0
+    clientConfigs.length = 0
+    delete process.env.SUPAFORGE_CONNECT_TIMEOUT
   })
 
   it('returns reachable with version on success', async () => {
@@ -276,5 +291,103 @@ describe('Preflight', () => {
     expect(output).toContain('Local DB')
     expect(output).toContain('supaforge_local')
     expect(output).toContain('Schema only')
+  })
+})
+
+// ─── issue #44: a database that accepts TCP and never answers ───────────────
+
+describe('checkConnection bounds the wait (issue #44)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    clientQueue.length = 0
+    clientConfigs.length = 0
+    delete process.env.SUPAFORGE_CONNECT_TIMEOUT
+  })
+
+  it('sets both a connection and a probe bound', async () => {
+    clientQueue.push({ version: '16.1' })
+    await checkConnection('postgres://user:pass@localhost:5432/db')
+
+    // pg defaults connectionTimeoutMillis to 0 — wait forever. A host that
+    // accepts the connection and then goes silent hung the whole command.
+    expect(clientConfigs[0].connectionTimeoutMillis).toBe(DB_CONNECT_TIMEOUT_MS)
+    expect(clientConfigs[0].query_timeout).toBe(DB_PROBE_TIMEOUT_MS)
+  })
+
+  it('honours SUPAFORGE_CONNECT_TIMEOUT', async () => {
+    process.env.SUPAFORGE_CONNECT_TIMEOUT = '30'
+    clientQueue.push({ version: '16.1' })
+    await checkConnection('postgres://user:pass@localhost:5432/db')
+    expect(clientConfigs[0].connectionTimeoutMillis).toBe(30_000)
+  })
+
+  it('translates the driver connect timeout into a diagnosis', async () => {
+    clientQueue.push({ connectError: new Error('timeout expired') })
+    const result = await checkConnection('postgres://user:pass@localhost:5599/db')
+    expect(result.reachable).toBe(false)
+    expect(result.error).toContain('timed out after 15s connecting')
+    expect(result.error).toContain('never completed the handshake')
+    // The bare driver text reads as a bug rather than an explanation.
+    expect(result.error).not.toBe('timeout expired')
+  })
+
+  it('closes the client even when the connection timed out', async () => {
+    // A half-open socket keeps the event loop alive and hangs the process
+    // after the report has already printed.
+    clientQueue.push({ connectError: new Error('timeout expired') })
+    await checkConnection('postgres://user:pass@localhost:5599/db')
+    const instance = vi.mocked(pg.Client).mock.results[0].value as { end: ReturnType<typeof vi.fn> }
+    expect(instance.end).toHaveBeenCalled()
+  })
+})
+
+describe('describeTimeout', () => {
+  it('names the connect wait', () => {
+    expect(describeTimeout('timeout expired', 15_000, 15_000)).toContain('timed out after 15s connecting')
+  })
+
+  it('names the probe wait separately', () => {
+    const out = describeTimeout('Query read timeout', 15_000, 20_000)
+    expect(out).toContain('timed out after 20s waiting for server response')
+    expect(out).toContain('connected, but the server did not answer')
+  })
+
+  it('leaves unrelated errors alone', () => {
+    // An OS-level ETIMEDOUT is a different failure and already reads clearly.
+    for (const msg of ['connect ECONNREFUSED 127.0.0.1:5432', 'connect ETIMEDOUT 10.0.0.1:5432', 'password authentication failed']) {
+      expect(describeTimeout(msg, 15_000, 15_000)).toBe(msg)
+    }
+  })
+})
+
+describe('buildConnectionHints', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  it('gives stall hints for a timeout, on a remote host too', async () => {
+    const hints = await buildConnectionHints(
+      'postgres://user:pass@db.example.com:5432/db',
+      'timed out after 15s connecting — the host accepted the connection but never completed the handshake',
+    )
+    expect(hints).toEqual(buildTimeoutHints())
+    expect(hints.some(h => h.includes('did not answer'))).toBe(true)
+    expect(hints.some(h => h.includes('SUPAFORGE_CONNECT_TIMEOUT'))).toBe(true)
+  })
+
+  it('does not suggest starting a local server when a remote one stalled', async () => {
+    const hints = await buildConnectionHints(
+      'postgres://user:pass@db.example.com:5432/db',
+      'timed out after 15s connecting — the host accepted the connection but never completed the handshake',
+    )
+    expect(hints.some(h => h.includes('Start PostgreSQL manually'))).toBe(false)
+    expect(hints.some(h => h.includes('supabase start'))).toBe(false)
+  })
+
+  it('falls through to the local hints for a refusal', async () => {
+    vi.mocked(detectRuntime).mockResolvedValueOnce('podman')
+    const hints = await buildConnectionHints(
+      'postgres://user:pass@localhost:5432/db',
+      'connect ECONNREFUSED 127.0.0.1:5432',
+    )
+    expect(hints.some(h => h.includes('podman'))).toBe(true)
   })
 })

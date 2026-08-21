@@ -11,6 +11,7 @@ import {
   resolveDbDiffMemoryLimit,
   buildDbDiffArgs,
   extractRoutineArgs,
+  routineLabel,
   extractRoutineName,
   mergeRoutineReplacements,
   parseDbDiffProgress,
@@ -410,9 +411,11 @@ describe('summariseStatement', () => {
     ['CREATE VIEW "v_active_users" AS SELECT * FROM users;', 'schema', 'View missing: v_active_users'],
     ['DROP VIEW "v_active_users";', 'schema', 'Extra view: v_active_users'],
     ['ALTER VIEW "v_active_users" RENAME TO "v_old";', 'schema', 'View altered: v_active_users'],
-    ['CREATE FUNCTION calculate_total() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;', 'schema', 'Function missing: calculate_total'],
-    ['DROP FUNCTION calculate_total();', 'schema', 'Extra function: calculate_total'],
-    ['ALTER FUNCTION calculate_total() OWNER TO admin;', 'schema', 'Function altered: calculate_total'],
+    // Titles carry the argument signature so overloads are distinguishable
+    // (issue #40); a zero-argument routine therefore renders as `name()`.
+    ['CREATE FUNCTION calculate_total() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;', 'schema', 'Function missing: calculate_total()'],
+    ['DROP FUNCTION calculate_total();', 'schema', 'Extra function: calculate_total()'],
+    ['ALTER FUNCTION calculate_total() OWNER TO admin;', 'schema', 'Function altered: calculate_total()'],
     ['CREATE TRIGGER trg_audit AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION fn();', 'schema', 'Trigger missing: trg_audit'],
     ['DROP TRIGGER trg_audit ON users;', 'schema', 'Extra trigger: trg_audit'],
     ['ALTER TRIGGER trg_audit ON users RENAME TO trg_v2;', 'schema', 'Trigger altered: trg_audit'],
@@ -690,7 +693,7 @@ describe('routine titles name the routine (issue #35)', () => {
       'CREATE OR REPLACE FUNCTION public.example_fn() RETURNS integer AS $$ SELECT 1 $$;',
       'schema',
     )
-    expect(title).toBe('Function missing: public.example_fn')
+    expect(title).toBe('Function missing: public.example_fn()')
   })
 })
 
@@ -901,5 +904,63 @@ describe('parseDbDiffProgress (issue #29)', () => {
     expect(parseDbDiffProgress('Pre-scan: skipped 284 / 291 unchanged tables')).toBeNull()
     expect(parseDbDiffProgress('')).toBeNull()
     expect(parseDbDiffProgress('random noise')).toBeNull()
+  })
+})
+
+// ─── issue #40: overloaded routines must be distinguishable by title alone ──
+
+describe('routine titles carry the signature (issue #40)', () => {
+  it('names which overload an Extra function refers to', () => {
+    // The generated SQL was already signature-aware; only the title lost it.
+    expect(summariseStatement('DROP FUNCTION IF EXISTS "example_fn"(uuid,integer);', 'schema'))
+      .toBe('Extra function: example_fn(uuid,integer)')
+  })
+
+  it('gives two target-only overloads of one name different titles', () => {
+    // Previously both read "Extra function: example_fn" and were
+    // indistinguishable without reading the SQL fix line.
+    const a = summariseStatement('DROP FUNCTION IF EXISTS "example_fn"(uuid,integer);', 'schema')
+    const b = summariseStatement('DROP FUNCTION IF EXISTS "example_fn"(text,text);', 'schema')
+    expect(a).not.toBe(b)
+  })
+
+  it('matches the format Function modified already used', () => {
+    const modified = extractRoutineName('CREATE OR REPLACE FUNCTION public.dist(a text, b text) RETURNS text AS $$ SELECT a $$;')
+      + extractRoutineArgs('DROP FUNCTION IF EXISTS "dist"(text,text);')
+    expect(modified).toBe('public.dist(text,text)')
+    expect(summariseStatement('DROP FUNCTION IF EXISTS "dist"(text,text);', 'schema'))
+      .toBe('Extra function: dist(text,text)')
+  })
+
+  it('covers procedures too', () => {
+    expect(summariseStatement('DROP PROCEDURE IF EXISTS "do_thing"(integer);', 'schema'))
+      .toBe('Extra procedure: do_thing(integer)')
+  })
+
+  it('keeps the schema qualifier when the statement has one', () => {
+    expect(summariseStatement('CREATE OR REPLACE FUNCTION public.fn(a int) RETURNS void AS $$ $$;', 'schema'))
+      .toBe('Function missing: public.fn(a int)')
+  })
+
+  it('adds no schema qualifier when the statement lacks one', () => {
+    // dbdiff emits the DROP unqualified. Inventing `public.` would be wrong
+    // for a routine that lives anywhere else.
+    expect(summariseStatement('DROP FUNCTION IF EXISTS "fn"(int);', 'schema'))
+      .not.toContain('public.')
+  })
+})
+
+describe('routineLabel', () => {
+  it('joins the name and its argument list', () => {
+    expect(routineLabel('DROP FUNCTION IF EXISTS "f"(numeric(10,2),text);')).toBe('f(numeric(10,2),text)')
+  })
+
+  it('renders a zero-argument routine with empty parens', () => {
+    expect(routineLabel('DROP FUNCTION IF EXISTS "f"();')).toBe('f()')
+  })
+
+  it('returns the bare name when there is no argument list at all', () => {
+    // MySQL has no overloading and pre-rc.7 dbdiff emitted no signature.
+    expect(routineLabel('DROP FUNCTION IF EXISTS "f";')).toBe('f')
   })
 })

@@ -1,4 +1,5 @@
 import pg from 'pg'
+import { pgClientConfig } from './db.js'
 import type { ScanResult, SyncAction } from './types/drift'
 import { errMsg } from './utils/error'
 import { isDestructiveSql } from './dbdiff'
@@ -98,7 +99,7 @@ async function executeSql(
 ): Promise<void> {
   if (statements.length === 0) return
 
-  const client = new pg.Client({ connectionString: dbUrl })
+  const client = new pg.Client(pgClientConfig(dbUrl))
   await client.connect()
   try {
     for (const stmt of statements) {

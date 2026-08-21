@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import pg from 'pg'
+import { pgClientConfig } from './db.js'
 import type { MigrationFile, SnapshotManifest } from './types/config'
 import { MIGRATIONS_TABLE, loadMigrations } from './migration'
 import { loadSnapshot } from './snapshot'
@@ -47,7 +48,7 @@ export interface RestoreResult {
  */
 export async function getPublicTables(targetUrl: string): Promise<string[]> {
   const ignoreList = DEFAULT_IGNORE_SCHEMAS.map(s => `'${s}'`).join(', ')
-  const client = new pg.Client({ connectionString: targetUrl })
+  const client = new pg.Client(pgClientConfig(targetUrl))
   await client.connect()
   try {
     const { rows } = await client.query<{ tablename: string }>(
@@ -77,7 +78,7 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
 
   // Apply SQL layers in dependency order
   const sqlOrder = ['extensions', 'schema', 'rls', 'cron', 'webhooks', 'storage-policies']
-  const client = new pg.Client({ connectionString: options.targetUrl })
+  const client = new pg.Client(pgClientConfig(options.targetUrl))
   await client.connect()
 
   try {
@@ -183,7 +184,7 @@ export async function restoreFromMigrations(options: RestoreOptions): Promise<Re
   }
 
   // Ensure tracking table exists
-  const client = new pg.Client({ connectionString: options.targetUrl })
+  const client = new pg.Client(pgClientConfig(options.targetUrl))
   await client.connect()
 
   try {

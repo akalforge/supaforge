@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import pg from 'pg'
+import { pgClientConfig } from './db.js'
 import { RUNTIME_DETECT_TIMEOUT_MS, CONTAINER_RM_TIMEOUT_MS, CONTAINER_START_TIMEOUT_MS } from './constants'
 
 const defaultExecFile = promisify(execFile)
@@ -41,7 +42,7 @@ export const READINESS_INTERVAL_MS = 2000
 // ─── Default implementations ────────────────────────────────────────────────
 
 async function defaultConnectFn(url: string): Promise<void> {
-  const client = new pg.Client({ connectionString: url })
+  const client = new pg.Client(pgClientConfig(url))
   await client.connect()
   await client.end()
 }

@@ -37,6 +37,32 @@ export const SUPABASE_MGMT_API = 'https://api.supabase.com/v1/projects'
  */
 export const DBDIFF_EXEC_TIMEOUT_MS = 600_000
 
+/**
+ * Default bound on establishing a PostgreSQL connection (15 seconds).
+ *
+ * `pg` defaults connectionTimeoutMillis to 0 — wait forever. That is invisible
+ * for the common failures, because the socket layer errors out on its own: a
+ * refused connection fails immediately, an unroutable host after the OS TCP
+ * timeout. But a host that *accepts* the connection and then never completes
+ * the startup handshake — a paused container, a dropped VPN tunnel, an
+ * overloaded server — leaves nothing to time it out, and the command blocks
+ * indefinitely with no output (issue #44).
+ *
+ * 15s is long enough for a slow link and short enough to fail usefully.
+ * Override with SUPAFORGE_CONNECT_TIMEOUT (in seconds).
+ */
+export const DB_CONNECT_TIMEOUT_MS = 15_000
+
+/**
+ * Bound on the preflight version probe (15 seconds).
+ *
+ * The handshake can complete on a server that then stalls before answering,
+ * so bounding the connect alone still leaves a way to hang. Applied only to
+ * the probe — a scan or migration query is legitimately long-running and must
+ * not inherit this.
+ */
+export const DB_PROBE_TIMEOUT_MS = 15_000
+
 /** Max stdout/stderr buffer for @dbdiff/cli (10 MB). */
 export const DBDIFF_MAX_BUFFER = 10 * 1024 * 1024
 

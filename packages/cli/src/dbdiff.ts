@@ -737,14 +737,14 @@ export function summariseStatement(sql: string, check: 'schema' | 'data'): strin
 
   // Functions / procedures
   if (upper.startsWith('CREATE FUNCTION') || upper.startsWith('CREATE OR REPLACE FUNCTION')) {
-    return `Function missing: ${extractRoutineName(sql)}`
+    return `Function missing: ${routineLabel(sql)}`
   }
-  if (upper.startsWith('ALTER FUNCTION')) return `Function altered: ${extractRoutineName(sql)}`
-  if (upper.startsWith('DROP FUNCTION')) return `Extra function: ${extractRoutineName(sql)}`
+  if (upper.startsWith('ALTER FUNCTION')) return `Function altered: ${routineLabel(sql)}`
+  if (upper.startsWith('DROP FUNCTION')) return `Extra function: ${routineLabel(sql)}`
   if (upper.startsWith('CREATE PROCEDURE') || upper.startsWith('CREATE OR REPLACE PROCEDURE')) {
-    return `Procedure missing: ${extractRoutineName(sql)}`
+    return `Procedure missing: ${routineLabel(sql)}`
   }
-  if (upper.startsWith('DROP PROCEDURE')) return `Extra procedure: ${extractRoutineName(sql)}`
+  if (upper.startsWith('DROP PROCEDURE')) return `Extra procedure: ${routineLabel(sql)}`
 
   // Triggers
   if (upper.startsWith('CREATE TRIGGER') || upper.startsWith('CREATE OR REPLACE TRIGGER')) {
@@ -783,6 +783,23 @@ export function summariseStatement(sql: string, check: 'schema' | 'data'): strin
 
 function extractName(sql: string, pattern: RegExp): string {
   return sql.match(pattern)?.[1] ?? 'unknown'
+}
+
+/**
+ * Name a routine in an issue title, with its argument signature.
+ *
+ * The detection has been signature-aware since overloads were fixed, but only
+ * the "Function modified" title carried the signature through — "Extra
+ * function" printed the bare name (issue #40). For an overloaded routine that
+ * left the title unable to say which overload was being dropped, and two
+ * target-only overloads of one name produced two identical titles.
+ *
+ * No schema qualifier is added when the statement lacks one. dbdiff emits the
+ * DROP unqualified, and inventing `public.` would be wrong for a routine that
+ * lives anywhere else.
+ */
+export function routineLabel(sql: string): string {
+  return extractRoutineName(sql) + extractRoutineArgs(sql)
 }
 
 /**

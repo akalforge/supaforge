@@ -79,9 +79,9 @@ supaforge snapshot --env=prod --migration
 | Schema | `@dbdiff/cli` | ✅ Ready |
 | Data | `@dbdiff/cli --type=data` | ✅ Ready |
 | RLS Policies | `pg_policies` view | ✅ Ready |
-| Edge Functions | Management API | ✅ Ready |
+| Edge Functions | Management API | ✅ Ready — hosted only, skipped on self-hosted |
 | Storage | Storage API | ✅ Ready |
-| Auth Config | Management API | ✅ Ready |
+| Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Ready |
 | Cron Jobs | `cron.job` table | ✅ Ready |
 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ Ready |
 | Realtime Publications | `pg_publication` + `pg_publication_tables` | ✅ Ready |
@@ -270,12 +270,21 @@ beats a committed value.
 The MCP server accepts a `skip` argument on `scan_drift` for the same reason —
 an agent can avoid a slow layer without editing the project config.
 
+### Drift score vs posture score
+
+RLS Coverage and Migration History are not source↔target comparisons — they
+report on the target alone and fire identically whichever pair you diff. They
+are scored separately as a **posture score**, so a genuinely synchronised pair
+reaches `Drift score: 100/100` even when it carries pre-existing findings on
+both sides. The findings keep their severity and a critical one still fails CI.
+
 ### Environment variables
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `SUPAFORGE_DBDIFF_TIMEOUT` | `600` | Seconds before the schema/data diff is abandoned. Overrides `checks.schema.timeout`. |
 | `SUPAFORGE_DBDIFF_MEMORY` | dbdiff's own `1G` | Passed to `@dbdiff/cli --memory-limit`. Takes `512M`, `2G`, or `-1` for unlimited. |
+| `SUPAFORGE_CONNECT_TIMEOUT` | `15` | Seconds before a database connection attempt is abandoned. Applies to every connection, including the preflight reachability check. |
 
 ```bash
 SUPAFORGE_DBDIFF_TIMEOUT=600 SUPAFORGE_DBDIFF_MEMORY=2G supaforge diff

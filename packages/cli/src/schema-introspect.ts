@@ -1,4 +1,5 @@
 import pg from 'pg'
+import { pgClientConfig } from './db.js'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -101,7 +102,7 @@ export async function introspectSchema(
   if (clientQueryFn) {
     queryFn = clientQueryFn
   } else {
-    pool = new pg.Pool({ connectionString: dbUrl, max: 6 })
+    pool = new pg.Pool({ ...pgClientConfig(dbUrl), max: 6 })
     queryFn = async (sql, params) => {
       const { rows } = await pool!.query(sql, params)
       return rows

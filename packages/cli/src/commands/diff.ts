@@ -13,6 +13,22 @@ import { renderTip } from '../tips.js'
 import { formatGitHubAnnotations, computeCiExitCode, formatCiSummary, type FailOn } from '../ci.js'
 
 /**
+ * Glyph and text for a finished check, so the three outcomes are visually
+ * distinct in the live progress list.
+ */
+function describeCheckOutcome(
+  status: 'clean' | 'drifted' | 'error' | 'skipped',
+  issueCount: number,
+  skipReason?: string,
+): { glyph: string; text: string } {
+  if (status === 'error') return { glyph: warn('✗'), text: warn('error') }
+  if (status === 'skipped') {
+    return { glyph: dim('○'), text: dim(`skipped — ${skipReason ?? 'no reason given'}`) }
+  }
+  return { glyph: ok('✓'), text: `${issueCount} issues` }
+}
+
+/**
  * Unified drift detection & resolution command.
  *
  * Default:   summary of what's drifted (was: scan)
@@ -34,6 +50,18 @@ export default class Diff extends BaseCommand {
     '<%= config.bin %> diff --skip=auth --skip=edge-functions --skip=realtime',
     '<%= config.bin %> diff --ci',
     '<%= config.bin %> diff --ci --fail-on=warning',
+  ]
+
+  /**
+   * Read from the environment rather than passed as flags, because they tune
+   * limits rather than select behaviour. Rendered as their own `--help`
+   * section (issue #40); the README carries the same table plus the timeout
+   * precedence chain.
+   */
+  static envVars = [
+    { name: 'SUPAFORGE_CONNECT_TIMEOUT', description: 'Seconds before a database connection attempt is abandoned (default 15).' },
+    { name: 'SUPAFORGE_DBDIFF_TIMEOUT', description: 'Seconds before the schema/data diff is abandoned. Overrides checks.schema.timeout (default 600).' },
+    { name: 'SUPAFORGE_DBDIFF_MEMORY', description: "PHP memory limit for @dbdiff/cli — 512M, 2G, or -1 for unlimited (default dbdiff's own 1G)." },
   ]
 
   static override flags = {
@@ -112,10 +140,11 @@ export default class Diff extends BaseCommand {
           // Clear any in-place detail line before the final result line.
           if (process.stdout.isTTY) process.stdout.write('\r\u001b[2K')
           const dur = `${(event.durationMs / 1000).toFixed(1)}s`
-          const issues = event.status === 'error' ? warn('error')
-            : event.status === 'skipped' ? dim('skipped')
-            : `${event.issueCount} issues`
-          process.stdout.write(`  ${ok('✓')} ${idx} ${label.padEnd(24)} ${issues}  (${dur})\n`)
+          // A skipped layer gets its own glyph and its reason. A green tick
+          // beside "0 issues" was indistinguishable from a comparison that
+          // passed (issue #42).
+          const { glyph, text } = describeCheckOutcome(event.status, event.issueCount, event.skipReason)
+          process.stdout.write(`  ${glyph} ${idx} ${label.padEnd(24)} ${text}  (${dur})\n`)
         }
       }
     }

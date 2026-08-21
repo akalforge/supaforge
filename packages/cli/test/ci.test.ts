@@ -9,6 +9,7 @@ function makeResult(overrides: Partial<ScanResult> = {}): ScanResult {
     target: 'production',
     checks: [],
     score: 100,
+    postureScore: null,
     summary: { total: 0, critical: 0, warning: 0, info: 0 },
     ...overrides,
   }
@@ -262,6 +263,7 @@ describe('formatCiSummary error signal (issue #29)', () => {
       { check: 'rls', status: 'clean', issues: [], durationMs: 10 },
     ],
     score: 97,
+    postureScore: null,
     summary: { total: 0, critical: 0, warning: 0, info: 0 },
   }
 
@@ -289,5 +291,109 @@ describe('formatCiSummary error signal (issue #29)', () => {
 
   it('tolerates a malformed result rather than throwing', () => {
     expect(() => formatCiSummary({ ...withError, checks: undefined as never })).not.toThrow()
+  })
+})
+
+// ─── issue #42: skipped checks in the CI payload ────────────────────────────
+
+describe('formatCiSummary reports skipped checks (issue #42)', () => {
+  const partial: ScanResult = {
+    timestamp: '2026-03-21T00:00:00.000Z',
+    source: 'dev',
+    target: 'prod',
+    checks: [
+      { check: 'cron', status: 'clean', issues: [], durationMs: 1700 },
+      { check: 'auth', status: 'skipped', issues: [], skipReason: 'no projectRef or accessToken configured', durationMs: 0 },
+      { check: 'rls', status: 'error', issues: [], error: 'connection refused', durationMs: 5 },
+    ],
+    score: 97,
+    postureScore: null,
+    summary: { total: 0, critical: 0, warning: 0, info: 0 },
+  }
+
+  it('lists skipped checks with their reason', () => {
+    // Without this the artifact read as full coverage while a layer had never
+    // opened a connection.
+    expect(formatCiSummary(partial).skipped).toEqual([
+      { check: 'auth', reason: 'no projectRef or accessToken configured' },
+    ])
+  })
+
+  it('keeps skips out of errors — a skip is not a failure', () => {
+    const out = formatCiSummary(partial)
+    expect(out.errors).toEqual([{ check: 'rls', message: 'connection refused' }])
+    expect(out.errors.some(e => e.check === 'auth')).toBe(false)
+  })
+
+  it('falls back to a placeholder reason rather than omitting the entry', () => {
+    const noReason: ScanResult = {
+      ...partial,
+      checks: [{ check: 'auth', status: 'skipped', issues: [], durationMs: 0 }],
+    }
+    expect(formatCiSummary(noReason).skipped).toEqual([{ check: 'auth', reason: 'no reason given' }])
+  })
+
+  it('reports how many checks actually compared', () => {
+    expect(formatCiSummary(partial).coverage).toEqual({ compared: 1, total: 3 })
+  })
+
+  it('is empty on a fully-run scan', () => {
+    const full: ScanResult = {
+      ...partial,
+      checks: [{ check: 'cron', status: 'clean', issues: [], durationMs: 10 }],
+    }
+    const out = formatCiSummary(full)
+    expect(out.skipped).toEqual([])
+    expect(out.coverage).toEqual({ compared: 1, total: 1 })
+  })
+
+  it('does not make a skip fail the build', () => {
+    // A skip is a coverage signal, not a drift signal — the exit code must
+    // stay 0 so an intentionally-unconfigurable layer cannot break CI.
+    const skipOnly: ScanResult = {
+      ...partial,
+      checks: [{ check: 'auth', status: 'skipped', issues: [], skipReason: 'no credentials', durationMs: 0 }],
+    }
+    expect(computeCiExitCode(skipOnly, 'any')).toBe(0)
+  })
+})
+
+describe('formatCiSummary carries the posture score (issue #40)', () => {
+  it('reports drift and posture as separate numbers', () => {
+    const r: ScanResult = {
+      timestamp: 't', source: 'a', target: 'a',
+      checks: [
+        { check: 'schema', status: 'clean', issues: [], durationMs: 1 },
+        { check: 'rls-coverage', status: 'drifted', durationMs: 1, issues: [{ id: 'x', check: 'rls-coverage', severity: 'critical', title: 'RLS disabled', description: 'd' }] },
+      ],
+      score: 100,
+      postureScore: 85,
+      summary: { total: 1, critical: 1, warning: 0, info: 0 },
+    }
+    const out = formatCiSummary(r)
+    expect(out.score).toBe(100)
+    expect(out.postureScore).toBe(85)
+  })
+
+  it('is null when no posture check ran', () => {
+    const r: ScanResult = {
+      timestamp: 't', source: 'a', target: 'b',
+      checks: [{ check: 'schema', status: 'clean', issues: [], durationMs: 1 }],
+      score: 100, postureScore: null,
+      summary: { total: 0, critical: 0, warning: 0, info: 0 },
+    }
+    expect(formatCiSummary(r).postureScore).toBeNull()
+  })
+
+  it('a critical posture finding still fails CI', () => {
+    // Excluding posture from the *score* must not weaken the security gate:
+    // an RLS gap is still something a pipeline should refuse to merge past.
+    const r: ScanResult = {
+      timestamp: 't', source: 'a', target: 'a',
+      checks: [{ check: 'rls-coverage', status: 'drifted', durationMs: 1, issues: [{ id: 'x', check: 'rls-coverage', severity: 'critical', title: 'RLS disabled', description: 'd' }] }],
+      score: 100, postureScore: 85,
+      summary: { total: 1, critical: 1, warning: 0, info: 0 },
+    }
+    expect(computeCiExitCode(r, 'critical')).toBe(1)
   })
 })

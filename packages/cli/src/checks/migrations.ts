@@ -4,7 +4,7 @@ import { pgQuery } from '../db.js'
 import type { DriftIssue } from '../types/drift.js'
 import { MIGRATIONS_TABLE } from '../constants.js'
 import { quoteLiteral } from '../utils/sql.js'
-import { Check, type CheckContext } from './base.js'
+import { Check, CheckSkipped, type CheckContext } from './base.js'
 import type { MigrationsMode } from '../types/config.js'
 
 export const DEFAULT_MIGRATIONS_DIR = 'supabase/migrations'
@@ -47,8 +47,10 @@ export class MigrationsCheck extends Check {
     const dir = ctx.config.checks?.migrations?.dir ?? DEFAULT_MIGRATIONS_DIR
     const mode = resolveMigrationsMode(ctx.config.checks?.migrations?.mode)
 
-    // Nothing to read or query when the check is switched off entirely.
-    if (mode === 'ignore') return []
+    // Nothing to read or query when the check is switched off entirely. It is
+    // still reported as skipped rather than clean, so turning it off does not
+    // look like a layer that passed (issue #42).
+    if (mode === 'ignore') throw new CheckSkipped("checks.migrations.mode is 'ignore'")
 
     const [local, db] = await Promise.all([
       readLocalMigrations(dir, this.readDirFn),

@@ -3,12 +3,14 @@ import type { CheckRegistry } from './checks/registry'
 import type { SupaForgeConfig } from './types/config'
 import type { CheckName, CheckResult, ScanResult } from './types/drift'
 import { CHECK_NAMES } from './types/drift'
-import { computeScore, summarize } from './scoring'
+import { computeScore, computePostureScore, summarize } from './scoring'
+import type { Check, CheckContext } from './checks/base'
+import { isCheckSkipped } from './checks/base'
 import { friendlyDbError } from './utils/error'
 
 export type ScanProgressEvent =
   | { phase: 'check:start'; check: CheckName; index: number; total: number }
-  | { phase: 'check:done'; check: CheckName; index: number; total: number; status: CheckResult['status']; issueCount: number; durationMs: number }
+  | { phase: 'check:done'; check: CheckName; index: number; total: number; status: CheckResult['status']; issueCount: number; durationMs: number; skipReason?: string }
 
 export interface ScanOptions {
   config: SupaForgeConfig
@@ -47,6 +49,46 @@ export function resolveExcludedChecks(config: SupaForgeConfig): CheckName[] {
   return out
 }
 
+/**
+ * Run one check and classify the outcome.
+ *
+ * Three outcomes, not two: a check can compare and find nothing, or decline to
+ * run. Collapsing the second into the first is what made a layer that never
+ * opened a connection render as a green pass (issue #42).
+ */
+async function runCheck(
+  check: Check,
+  ctx: CheckContext,
+  name: CheckName,
+  sourceDbUrl: string,
+): Promise<CheckResult> {
+  const start = performance.now()
+  try {
+    const issues = await check.scan(ctx)
+    return {
+      check: name,
+      status: issues.length > 0 ? 'drifted' : 'clean',
+      issues,
+      durationMs: Math.round(performance.now() - start),
+    }
+  } catch (err) {
+    const durationMs = Math.round(performance.now() - start)
+
+    // A skip is a normal outcome, not a failure — the layer declined to run
+    // for a reason the user can act on, rather than breaking (issue #42).
+    if (isCheckSkipped(err)) {
+      return { check: name, status: 'skipped', issues: [], skipReason: err.message, durationMs }
+    }
+    return {
+      check: name,
+      status: 'error',
+      issues: [],
+      error: friendlyDbError(err, sourceDbUrl),
+      durationMs,
+    }
+  }
+}
+
 export async function scan(
   registry: CheckRegistry,
   options: ScanOptions,
@@ -79,37 +121,33 @@ export async function scan(
     }
 
     if (!check) {
-      results.push({ check: name, status: 'skipped', issues: [], durationMs: 0 })
-      options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'skipped', issueCount: 0, durationMs: 0 })
+      const skipReason = 'not registered'
+      results.push({ check: name, status: 'skipped', issues: [], skipReason, durationMs: 0 })
+      options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'skipped', issueCount: 0, durationMs: 0, skipReason })
       continue
     }
 
     await bus?.emit('supaforge.check.before', { check: name })
-    const start = performance.now()
 
-    try {
-      const issues = await check.scan(checkCtx)
-      const durationMs = Math.round(performance.now() - start)
-      const status = issues.length > 0 ? 'drifted' : 'clean'
-      results.push({ check: name, status, issues, durationMs })
-      options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status, issueCount: issues.length, durationMs })
-    } catch (err) {
-      const durationMs = Math.round(performance.now() - start)
-      results.push({
-        check: name,
-        status: 'error',
-        issues: [],
-        error: friendlyDbError(err, source.dbUrl),
-        durationMs,
-      })
-      options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'error', issueCount: 0, durationMs })
-    }
+    const result = await runCheck(check, checkCtx, name, source.dbUrl)
+    results.push(result)
+    options.onProgress?.({
+      phase: 'check:done',
+      check: name,
+      index: i,
+      total,
+      status: result.status,
+      issueCount: result.issues.length,
+      durationMs: result.durationMs,
+      ...(result.skipReason ? { skipReason: result.skipReason } : {}),
+    })
 
-    await bus?.emit('supaforge.check.after', { check: name, result: results.at(-1) })
+    await bus?.emit('supaforge.check.after', { check: name, result })
   }
 
   const summary = summarize(results)
   const score = computeScore(results)
+  const postureScore = computePostureScore(results)
 
   const scanResult: ScanResult = {
     timestamp: new Date().toISOString(),
@@ -117,6 +155,7 @@ export async function scan(
     target: config.target!,
     checks: results,
     score,
+    postureScore,
     summary,
   }
 

@@ -1,5 +1,5 @@
 import type { DriftIssue, SyncAction } from '../types/drift'
-import { Check, type CheckContext } from './base'
+import { Check, CheckSkipped, type CheckContext } from './base'
 import { SUPABASE_MGMT_API } from '../constants'
 
 interface EdgeFunction {
@@ -26,8 +26,17 @@ export class EdgeFunctionsCheck extends Check {
     const sourceKey = ctx.source.accessToken
     const targetKey = ctx.target.accessToken
 
+    // Self-hosted Supabase exposes no equivalent "list functions" management
+    // endpoint, so there is nothing to call. Previously the hosted URL was
+    // built regardless and the layer failed with a bare `Unauthorized`, which
+    // reads as a credentials problem the user could fix — it is not one
+    // (issue #41).
+    if (ctx.source.apiUrl || ctx.target.apiUrl) {
+      throw new CheckSkipped('Edge Functions comparison requires hosted Supabase — self-hosted exposes no management endpoint')
+    }
+
     if (!sourceRef || !targetRef || !sourceKey || !targetKey) {
-      return []
+      throw new CheckSkipped('no projectRef or accessToken configured')
     }
 
     const [source, target] = await Promise.all([

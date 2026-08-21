@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { scan } from '../src/scanner.js'
 import { CheckRegistry } from '../src/checks/registry.js'
-import { Check, type CheckContext } from '../src/checks/base.js'
+import { Check, CheckSkipped, type CheckContext } from '../src/checks/base.js'
 import { HookBus } from '../src/hooks.js'
 import type { DriftIssue, CheckName } from '../src/types/drift.js'
 import type { SupaForgeConfig } from '../src/types/config.js'
@@ -209,6 +209,89 @@ describe('scan — skip option', () => {
 
     expect(result.checks).toHaveLength(0)
     expect(result.summary.total).toBe(0)
+    expect(result.score).toBe(100)
+  })
+})
+
+// ─── issue #42: a check that declines to run is not a check that passed ──────
+
+describe('skipped checks are distinguishable from clean ones (issue #42)', () => {
+  class SkippingCheck extends Check {
+    readonly name = 'auth' as const
+    async scan(): Promise<DriftIssue[]> {
+      throw new CheckSkipped('no projectRef or accessToken configured')
+    }
+  }
+
+  class CleanCheck extends Check {
+    readonly name = 'cron' as const
+    async scan(): Promise<DriftIssue[]> {
+      return []
+    }
+  }
+
+  class BrokenCheck extends Check {
+    readonly name = 'rls' as const
+    async scan(): Promise<DriftIssue[]> {
+      throw new Error('connection refused')
+    }
+  }
+
+  function registryWith(...checks: Check[]): CheckRegistry {
+    const reg = new CheckRegistry()
+    for (const c of checks) reg.register(c)
+    return reg
+  }
+
+  const config = {
+    environments: { dev: { dbUrl: 'postgres://s' }, prod: { dbUrl: 'postgres://t' } },
+    source: 'dev',
+    target: 'prod',
+  }
+
+  it('records status skipped with the reason, not a clean pass', async () => {
+    const result = await scan(registryWith(new SkippingCheck()), { config, checks: ['auth'] })
+    expect(result.checks[0].status).toBe('skipped')
+    expect(result.checks[0].skipReason).toBe('no projectRef or accessToken configured')
+    expect(result.checks[0].issues).toEqual([])
+  })
+
+  it('keeps a genuinely clean check clean', async () => {
+    // The distinction is the whole point: both produce zero issues.
+    const result = await scan(registryWith(new CleanCheck()), { config, checks: ['cron'] })
+    expect(result.checks[0].status).toBe('clean')
+    expect(result.checks[0].skipReason).toBeUndefined()
+  })
+
+  it('does not treat a skip as an error', async () => {
+    const result = await scan(registryWith(new SkippingCheck()), { config, checks: ['auth'] })
+    expect(result.checks[0].status).not.toBe('error')
+    expect(result.checks[0].error).toBeUndefined()
+  })
+
+  it('still treats a real failure as an error', async () => {
+    const result = await scan(registryWith(new BrokenCheck()), { config, checks: ['rls'] })
+    expect(result.checks[0].status).toBe('error')
+    expect(result.checks[0].error).toBeTruthy()
+  })
+
+  it('reports the skip reason through onProgress', async () => {
+    const events: Array<Record<string, unknown>> = []
+    await scan(registryWith(new SkippingCheck()), {
+      config,
+      checks: ['auth'],
+      onProgress: (e) => events.push(e as unknown as Record<string, unknown>),
+    })
+    const done = events.find(e => e.phase === 'check:done')!
+    expect(done.status).toBe('skipped')
+    expect(done.skipReason).toBe('no projectRef or accessToken configured')
+  })
+
+  it('a skip does not reduce the drift score', async () => {
+    // Penalising it would give every self-hosted project a permanently
+    // depressed score for layers it deliberately cannot run. Coverage is
+    // reported separately instead.
+    const result = await scan(registryWith(new SkippingCheck()), { config, checks: ['auth'] })
     expect(result.score).toBe(100)
   })
 })

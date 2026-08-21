@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { CheckSkipped } from '../../src/checks/base.js'
 import { EdgeFunctionsCheck } from '../../src/checks/edge-functions.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { FetchFn } from '../../src/checks/edge-functions.js'
@@ -109,7 +110,7 @@ describe('EdgeFunctionsCheck', () => {
     expect(ids).toContain('edge-fn-version-send-email')
   })
 
-  it('returns empty when projectRef or accessToken is missing', async () => {
+  it('skips with a reason when projectRef or accessToken is missing', async () => {
     const ctx: CheckContext = {
       source: { dbUrl: 'postgres://source' },
       target: { dbUrl: 'postgres://target' },
@@ -119,9 +120,10 @@ describe('EdgeFunctionsCheck', () => {
         target: 'prod',
       },
     }
+    // Was: returned [], which rendered as a clean pass (issue #42).
     const check = new EdgeFunctionsCheck(makeFetchFn([], []))
-    const issues = await check.scan(ctx)
-    expect(issues).toHaveLength(0)
+    await expect(check.scan(ctx)).rejects.toThrow(CheckSkipped)
+    await expect(check.scan(ctx)).rejects.toThrow('no projectRef or accessToken configured')
   })
 
   it('calls correct API URL with auth header', async () => {
@@ -146,5 +148,48 @@ describe('EdgeFunctionsCheck', () => {
 
     const check = new EdgeFunctionsCheck(fetchFn)
     await expect(check.scan(mockContext())).rejects.toThrow('Unauthorized')
+  })
+})
+
+// ─── issue #41: no self-hosted "list functions" endpoint exists ─────────────
+
+describe('EdgeFunctionsCheck against self-hosted Supabase (issue #41)', () => {
+  function ctxWith(apiUrlOn: 'source' | 'target' | 'both'): CheckContext {
+    const selfHosted = { dbUrl: 'postgres://x', apiUrl: 'https://sb.example.com', projectRef: 'my-project', accessToken: 'service-key' }
+    const hosted = { dbUrl: 'postgres://y', projectRef: 'ref', accessToken: 'tok' }
+    return {
+      source: apiUrlOn === 'target' ? hosted : selfHosted,
+      target: apiUrlOn === 'source' ? hosted : selfHosted,
+      config: { environments: {}, source: 'a', target: 'b' },
+    }
+  }
+
+  it('skips with an accurate reason instead of calling a hosted-only endpoint', async () => {
+    // Previously the hosted URL was built regardless and the layer failed with
+    // a bare `Unauthorized`, which reads as a fixable credentials problem.
+    const check = new EdgeFunctionsCheck(makeFetchFn([], []))
+    await expect(check.scan(ctxWith('both'))).rejects.toThrow(CheckSkipped)
+    await expect(check.scan(ctxWith('both'))).rejects.toThrow('requires hosted Supabase')
+  })
+
+  it('makes no network call at all when self-hosted', async () => {
+    let called = false
+    const check = new EdgeFunctionsCheck(async () => {
+      called = true
+      return { ok: false, statusText: 'Unauthorized' } as Response
+    })
+    await expect(check.scan(ctxWith('both'))).rejects.toThrow(CheckSkipped)
+    expect(called).toBe(false)
+  })
+
+  it('skips when either side is self-hosted', async () => {
+    const check = new EdgeFunctionsCheck(makeFetchFn([], []))
+    await expect(check.scan(ctxWith('source'))).rejects.toThrow('requires hosted Supabase')
+    await expect(check.scan(ctxWith('target'))).rejects.toThrow('requires hosted Supabase')
+  })
+
+  it('still runs normally for two hosted projects', async () => {
+    const check = new EdgeFunctionsCheck(makeFetchFn([], []))
+    await expect(check.scan(mockContext())).resolves.toEqual([])
   })
 })

@@ -9,6 +9,7 @@ import { execFile } from 'node:child_process'
 import { platform } from 'node:os'
 import { existsSync } from 'node:fs'
 import pg from 'pg'
+import { pgClientConfig } from './db.js'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -128,7 +129,7 @@ function versionsToCheck(required: number): number[] {
 
 /** Get remote PostgreSQL server major version via SQL. */
 export async function getServerMajorVersion(dbUrl: string): Promise<number> {
-  const client = new pg.Client({ connectionString: dbUrl })
+  const client = new pg.Client(pgClientConfig(dbUrl))
   try {
     await client.connect()
     const { rows } = await client.query('SHOW server_version')

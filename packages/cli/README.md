@@ -40,14 +40,119 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 | Schema | `@dbdiff/cli` | ✅ Tables, views, triggers, functions, enum types | SQL (up/down) |
 | Data | `@dbdiff/cli --type=data` | ✅ Row-level diff for all public tables (configurable). Checksum-based fast skip for unchanged tables. | SQL (up/down) |
 | RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
-| Edge Functions | Management API | ✅ | DELETE extras via API; missing/outdated → manual `supabase functions deploy` |
+| Edge Functions | Management API | ✅ **Hosted only** — skipped on self-hosted | DELETE extras via API; missing/outdated → manual `supabase functions deploy` |
 | Storage | Storage API + `pg_policies` | ✅ Buckets, policies. `--include-files` adds file-level drift detection (checksums for JSON, size/date for binary). | Buckets via API (POST/PUT/DELETE); Policies via SQL |
-| Auth Config | Management API | ✅ | PATCH via API |
+| Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Self-hosted covers provider flags and signup settings, not `JWT_EXP` / `MFA_ENABLED` | PATCH via API (hosted only) |
 | Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ | SQL when trigger metadata available |
 | Realtime Publications | `pg_publication` + `pg_publication_tables` | ✅ | SQL (CREATE/ALTER PUBLICATION) |
 | Vault Secrets | `vault.secrets` | ✅ | SQL (`vault.create_secret` / `vault.update_secret`) |
 | Postgres Extensions | `pg_extension` | ✅ | SQL (CREATE/DROP EXTENSION) |
+
+### Drift score vs posture score
+
+Twelve of the fourteen checks compare source against target. Two do not:
+
+- **RLS Coverage** reads only the target, listing tables with RLS disabled.
+- **Migration History** compares local migration *files* against the target's
+  tracking table.
+
+Both fire identically whichever pair you diff, so they are scored separately.
+Counting them as drift meant a diff of an environment *against itself* could
+never reach 100, and any project with a long-standing RLS gap scored 0 no
+matter how well synchronised its environments were:
+
+```
+SupaForge scan complete: no drift detected. ✓
+9 posture findings (RLS coverage / migration history) — present regardless of which pair you diff.
+
+  ✓ Layer 1 (Schema):                   0 issues
+  ● Layer 3 (RLS Coverage):             8 issues[CRITICAL]
+  ● Layer 13 (Migration History):       1 issue[INFO]
+
+Drift score: 100/100
+Posture score: 0/100 (target only — RLS coverage, migration history)
+```
+
+The findings are not discarded or downgraded — they keep their severity, appear
+in `--detail`, and a critical one **still fails CI**. Only the drift score
+changes, so `no drift detected` becomes a trustworthy synchronisation signal.
+`--ci` output carries `postureScore` alongside `score`.
+
+### Self-hosted Supabase
+
+Set `apiUrl` on an environment and every API-backed check targets that gateway
+instead of `api.supabase.com`, authenticating with the service-role key in
+`accessToken`. `projectRef` is not required when `apiUrl` is set — it is only a
+path segment on a hosted URL that will not be called.
+
+```json
+{
+  "environments": {
+    "self-hosted-a": {
+      "dbUrl": "$DB_URL_A",
+      "apiUrl": "https://supabase.example.com",
+      "accessToken": "$SUPABASE_SERVICE_KEY"
+    }
+  }
+}
+```
+
+Thirteen of the fourteen checks run against self-hosted. **Edge Functions is
+hosted-only**: self-hosted Supabase exposes no equivalent "list functions"
+management endpoint, so the check reports
+
+```
+  ○ Layer 4 (Edge Functions):           skipped — Edge Functions comparison requires hosted Supabase — self-hosted exposes no management endpoint
+```
+
+rather than attempting a call that can only return `Unauthorized`. Add it to
+`checks.exclude` if you would rather not see the line at all.
+
+Auth Config reads GoTrue's `/auth/v1/settings` on self-hosted, which exposes
+fewer keys than the hosted Management API's `/config/auth` — provider flags and
+signup settings, but not `JWT_EXP` or `MFA_ENABLED`. Because the two shapes are
+not comparable, a self-hosted source and a hosted target are reported as
+skipped rather than diffed against each other. Self-hosted GoTrue also has no
+config write endpoint, so its findings carry no `--apply` action: change the
+target deployment's environment and restart it.
+
+### Skipped checks
+
+A check that cannot run — no credentials configured, an extension absent, no
+tables listed to compare — is reported as **skipped with the reason**, never as
+a clean pass:
+
+```
+  ✓ Layer 1 (Schema):                   0 issues
+  ○ Layer 4 (Edge Functions):           skipped — no projectRef or accessToken configured
+  ○ Layer 6 (Auth Config):              skipped — no projectRef or accessToken configured
+  ✓ Layer 7 (Cron Jobs):                0 issues
+  ○ Layer 8 (Reference Data):           skipped — no tables configured in checks.data.tables
+
+Drift score: 100/100 (2 of 5 checks compared)
+```
+
+The closing line says `N checks were skipped — coverage is partial`, and the
+score carries the denominator it was computed over, so a perfect number across
+a partial run cannot be read as a full comparison.
+
+A skip is not drift and does not reduce the score or fail CI — penalising it
+would give every self-hosted project a permanently depressed score for layers
+it deliberately cannot run. `--ci` output carries a `skipped` array and a
+`coverage` object alongside the existing `errors` array, so a pipeline can gate
+on coverage explicitly if it wants to:
+
+```json
+{
+  "score": 100,
+  "coverage": { "compared": 2, "total": 5 },
+  "skipped": [
+    { "check": "auth", "reason": "no projectRef or accessToken configured" }
+  ],
+  "errors": []
+}
+```
 
 ## Commands
 
@@ -495,6 +600,7 @@ narrowing the scan:
 | --- | --- | --- |
 | `SUPAFORGE_DBDIFF_TIMEOUT` | `600` | Seconds before a diff is abandoned. Overrides `checks.schema.timeout` |
 | `SUPAFORGE_DBDIFF_MEMORY` | dbdiff's own `1G` | Passed to `--memory-limit`; takes `512M`, `2G`, or `-1` for unlimited |
+| `SUPAFORGE_CONNECT_TIMEOUT` | `15` | Seconds before a database connection attempt is abandoned. Applies to every connection, including the preflight reachability check |
 
 ```bash
 SUPAFORGE_DBDIFF_TIMEOUT=600 SUPAFORGE_DBDIFF_MEMORY=2G supaforge diff

@@ -19,7 +19,7 @@ import { checkPgDumpCompat } from '../pg-tools.js'
 import { startLocalPg, DEFAULT_LOCAL_PORT, LOCAL_PG_USER, LOCAL_PG_PASSWORD } from '../local-pg.js'
 import { ok, warn, dim, cmd, bold } from '../ui.js'
 import { renderTip } from '../tips.js'
-import { DEFAULT_IGNORE_SCHEMAS } from '../defaults.js'
+import { DEFAULT_IGNORE_SCHEMAS, CLONE_SKIP_FLAGS } from '../defaults.js'
 import { CLONE_EXTRA_EXCLUDE_SCHEMAS, SUPAFORGE_DIR, MIGRATIONS_SUBDIR } from '../constants.js'
 import { errMsg, redactUrls } from '../utils/error.js'
 import type { SupaForgeConfig } from '../types/config.js'
@@ -358,6 +358,11 @@ export default class Clone extends BaseCommand {
     this.log(`      on vanilla Postgres: ${dim(CLONE_EXCLUDE_SCHEMAS.join(', '))}`)
     this.log(`    ${dim('•')} Platform state that lives outside the SQL dump: storage objects &`)
     this.log(`      policies, edge functions, auth config, and vault secrets.`)
+    // Roles arrived as Layer 14, after this list was written for 13 layers, and
+    // is the second-largest source of clone noise — 227 findings on the diff in
+    // issue #47. Left unmentioned, they read as unexplained drift.
+    this.log(`    ${dim('•')} Postgres roles & grants — Supabase's service roles do not exist`)
+    this.log(`      on vanilla Postgres, so every grant that references one reads as drift.`)
     if (flags['schema-only']) {
       this.log(`    ${dim('•')} Table data — you passed ${cmd('--schema-only')} (structure only).`)
     }
@@ -365,7 +370,7 @@ export default class Clone extends BaseCommand {
     this.log('')
 
     // ── Contextual next steps (Issue: give the exact commands for THIS clone) ─
-    const skipFlags = '--skip=storage --skip=auth --skip=edge-functions --skip=vault --skip=realtime'
+    const skipFlags = CLONE_SKIP_FLAGS
     this.log(`  ${bold('Your workflow is now:')}`)
     this.log(`    1. Develop against the local database ${dim(`(${localDbName})`)}`)
     this.log(`    2. Verify the clone matches "${envName}":`)

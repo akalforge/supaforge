@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { pickTip, renderTip } from '../src/tips.js'
 import type { TipContext } from '../src/tips.js'
+import { CLONE_NOISE_CHECKS, CLONE_SKIP_FLAGS } from '../src/defaults.js'
+import { CHECK_NAMES } from '../src/types/drift.js'
 
 // Use a fixed seed so tests aren't flaky
 const SEED = 0
@@ -187,5 +189,107 @@ describe('renderTip with errored checks (issue #29)', () => {
     const seen = new Set<string>()
     for (let seed = 0; seed < 12; seed++) seen.add(String(pickTip(legacy, seed)))
     expect([...seen].join(' ')).toContain('in sync')
+  })
+})
+
+/**
+ * Issue #48 (4): on a clone → remote diff, "push all fixes to the target in one
+ * shot" means reshaping a shared remote to match a vanilla-PostgreSQL copy,
+ * dropping the roles and policies the clone never had. The tip has to stop
+ * reading as a recommendation in that direction.
+ */
+describe('pickTip — diff: --apply advice depends on the direction (issue #48)', () => {
+  const drifted: TipContext['driftedChecks'] = ['schema', 'roles']
+
+  function allTips(ctx: TipContext): string {
+    return [0, 1, 2, 3, 4, 5].map(s => pickTip(ctx, s) ?? '').join(' ')
+  }
+
+  it('recommends --apply plainly when the source is not a clone', () => {
+    const combined = allTips({ command: 'diff', detail: false, driftTotal: 3, driftedChecks: drifted })
+    expect(combined).toMatch(/push all fixes to the target in one shot/)
+  })
+
+  it('warns instead of recommending when the source is a clone', () => {
+    const ctx: TipContext = {
+      command: 'diff', detail: false, driftTotal: 3, driftedChecks: drifted, sourceIsClone: true,
+    }
+    const combined = allTips(ctx)
+    expect(combined).not.toMatch(/push all fixes to the target in one shot/)
+    expect(combined).toMatch(/Source is a local clone/)
+    expect(combined).toMatch(/roles, grants and policies the clone never had/)
+  })
+
+  it('points a clone diff at a scoped dry run rather than a bare apply', () => {
+    const ctx: TipContext = {
+      command: 'diff', detail: false, driftTotal: 3, driftedChecks: drifted, sourceIsClone: true,
+    }
+    expect(allTips(ctx)).toMatch(/--check=schema --apply --dry-run/)
+  })
+
+  it('carries the same warning into --detail mode', () => {
+    const ctx: TipContext = {
+      command: 'diff', detail: true, driftTotal: 3, driftedChecks: drifted, sourceIsClone: true,
+    }
+    const combined = allTips(ctx)
+    expect(combined).toMatch(/Source is a local clone/)
+    expect(combined).not.toMatch(/execute all the SQL fixes above/)
+  })
+
+  it('still names --apply in --detail mode when the source is not a clone', () => {
+    const ctx: TipContext = { command: 'diff', detail: true, driftTotal: 3, driftedChecks: drifted }
+    expect(allTips(ctx)).toMatch(/execute all the SQL fixes above/)
+  })
+})
+
+/**
+ * Issue #47 (2): the post-clone guidance predates Postgres Roles & Grants,
+ * which arrived as Layer 14 after the advice was written for a 13-layer set.
+ * It is the second-largest source of clone noise — 227 findings on the diff
+ * that prompted the issue — and the string `roles` appeared nowhere in any
+ * user-facing guidance.
+ */
+describe('post-clone guidance covers roles & grants (issue #47)', () => {
+  it('recommends --skip=roles after a clone', () => {
+    const tip = pickTip({ command: 'clone', cloneApplied: true }, 0) ?? ''
+    expect(tip).toMatch(/--skip=roles/)
+  })
+
+  it('names every clone-only layer in the post-clone recommendation', () => {
+    const tip = pickTip({ command: 'clone', cloneApplied: true }, 0) ?? ''
+    for (const check of ['storage', 'auth', 'edge-functions', 'vault', 'realtime', 'roles']) {
+      expect(tip, `missing --skip=${check}`).toMatch(new RegExp(`--skip=${check}\\b`))
+    }
+  })
+
+  it('gives the same list in the diff-side post-clone hint', () => {
+    const ctx: TipContext = {
+      command: 'diff', detail: false, driftTotal: 5, driftedChecks: ['schema'], skippedChecks: [],
+    }
+    const combined = [0, 1, 2, 3, 4, 5].map(s => pickTip(ctx, s) ?? '').join(' ')
+    expect(combined).toMatch(/Post-clone\?/)
+    expect(combined).toMatch(/--skip=roles/)
+  })
+})
+
+/**
+ * The clone guidance drifted from the check list once already: roles arrived as
+ * Layer 14 and no guidance string mentioned it (issue #47). This asserts the
+ * list stays made of real check names, so a typo or a renamed check cannot
+ * silently produce a `--skip=` flag that suppresses nothing.
+ */
+describe('CLONE_NOISE_CHECKS names only real checks', () => {
+  it('every entry is a check the CLI actually has', () => {
+    for (const check of CLONE_NOISE_CHECKS) {
+      expect(CHECK_NAMES, `${check} is not a check name`).toContain(check)
+    }
+  })
+
+  it('includes roles, the layer the guidance originally missed', () => {
+    expect(CLONE_NOISE_CHECKS).toContain('roles')
+  })
+
+  it('renders as the --skip flags the guidance quotes', () => {
+    expect(CLONE_SKIP_FLAGS).toBe(CLONE_NOISE_CHECKS.map(c => `--skip=${c}`).join(' '))
   })
 })

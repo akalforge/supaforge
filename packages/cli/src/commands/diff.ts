@@ -4,14 +4,16 @@ import { createDefaultRegistry } from '../checks/index.js'
 import { scan } from '../scanner.js'
 import type { ScanProgressEvent } from '../scanner.js'
 import { renderSummary, renderDetailed } from '../render.js'
-import { promote } from '../promote.js'
+import { promote, type PromoteResult } from '../promote.js'
 import type { CheckName } from '../types/drift.js'
 import { CHECK_NAMES, CHECK_META } from '../types/drift.js'
-import { ok, warn, dim, cmd } from '../ui.js'
+import { ok, warn, dim, cmd, bold } from '../ui.js'
 import { sanitizeForReport } from '../utils/sanitize.js'
 import { renderTip } from '../tips.js'
 import { formatGitHubAnnotations, computeCiExitCode, formatCiSummary, type FailOn } from '../ci.js'
 import { resolveTableFilter, isFiltered, describeTableFilter } from '../utils/table-filter.js'
+import { parseFlagList } from '../utils/strings.js'
+import { isCloneDatabase } from '../branch.js'
 
 /**
  * Glyph and text for a finished check, so the three outcomes are visually
@@ -92,6 +94,19 @@ export default class Diff extends BaseCommand {
       description: 'With --apply, also run fixes that drop tables or columns (destroys data)',
       default: false,
     }),
+    'dry-run': Flags.boolean({
+      description: 'With --apply, print the fixes in the order they would run without executing any of them',
+      default: false,
+    }),
+    'no-transaction': Flags.boolean({
+      description: 'With --apply, run each fix on its own instead of rolling the whole set back on the first failure',
+      aliases: ['continue-on-error'],
+      default: false,
+    }),
+    only: Flags.string({
+      description: 'With --apply, only apply these issue ids (repeatable, comma-separated, globs allowed). Ids come from --json.',
+      multiple: true,
+    }),
     'include-files': Flags.boolean({
       description: 'Include file-level drift detection in storage check',
       default: false,
@@ -116,6 +131,60 @@ export default class Diff extends BaseCommand {
       options: ['critical', 'warning', 'any'],
       default: 'critical',
     }),
+  }
+
+  /**
+   * Report what `--apply` did, or — under `--dry-run` — what it would do.
+   *
+   * The applied list is printed in execution order, which is now dependency
+   * order rather than the order the checks reported the issues. That ordering
+   * is the whole point of the dry run: it is what makes the outcome of a real
+   * apply predictable before running it (issue #48).
+   */
+  private renderApplyResult(result: PromoteResult, dryRun: boolean): void {
+    const verb = dryRun ? 'Would apply' : 'Applied'
+    if (result.applied.length > 0) {
+      const heading = `${verb} ${result.applied.length} fix(es)${dryRun ? ', in this order' : ''}:`
+      this.log(dryRun ? bold(heading) : ok(heading))
+      result.applied.forEach((stmt, i) => {
+        const glyph = dryRun ? dim(`${i + 1}.`) : ok('✓')
+        this.log(`  ${glyph} ${dim(`[${stmt.check}]`)} ${stmt.issueId}`)
+        // The SQL itself only in a dry run: it is the thing being reviewed,
+        // and printing it after the fact would just repeat --detail.
+        if (dryRun && stmt.sql) this.log(`     ${dim(stmt.sql.replace(/\s*\n\s*/g, ' '))}`)
+        if (dryRun && stmt.action) this.log(`     ${dim(stmt.action)}`)
+      })
+    }
+
+    if (result.skipped.length > 0) {
+      this.log(`\n${dim(`Skipped ${result.skipped.length} issue(s):`)}`)
+      for (const item of result.skipped) {
+        this.log(`  ${dim('○')} ${dim(`[${item.check}]`)} ${item.issueId}: ${item.reason}`)
+      }
+    }
+
+    // Printed before the errors: the first thing to know about a failed apply
+    // is whether anything landed, and the answer here is that nothing did.
+    if (result.rolledBack?.length) {
+      this.log(`\n${warn(`Rolled back ${result.rolledBack.length} fix(es)`)} — the target is unchanged:`)
+      for (const item of result.rolledBack) {
+        this.log(`  ${dim('↩')} ${dim(`[${item.check}]`)} ${item.issueId}`)
+      }
+    }
+
+    if (result.errors.length > 0) {
+      this.log(`\n${warn(`${result.errors.length} error(s):`)}`)
+      for (const item of result.errors) {
+        this.log(`  ${warn('✗')} ${dim(`[${item.check}]`)} ${item.issueId}: ${item.error}`)
+      }
+      if (result.rolledBack) {
+        this.log(`\n  ${dim(`Nothing was written. Re-run with ${cmd('--no-transaction')} to apply the fixes that do work.`)}`)
+      }
+    }
+
+    if (dryRun) {
+      this.log(`\n  ${dim(`Nothing was executed. Drop ${cmd('--dry-run')} to apply.`)}`)
+    }
   }
 
   async run(): Promise<void> {
@@ -205,12 +274,16 @@ export default class Diff extends BaseCommand {
       }
 
       const targetEnv = config.environments[config.target!]
+      const dryRun = flags['dry-run']
       const result = await promote({
         dbUrl: targetEnv.dbUrl,
         scanResult,
         checks,
-        dryRun: false,
+        dryRun,
         allowDestructive: flags['allow-destructive'],
+        tableFilter,
+        only: parseFlagList(flags.only),
+        transactional: !flags['no-transaction'],
       })
 
       if (flags.json) {
@@ -218,25 +291,9 @@ export default class Diff extends BaseCommand {
         return
       }
 
-      if (result.applied.length > 0) {
-        this.log(`${ok(`Applied ${result.applied.length} fix(es):`)}`)
-        for (const stmt of result.applied) {
-          this.log(`  ${ok('✓')} ${dim(`[${stmt.check}]`)} ${stmt.issueId}`)
-        }
-      }
-
-      if (result.skipped.length > 0) {
-        this.log(`\n${dim(`Skipped ${result.skipped.length} issue(s):`)}`)
-        for (const item of result.skipped) {
-          this.log(`  ${dim('○')} ${dim(`[${item.check}]`)} ${item.issueId}: ${item.reason}`)
-        }
-      }
+      this.renderApplyResult(result, dryRun)
 
       if (result.errors.length > 0) {
-        this.log(`\n${warn(`${result.errors.length} error(s):`)}`)
-        for (const item of result.errors) {
-          this.log(`  ${warn('✗')} ${dim(`[${item.check}]`)} ${item.issueId}: ${item.error}`)
-        }
         this.exit(1)
       }
 
@@ -259,6 +316,10 @@ export default class Diff extends BaseCommand {
       durationMs: c.durationMs,
       ...(c.error ? { error: sanitizeForReport(c.error) } : {}),
     })))
+
+    // Whether the source is a local clone changes what `--apply` means, and so
+    // changes what the closing tip should say about it (issue #48).
+    const sourceIsClone = await isCloneDatabase(config.environments[config.source!]?.dbUrl)
 
     const driftedChecks = result.checks.filter(c => c.status === 'drifted').map(c => c.check)
     const skippedChecks = result.checks.filter(c => c.status === 'skipped').map(c => c.check)
@@ -298,6 +359,7 @@ export default class Diff extends BaseCommand {
         skippedChecks,
         erroredChecks,
         singleCheck: checks?.[0],
+        sourceIsClone,
       }))
     } else {
       this.log(renderSummary(result))
@@ -315,6 +377,7 @@ export default class Diff extends BaseCommand {
         skippedChecks,
         erroredChecks,
         singleCheck: checks?.[0],
+        sourceIsClone,
       }))
     }
 

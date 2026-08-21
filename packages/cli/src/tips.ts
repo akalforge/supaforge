@@ -1,5 +1,6 @@
 import { dim, cmd } from './ui.js'
 import type { CheckName } from './types/drift.js'
+import { CLONE_SKIP_FLAGS } from './defaults.js'
 
 // ─── Context ──────────────────────────────────────────────────────────────────
 
@@ -20,6 +21,16 @@ export interface TipContext {
   apply?: boolean
   /** diff: whether --check narrowed to a single check. */
   singleCheck?: CheckName
+  /**
+   * diff: whether the source environment is a local clone.
+   *
+   * Changes what `--apply` means. Clone → remote reshapes a shared environment
+   * to match a vanilla-PostgreSQL copy, which includes dropping the roles,
+   * grants and policies the clone never had — 227 of 601 findings on the diff
+   * that prompted issue #48. Recommending it generically in that direction is
+   * advice a first-time user should not follow.
+   */
+  sourceIsClone?: boolean
   /** clone: whether --apply completed successfully (not dry-run). */
   cloneApplied?: boolean
   /** clone: whether --schema-only was used. */
@@ -38,9 +49,29 @@ interface Tip {
 
 // ─── Contextual tip pools ─────────────────────────────────────────────────────
 
+/**
+ * How to word the `--apply` suggestion for this diff.
+ *
+ * From a clone it is a warning rather than a suggestion: the same command that
+ * promotes local work to a remote will, run from a clone, push the clone's
+ * *absences* to the remote too.
+ */
+function applyTip(sourceIsClone: boolean | undefined, driftedChecks: CheckName[]): Tip {
+  if (!sourceIsClone) {
+    return { text: `Add ${cmd('--apply')} to push all fixes to the target in one shot.` }
+  }
+  const layer = driftedChecks[0] ?? 'schema'
+  return {
+    text:
+      `Source is a local clone — ${cmd('--apply')} would reshape the target to match it, ` +
+      `including dropping roles, grants and policies the clone never had. ` +
+      `Scope it first: ${cmd(`--check=${layer} --apply --dry-run`)}.`,
+  }
+}
+
 function diffTips(ctx: TipContext): Tip[] {
   const tips: Tip[] = []
-  const { driftTotal = 0, driftedChecks = [], detail, apply, singleCheck, skippedChecks = [], erroredChecks = [] } = ctx
+  const { driftTotal = 0, driftedChecks = [], detail, apply, singleCheck, skippedChecks = [], erroredChecks = [], sourceIsClone } = ctx
 
   if (apply) {
     // Post-apply tips
@@ -56,16 +87,20 @@ function diffTips(ctx: TipContext): Tip[] {
   if (driftTotal > 0 && !detail) {
     // Summary mode with drift
     tips.push({ text: `Add ${cmd('--detail')} to see the full SQL for each issue.` })
-    tips.push({ text: `Add ${cmd('--apply')} to push all fixes to the target in one shot.` })
+    tips.push(applyTip(sourceIsClone, driftedChecks))
     if (driftedChecks.length > 1) {
       tips.push({ text: `Focus on one layer: ${cmd(`--check=${driftedChecks[0]}`)} to see just that check.` })
     }
     if (skippedChecks.length === 0) {
-      tips.push({ text: `Post-clone? Use ${cmd('--skip=storage --skip=auth --skip=vault')} to suppress Supabase-only noise.` })
+      tips.push({ text: `Post-clone? Use ${cmd(CLONE_SKIP_FLAGS)} to suppress clone-only noise, roles and grants included.` })
     }
   } else if (driftTotal > 0 && detail) {
     // Detail mode with drift
-    tips.push({ text: `Run ${cmd('supaforge diff --apply')} to execute all the SQL fixes above.` })
+    tips.push(
+      sourceIsClone
+        ? applyTip(sourceIsClone, driftedChecks)
+        : { text: `Run ${cmd('supaforge diff --apply')} to execute all the SQL fixes above.` },
+    )
     if (driftedChecks.length > 1) {
       tips.push({ text: `Fix one layer at a time: ${cmd(`--check=${driftedChecks[0]} --apply`)}.` })
     }
@@ -85,7 +120,7 @@ function cloneTips(ctx: TipContext): Tip[] {
   // Post-clone: most important tip is about skipping non-Postgres checks
   return [
     {
-      text: `Diff against this clone with: ${cmd('supaforge diff --skip=storage --skip=auth --skip=edge-functions --skip=vault --skip=realtime')} — or add ${cmd('"checks": { "exclude": [...] }')} to config to make it permanent.`,
+      text: `Diff against this clone with: ${cmd(`supaforge diff ${CLONE_SKIP_FLAGS}`)} — or add ${cmd('"checks": { "exclude": [...] }')} to config to make it permanent.`,
     },
     { text: `Restore from a snapshot any time: ${cmd('supaforge restore --env=local --from-snapshot=latest --apply')}.` },
     { text: `Run ${cmd('supaforge snapshot')} on the remote after a deploy to track incremental drift.` },
@@ -131,6 +166,8 @@ const GENERAL_TIPS: Tip[] = [
   { text: `Enable row-level data drift: add ${cmd('"checks": { "data": { "tables": ["plans","flags"] } }')} to config.` },
   { text: `${cmd('supaforge diff --include-files')} also checks file-level storage drift (checksums).` },
   { text: `${cmd('supaforge sync')} is shorthand for ${cmd('diff --apply')} — detects and fixes drift in one step.` },
+  { text: `Preview an apply in dependency order without running it: ${cmd('supaforge diff --apply --dry-run')}.` },
+  { text: `Apply a reviewed subset by id: ${cmd("supaforge diff --apply --only='schema-create-*'")}.` },
 ]
 
 // ─── Public API ───────────────────────────────────────────────────────────────

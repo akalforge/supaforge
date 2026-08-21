@@ -23,16 +23,53 @@ export function redactUrls(message: string): string {
   })
 }
 
+/** Shown when a failure carries nothing at all that could name it. */
+export const UNDESCRIBED_ERROR = 'unknown error — no message reported'
+
+/**
+ * Get something printable out of a thrown value.
+ *
+ * Not every failure arrives as an `Error` with a populated `message`. One did
+ * not — observed when a container runtime's daemon stopped while a port mapping
+ * was still registered — and every renderer downstream printed its label, a
+ * colon, and nothing: `✗ Source database not reachable:` (issue #47).
+ *
+ * Falls back through what a driver error still carries when its message is
+ * empty: the `code` (`ECONNRESET`, `EPIPE`) is the most useful, then the error
+ * type, then a fixed string. The return value is never empty, which is the
+ * whole point — a reason a user cannot read is worse than a generic one.
+ */
+export function describeFailure(err: unknown): string {
+  if (typeof err === 'string') return err.trim() || UNDESCRIBED_ERROR
+
+  const candidate = err as { message?: unknown; code?: unknown; name?: unknown } | null | undefined
+  const message = typeof candidate?.message === 'string' ? candidate.message.trim() : ''
+  if (message) return message
+
+  const code = typeof candidate?.code === 'string' ? candidate.code.trim() : ''
+  if (code) return `${code} (no further detail reported)`
+
+  const name = typeof candidate?.name === 'string' ? candidate.name.trim() : ''
+  if (name && name !== 'Error') return `${name} (no further detail reported)`
+
+  if (err !== null && err !== undefined && !(err instanceof Error)) {
+    const rendered = String(err).trim()
+    if (rendered && rendered !== '[object Object]') return rendered
+  }
+
+  return UNDESCRIBED_ERROR
+}
+
 /**
  * Extract a concise error message from an unknown caught value.
  *
- * Safely handles Error instances, strings, and other thrown types.
- * Used across the codebase in catch blocks to normalise error output.
- * Automatically redacts database credentials from the message.
+ * Safely handles Error instances, strings, and other thrown types, and never
+ * returns an empty string — see describeFailure. Used across the codebase in
+ * catch blocks to normalise error output. Automatically redacts database
+ * credentials from the message.
  */
 export function errMsg(err: unknown): string {
-  const raw = err instanceof Error ? err.message : String(err)
-  return redactUrls(raw)
+  return redactUrls(describeFailure(err))
 }
 
 /**

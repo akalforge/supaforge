@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { promote } from '../src/promote.js'
+import { promote, planWork, outOfScopeReason } from '../src/promote.js'
 import type { ScanResult } from '../src/types/drift.js'
 
 function makeScanResult(overrides: Partial<ScanResult> = {}): ScanResult {
@@ -212,5 +212,170 @@ describe('promote', () => {
     })
 
     expect(result.applied).toHaveLength(0)
+  })
+})
+
+/**
+ * The fix set @dbdiff/cli produced for issue #48's two databases, scoped to
+ * `--tables=users`. dbdiff's `--tables` filters tables only, so the view and
+ * trigger belonging to the excluded `orders` survive into the fix set while the
+ * column they need does not.
+ */
+function makeScopedScanResult(): ScanResult {
+  return makeScanResult({
+    checks: [
+      {
+        check: 'schema',
+        status: 'drifted',
+        durationMs: 10,
+        issues: [
+          {
+            id: 'schema-alter-1',
+            check: 'schema',
+            severity: 'warning',
+            title: 'Table altered: users',
+            description: 'x',
+            sql: { up: 'ALTER TABLE "users" ADD COLUMN "created_at" timestamptz(6);', down: '' },
+          },
+          {
+            id: 'schema-create-view-2',
+            check: 'schema',
+            severity: 'warning',
+            title: 'View missing: active_orders',
+            description: 'x',
+            sql: { up: `CREATE VIEW "active_orders" AS SELECT id FROM orders WHERE (status = 'pending');`, down: '' },
+          },
+          {
+            id: 'schema-create-trigger-3',
+            check: 'schema',
+            severity: 'warning',
+            title: 'Trigger missing: trg_orders_touch',
+            description: 'x',
+            sql: {
+              up: 'CREATE TRIGGER trg_orders_touch BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION touch_updated();',
+              down: '',
+            },
+          },
+          {
+            id: 'schema-create-function-4',
+            check: 'schema',
+            severity: 'warning',
+            title: 'Function missing: public.touch_updated()',
+            description: 'x',
+            sql: {
+              up: 'CREATE OR REPLACE FUNCTION public.touch_updated() RETURNS trigger AS $fn$ BEGIN RETURN NEW; END; $fn$;',
+              down: '',
+            },
+          },
+        ],
+      },
+    ],
+    summary: { total: 4, critical: 0, warning: 4, info: 0 },
+  })
+}
+
+describe('outOfScopeReason', () => {
+  it('returns null when nothing is scoped', () => {
+    expect(outOfScopeReason('CREATE VIEW v AS SELECT 1 FROM orders;', undefined)).toBeNull()
+    expect(outOfScopeReason('CREATE VIEW v AS SELECT 1 FROM orders;', {})).toBeNull()
+  })
+
+  it('names the excluded table and the flag that excluded it', () => {
+    const reason = outOfScopeReason('CREATE VIEW v AS SELECT 1 FROM orders;', { tables: ['users'] })
+    expect(reason).toBe("Depends on table 'orders', excluded by --tables")
+  })
+
+  it('credits --exclude-tables when that is what narrowed the run', () => {
+    const reason = outOfScopeReason('CREATE INDEX i ON public.orders (status);', { excludeTables: ['orders'] })
+    expect(reason).toBe("Depends on table 'orders', excluded by --exclude-tables")
+  })
+
+  it('lets through a fix that only touches tables still in scope', () => {
+    expect(outOfScopeReason('ALTER TABLE "users" ADD COLUMN "bio" text;', { tables: ['users'] })).toBeNull()
+  })
+
+  it('lets through a fix that touches no table at all', () => {
+    const sql = 'CREATE OR REPLACE FUNCTION f() RETURNS trigger AS $fn$ BEGIN RETURN NEW; END; $fn$;'
+    expect(outOfScopeReason(sql, { tables: ['users'] })).toBeNull()
+  })
+
+  it('honours the globs the filter itself supports', () => {
+    expect(outOfScopeReason('CREATE INDEX i ON billing_events (id);', { tables: ['billing_*'] })).toBeNull()
+  })
+})
+
+describe('planWork ordering', () => {
+  it('returns SQL in dependency order, not the order the check reported it', () => {
+    const plan = planWork(makeScopedScanResult())
+    const ids = plan.sqlStatements.map(s => s.issueId)
+    expect(ids.indexOf('schema-create-function-4')).toBeLessThan(ids.indexOf('schema-create-trigger-3'))
+  })
+})
+
+describe('promote scoping', () => {
+  it('skips a dependant of an excluded table instead of attempting and failing', async () => {
+    const result = await promote({
+      dbUrl: 'postgres://unused',
+      scanResult: makeScopedScanResult(),
+      dryRun: true,
+      tableFilter: { tables: ['users'] },
+    })
+
+    expect(result.applied.map(a => a.issueId).sort()).toEqual(['schema-alter-1', 'schema-create-function-4'])
+    expect(result.errors).toHaveLength(0)
+
+    const skipped = Object.fromEntries(result.skipped.map(s => [s.issueId, s.reason]))
+    expect(skipped['schema-create-view-2']).toContain("'orders'")
+    expect(skipped['schema-create-trigger-3']).toContain("'orders'")
+  })
+
+  it('applies every fix when no table filter is active', async () => {
+    const result = await promote({
+      dbUrl: 'postgres://unused',
+      scanResult: makeScopedScanResult(),
+      dryRun: true,
+    })
+    expect(result.applied).toHaveLength(4)
+    expect(result.skipped).toHaveLength(0)
+  })
+})
+
+describe('promote --only', () => {
+  it('applies exactly the listed issue ids', async () => {
+    const result = await promote({
+      dbUrl: 'postgres://unused',
+      scanResult: makeScopedScanResult(),
+      dryRun: true,
+      only: ['schema-alter-1'],
+    })
+
+    expect(result.applied.map(a => a.issueId)).toEqual(['schema-alter-1'])
+    expect(result.skipped).toHaveLength(3)
+    expect(result.skipped[0].reason).toBe('Not selected by --only')
+  })
+
+  it('supports globs so a family of fixes can be picked in one go', async () => {
+    const result = await promote({
+      dbUrl: 'postgres://unused',
+      scanResult: makeScopedScanResult(),
+      dryRun: true,
+      only: ['schema-create-*'],
+    })
+
+    expect(result.applied.map(a => a.issueId).sort()).toEqual([
+      'schema-create-function-4',
+      'schema-create-trigger-3',
+      'schema-create-view-2',
+    ])
+  })
+
+  it('treats an empty list as no selection at all', async () => {
+    const result = await promote({
+      dbUrl: 'postgres://unused',
+      scanResult: makeScopedScanResult(),
+      dryRun: true,
+      only: [],
+    })
+    expect(result.applied).toHaveLength(4)
   })
 })

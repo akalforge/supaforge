@@ -126,6 +126,8 @@ supaforge init                            Create config interactively
 supaforge diff                            Summary: what's drifted?
 supaforge diff --detail                   Show detailed SQL diffs
 supaforge diff --apply                    Fix the drift
+supaforge diff --apply --dry-run          Preview the fixes, in execution order
+supaforge diff --apply --only=schema-alter-2   Apply one reviewed issue by id
 supaforge diff --check=rls                Limit to a specific check
 supaforge diff --skip=storage             Skip a specific check
 supaforge diff --skip=auth --skip=vault   Skip multiple checks (repeatable)
@@ -154,6 +156,55 @@ supaforge mcp                             Start MCP stdio server for AI agents
 > Fixes that destroy rows — dropping a table or a column — are always reported
 > but never applied by `--apply` alone. They are listed as skipped unless you
 > also pass `--allow-destructive`.
+
+### How `--apply` executes
+
+Three things decide what a `--apply` run does, beyond which checks it covers.
+
+**Order.** Fixes run in dependency order, not in the order the checks reported
+them: base objects before the things built on them, and dependants dropped
+before what they depend on. A function is created before the trigger that
+executes it, a column before the index and view that read it, and the
+destructive drops go last. `@dbdiff/cli` emits statements in the order it walks
+the catalogue, which carries no such guarantee — applying that order directly
+failed on fix sets that were perfectly valid.
+
+**Atomicity.** The whole SQL fix set runs in one transaction. PostgreSQL
+supports transactional DDL, so if any statement fails the rest are rolled back
+and the target is left exactly as it was — never in a state matching neither
+the source nor its own previous self. Those fixes are reported under
+`Rolled back`, distinct from `Applied`, so it is always clear what is actually
+in the target.
+
+```bash
+supaforge diff --apply --dry-run        # print the plan, in execution order, and stop
+supaforge diff --apply                  # all-or-nothing
+supaforge diff --apply --no-transaction # statement at a time, keeping partial progress
+```
+
+`--continue-on-error` is an alias for `--no-transaction`.
+
+**Scope.** With `--tables` active, a fix that depends on a table the filter
+excluded is skipped with a reason naming that table, rather than attempted and
+failed:
+
+```
+○ [schema] schema-create-view-2: Depends on table 'orders', excluded by --tables
+```
+
+That matters because `--tables` reaches `@dbdiff/cli`, whose own `--tables`
+covers *tables* — so a narrowed fix set still arrives carrying the views,
+triggers and indexes hanging off the tables it excluded.
+
+To promote objects rather than tables, use `--only`, which takes the issue ids
+`--json` already reports. It composes with a review step: diff, read the JSON,
+approve a subset, apply exactly that subset.
+
+```bash
+supaforge diff --check=schema --json > plan.json
+supaforge diff --apply --only=schema-create-function-7,schema-create-trigger-6
+supaforge diff --apply --only='schema-create-*'      # globs allowed
+```
 
 ## MCP Integration (AI Agents)
 
@@ -290,6 +341,11 @@ supaforge diff --tables='billing_*' --exclude-tables='*_audit'
 supaforge diff --tables=orders --apply
 ```
 
+With `--apply`, a fix depending on an excluded table is skipped and says so —
+see [How `--apply` executes](#how---apply-executes). `--only` selects
+individual issues by id, which is how to scope to non-table objects such as
+functions and views.
+
 Both are repeatable, comma-separated, and support `@dbdiff/cli` globs. The
 config equivalents are `checks.tables` and `checks.excludeTables`; `--tables`
 overrides the former, `--exclude-tables` is unioned with the latter. A scoped
@@ -307,7 +363,7 @@ run prints what it is scoped to before it starts.
 SUPAFORGE_DBDIFF_TIMEOUT=600 SUPAFORGE_DBDIFF_MEMORY=2G supaforge diff
 ```
 
-`checks.exclude` permanently skips the listed checks on every `diff`/`hukam`/`sync` run — useful when diffing against a clone where checks like `storage`, `auth`, `edge-functions`, `vault`, and `realtime` have no local equivalent and produce only noise. The `--skip` CLI flag does the same on a one-off basis; both are merged at runtime.
+`checks.exclude` permanently skips the listed checks on every `diff`/`hukam`/`sync` run — useful when diffing against a clone, where `storage`, `auth`, `edge-functions`, `vault`, `realtime` and `roles` have no local equivalent and produce only noise. Roles is easy to overlook and is the second-largest source of it: a clone is vanilla PostgreSQL, so Supabase's service roles do not exist and every grant referencing one reads as drift. The `--skip` CLI flag does the same on a one-off basis; both are merged at runtime.
 
 ## Extending with Hooks
 

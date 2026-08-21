@@ -425,7 +425,9 @@ export function sqlToIssues(
       id: `${check}-${type}-${i + 1}`,
       check,
       severity: DROP_TYPES.includes(type) ? 'critical' : 'warning',
-      title: summariseStatement(upSql, check),
+      // The DOWN counterpart is passed so a title can recover a schema the UP
+      // statement does not carry — see routineLabel (issue #47).
+      title: summariseStatement(upSql, check, downSql),
       description: `${check === 'schema' ? 'Schema' : 'Data'} difference detected by @dbdiff/cli.`,
       sql: { up: upSql, down: downSql },
     }
@@ -717,76 +719,119 @@ export function classifyStatement(sql: string): string {
   return 'change'
 }
 
-export function summariseStatement(sql: string, check: 'schema' | 'data'): string {
-  const upper = sql.toUpperCase().trimStart()
-
-  if (check === 'data') {
-    const table = extractName(sql, /(?:INTO|FROM|UPDATE)\s+["'`]?(\w+)["'`]?/i)
-    if (upper.startsWith('INSERT')) return `Missing row in ${table}`
-    if (upper.startsWith('DELETE')) return `Extra row in ${table}`
-    if (upper.startsWith('UPDATE')) return `Modified row in ${table}`
-    return `Data change in ${table}`
-  }
-
-  // Views
-  if (upper.startsWith('CREATE VIEW') || upper.startsWith('CREATE OR REPLACE VIEW')) {
-    return `View missing: ${extractName(sql, /VIEW\s+["'`]?(\w+)["'`]?/i)}`
-  }
-  if (upper.startsWith('ALTER VIEW')) return `View altered: ${extractName(sql, /VIEW\s+["'`]?(\w+)["'`]?/i)}`
-  if (upper.startsWith('DROP VIEW')) return `Extra view: ${extractName(sql, /VIEW\s+["'`]?(\w+)["'`]?/i)}`
-
-  // Functions / procedures
-  if (upper.startsWith('CREATE FUNCTION') || upper.startsWith('CREATE OR REPLACE FUNCTION')) {
-    return `Function missing: ${routineLabel(sql)}`
-  }
-  if (upper.startsWith('ALTER FUNCTION')) return `Function altered: ${routineLabel(sql)}`
-  if (upper.startsWith('DROP FUNCTION')) return `Extra function: ${routineLabel(sql)}`
-  if (upper.startsWith('CREATE PROCEDURE') || upper.startsWith('CREATE OR REPLACE PROCEDURE')) {
-    return `Procedure missing: ${routineLabel(sql)}`
-  }
-  if (upper.startsWith('DROP PROCEDURE')) return `Extra procedure: ${routineLabel(sql)}`
-
-  // Triggers
-  if (upper.startsWith('CREATE TRIGGER') || upper.startsWith('CREATE OR REPLACE TRIGGER')) {
-    return `Trigger missing: ${extractName(sql, /TRIGGER\s+["'`]?(\w+)["'`]?/i)}`
-  }
-  if (upper.startsWith('ALTER TRIGGER')) return `Trigger altered: ${extractName(sql, /TRIGGER\s+["'`]?(\w+)["'`]?/i)}`
-  if (upper.startsWith('DROP TRIGGER')) return `Extra trigger: ${extractName(sql, /TRIGGER\s+["'`]?(\w+)["'`]?/i)}`
-
-  // Types / enums / domains
-  if (upper.startsWith('CREATE TYPE')) return `Type missing: ${extractName(sql, /TYPE\s+["'`]?(\w+)["'`]?/i)}`
-  if (upper.startsWith('ALTER TYPE')) return `Type altered: ${extractName(sql, /TYPE\s+["'`]?(\w+)["'`]?/i)}`
-  if (upper.startsWith('DROP TYPE')) return `Extra type: ${extractName(sql, /TYPE\s+["'`]?(\w+)["'`]?/i)}`
-  if (upper.startsWith('CREATE DOMAIN')) return `Domain missing: ${extractName(sql, /DOMAIN\s+["'`]?(\w+)["'`]?/i)}`
-  if (upper.startsWith('ALTER DOMAIN')) return `Domain altered: ${extractName(sql, /DOMAIN\s+["'`]?(\w+)["'`]?/i)}`
-  if (upper.startsWith('DROP DOMAIN')) return `Extra domain: ${extractName(sql, /DOMAIN\s+["'`]?(\w+)["'`]?/i)}`
-
-  // Tables
-  const table = extractName(sql, /TABLE\s+["'`]?(\w+)["'`]?/i)
-  if (upper.startsWith('ALTER TABLE')) return `Table altered: ${table}`
-  if (upper.startsWith('CREATE TABLE')) return `Table missing: ${table}`
-  if (upper.startsWith('DROP TABLE')) return `Extra table: ${table}`
-
-  // Indexes
-  if (upper.startsWith('CREATE INDEX') || upper.startsWith('CREATE UNIQUE INDEX')) {
-    return `Index missing on ${extractName(sql, /ON\s+["'`]?(\w+)["'`]?/i)}`
-  }
-  if (upper.startsWith('DROP INDEX')) return `Extra index: ${extractName(sql, /INDEX\s+["'`]?(\w+)["'`]?/i)}`
-
-  // Sequences
-  if (upper.startsWith('CREATE SEQUENCE')) return `Sequence missing: ${extractName(sql, /SEQUENCE\s+["'`]?(\w+)["'`]?/i)}`
-  if (upper.startsWith('ALTER SEQUENCE')) return `Sequence altered: ${extractName(sql, /SEQUENCE\s+["'`]?(\w+)["'`]?/i)}`
-  if (upper.startsWith('DROP SEQUENCE')) return `Extra sequence: ${extractName(sql, /SEQUENCE\s+["'`]?(\w+)["'`]?/i)}`
-
-  return `Schema change in ${extractName(sql, /(?:TABLE|INTO|FROM|UPDATE)\s+["'`]?(\w+)["'`]?/i)}`
+/**
+ * One title format for every schema finding: `<Finding>: <schema>.<name>`.
+ *
+ * Each kind used to carry its own ad-hoc regex, and two of them read the wrong
+ * capture group: `/INDEX\s+.../` never reached the index name at all, so
+ * `CREATE INDEX idx_orders_status ON public.orders` was titled "Index missing on
+ * public" — the schema, in the name's place (issue #47). The rules below all
+ * go through one schema-aware identifier parser instead.
+ *
+ * Matched in order and anchored at the start of the statement, so a trigger
+ * that executes a function is a trigger, not a function.
+ */
+interface SummaryRule {
+  match: RegExp
+  label: string
+  name: (sql: string, downSql?: string) => string
 }
 
-function extractName(sql: string, pattern: RegExp): string {
-  return sql.match(pattern)?.[1] ?? 'unknown'
+/** Head patterns for the identifier that follows each keyword. */
+const AFTER = {
+  view: /\bVIEW\s+(?:IF\s+EXISTS\s+)?/i,
+  trigger: /\bTRIGGER\s+(?:IF\s+EXISTS\s+)?/i,
+  type: /\bTYPE\s+(?:IF\s+EXISTS\s+)?/i,
+  domain: /\bDOMAIN\s+(?:IF\s+EXISTS\s+)?/i,
+  sequence: /\bSEQUENCE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?/i,
+  table: /\bTABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:ONLY\s+)?/i,
+  index: /\bINDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+(?:NOT\s+)?EXISTS\s+)?/i,
+  on: /\bON\s+(?:ONLY\s+)?/i,
+}
+
+/** Name an object by the identifier following `head`. */
+const named = (head: RegExp) => (sql: string) => extractQualifiedName(sql, head)
+
+/**
+ * Qualify an index with the schema of the table it is on.
+ *
+ * Postgres puts an index in its table's schema and its grammar does not let
+ * the CREATE qualify the index name, so the `ON` clause is where the schema
+ * actually is. Left bare when the table is unqualified too — the schema is
+ * then genuinely unknown, and inventing `public` would be a guess.
+ */
+function indexLabel(sql: string): string {
+  const name = extractQualifiedName(sql, AFTER.index)
+  if (name === UNKNOWN_NAME || name.includes('.')) return name
+
+  const table = extractQualifiedName(sql, AFTER.on)
+  const dot = table.lastIndexOf('.')
+  return dot === -1 ? name : `${table.slice(0, dot)}.${name}`
+}
+
+const SCHEMA_RULES: SummaryRule[] = [
+  { match: /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\b/i, label: 'View missing', name: named(AFTER.view) },
+  { match: /^\s*ALTER\s+(?:MATERIALIZED\s+)?VIEW\b/i, label: 'View altered', name: named(AFTER.view) },
+  { match: /^\s*DROP\s+(?:MATERIALIZED\s+)?VIEW\b/i, label: 'Extra view', name: named(AFTER.view) },
+
+  { match: /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\b/i, label: 'Function missing', name: routineLabel },
+  { match: /^\s*ALTER\s+FUNCTION\b/i, label: 'Function altered', name: routineLabel },
+  { match: /^\s*DROP\s+FUNCTION\b/i, label: 'Extra function', name: routineLabel },
+  { match: /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\b/i, label: 'Procedure missing', name: routineLabel },
+  { match: /^\s*DROP\s+PROCEDURE\b/i, label: 'Extra procedure', name: routineLabel },
+
+  { match: /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b/i, label: 'Trigger missing', name: named(AFTER.trigger) },
+  { match: /^\s*ALTER\s+TRIGGER\b/i, label: 'Trigger altered', name: named(AFTER.trigger) },
+  { match: /^\s*DROP\s+TRIGGER\b/i, label: 'Extra trigger', name: named(AFTER.trigger) },
+
+  { match: /^\s*CREATE\s+TYPE\b/i, label: 'Type missing', name: named(AFTER.type) },
+  { match: /^\s*ALTER\s+TYPE\b/i, label: 'Type altered', name: named(AFTER.type) },
+  { match: /^\s*DROP\s+TYPE\b/i, label: 'Extra type', name: named(AFTER.type) },
+  { match: /^\s*CREATE\s+DOMAIN\b/i, label: 'Domain missing', name: named(AFTER.domain) },
+  { match: /^\s*ALTER\s+DOMAIN\b/i, label: 'Domain altered', name: named(AFTER.domain) },
+  { match: /^\s*DROP\s+DOMAIN\b/i, label: 'Extra domain', name: named(AFTER.domain) },
+
+  { match: /^\s*ALTER\s+TABLE\b/i, label: 'Table altered', name: named(AFTER.table) },
+  { match: /^\s*CREATE\s+TABLE\b/i, label: 'Table missing', name: named(AFTER.table) },
+  { match: /^\s*DROP\s+TABLE\b/i, label: 'Extra table', name: named(AFTER.table) },
+
+  { match: /^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\b/i, label: 'Index missing', name: indexLabel },
+  { match: /^\s*DROP\s+INDEX\b/i, label: 'Extra index', name: named(AFTER.index) },
+
+  { match: /^\s*CREATE\s+SEQUENCE\b/i, label: 'Sequence missing', name: named(AFTER.sequence) },
+  { match: /^\s*ALTER\s+SEQUENCE\b/i, label: 'Sequence altered', name: named(AFTER.sequence) },
+  { match: /^\s*DROP\s+SEQUENCE\b/i, label: 'Extra sequence', name: named(AFTER.sequence) },
+]
+
+/** Titles for the row-level findings of the data check. */
+function summariseDataStatement(sql: string): string {
+  const table = extractQualifiedName(sql, /\b(?:INTO|FROM|UPDATE)\s+(?:ONLY\s+)?/i)
+  const upper = sql.toUpperCase().trimStart()
+  if (upper.startsWith('INSERT')) return `Missing row in ${table}`
+  if (upper.startsWith('DELETE')) return `Extra row in ${table}`
+  if (upper.startsWith('UPDATE')) return `Modified row in ${table}`
+  return `Data change in ${table}`
 }
 
 /**
- * Name a routine in an issue title, with its argument signature.
+ * Title one finding.
+ *
+ * `downSql` is the paired counterpart statement, used only to recover a schema
+ * the UP statement does not carry — see `routineLabel`.
+ */
+export function summariseStatement(sql: string, check: 'schema' | 'data', downSql?: string): string {
+  if (check === 'data') return summariseDataStatement(sql)
+
+  for (const rule of SCHEMA_RULES) {
+    if (rule.match.test(sql)) return `${rule.label}: ${rule.name(sql, downSql)}`
+  }
+
+  return `Schema change in ${extractQualifiedName(sql, /\b(?:TABLE|INTO|FROM|UPDATE)\s+(?:ONLY\s+)?/i)}`
+}
+
+/**
+ * Name a routine in an issue title, schema-qualified, with its argument
+ * signature.
  *
  * The detection has been signature-aware since overloads were fixed, but only
  * the "Function modified" title carried the signature through — "Extra
@@ -794,12 +839,30 @@ function extractName(sql: string, pattern: RegExp): string {
  * left the title unable to say which overload was being dropped, and two
  * target-only overloads of one name produced two identical titles.
  *
- * No schema qualifier is added when the statement lacks one. dbdiff emits the
- * DROP unqualified, and inventing `public.` would be wrong for a routine that
- * lives anywhere else.
+ * The schema is still never invented, but it no longer has to be missing.
+ * dbdiff emits a DROP unqualified (`DROP FUNCTION IF EXISTS "example_fn"(uuid)`)
+ * while the DOWN statement that restores the same routine comes from
+ * `pg_get_functiondef` and *is* qualified. So when the UP has no schema, it is
+ * read off that counterpart — a schema dbdiff itself reported, not a guess —
+ * which is what left "Extra function" the one unqualified schema title
+ * (issue #47).
+ *
+ * The counterpart is only trusted when it names the same routine; a mismatched
+ * pair would otherwise attach one routine's schema to another's name.
  */
-export function routineLabel(sql: string): string {
-  return extractRoutineName(sql) + extractRoutineArgs(sql)
+export function routineLabel(sql: string, downSql?: string): string {
+  const name = extractRoutineName(sql)
+  const args = extractRoutineArgs(sql)
+  if (!downSql || name === UNKNOWN_NAME || name.includes('.')) return name + args
+
+  const counterpart = extractRoutineName(downSql)
+  const sameRoutine = unqualify(counterpart) === unqualify(name)
+  return (counterpart.includes('.') && sameRoutine ? counterpart : name) + args
+}
+
+/** The last segment of a possibly schema-qualified name, lowercased. */
+function unqualify(name: string): string {
+  return name.slice(name.lastIndexOf('.') + 1).toLowerCase()
 }
 
 /**
@@ -814,14 +877,32 @@ export function routineLabel(sql: string): string {
  * optionally quoted identifier, normalising `"public" . "f"` to `public.f`.
  */
 export function extractRoutineName(sql: string): string {
-  const head = /\b(?:FUNCTION|PROCEDURE)\s+(?:IF\s+EXISTS\s+)?/i.exec(sql)
-  if (!head) return 'unknown'
+  return extractQualifiedName(sql, /\b(?:FUNCTION|PROCEDURE)\s+(?:IF\s+EXISTS\s+)?/i)
+}
 
-  // Matched piecewise rather than as one expression. A combined pattern needs
-  // an optional quote on both sides of each identifier ("?[\w$]+"?), and that
-  // ambiguity backtracks super-linearly on adversarial input — a real concern
-  // for SQL arriving from an external process.
-  let rest = sql.slice(head.index + head[0].length)
+/** What a title shows when the identifier cannot be read out of the SQL. */
+export const UNKNOWN_NAME = 'unknown'
+
+/**
+ * Read the optionally schema-qualified, optionally quoted identifier that
+ * follows `head`, normalising `"public" . "f"` to `public.f`.
+ *
+ * The one identifier parser behind every schema title. Before it, each kind
+ * carried its own `/KEYWORD\s+["'`]?(\w+)/`, and those got it wrong in both
+ * directions (issues #35, #47): "IF" for `DROP FUNCTION IF EXISTS "f"`, and the
+ * schema qualifier "public" for anything written `public.name` — which is how
+ * an index came to be titled by its schema instead of its name.
+ *
+ * Matched piecewise rather than as one expression. A combined pattern needs an
+ * optional quote on both sides of each identifier ("?[\w$]+"?), and that
+ * ambiguity backtracks super-linearly on adversarial input — a real concern for
+ * SQL arriving from an external process.
+ */
+export function extractQualifiedName(sql: string, head: RegExp): string {
+  const found = head.exec(sql)
+  if (!found) return UNKNOWN_NAME
+
+  let rest = sql.slice(found.index + found[0].length)
   const parts: string[] = []
 
   for (let depth = 0; depth < 2; depth++) {
@@ -835,7 +916,7 @@ export function extractRoutineName(sql: string): string {
     rest = rest.slice(dot[0].length)
   }
 
-  return parts.length > 0 ? parts.join('.') : 'unknown'
+  return parts.length > 0 ? parts.join('.') : UNKNOWN_NAME
 }
 
 /**

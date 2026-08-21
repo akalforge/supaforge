@@ -3,7 +3,7 @@ import { detectRuntime } from './local-pg.js'
 import { pgClientConfig, resolveConnectTimeoutMs } from './db.js'
 import { DB_PROBE_TIMEOUT_MS } from './constants.js'
 import { ok, warn, dim, cmd, bold } from './ui.js'
-import { redactUrls } from './utils/error.js'
+import { redactUrls, describeFailure } from './utils/error.js'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -80,7 +80,7 @@ export async function checkConnection(dbUrl: string): Promise<ConnCheckResult> {
   } catch (err) {
     return {
       reachable: false,
-      error: describeTimeout((err as Error).message, connectTimeoutMs, DB_PROBE_TIMEOUT_MS),
+      error: describeTimeout(describeFailure(err), connectTimeoutMs, DB_PROBE_TIMEOUT_MS),
     }
   } finally {
     // A client that timed out mid-handshake still holds an open socket, which
@@ -280,7 +280,7 @@ export class Preflight {
         log(`      ${ok('✓')} ${db.label} database reachable ${dim(`(PostgreSQL ${result.version})`)}`)
         entries.push({ label: db.label, passed: true, detail: `PostgreSQL ${result.version}` })
       } else {
-        log(`      ${warn('✗')} ${db.label} database not reachable: ${redactUrls(result.error!)}`)
+        log(`      ${warn('✗')} ${db.label} database not reachable: ${redactUrls(describeFailure(result.error))}`)
         const hints = await buildConnectionHints(db.dbUrl, result.error)
         if (hints.length > 0) {
           log(`\n      ${dim('Hints:')}`)
@@ -300,7 +300,7 @@ export class Preflight {
         log(`      ${ok('✓')} ${custom.label}${suffix}`)
         entries.push({ label: custom.label, passed: true, detail: result.detail })
       } else {
-        log(`      ${warn('✗')} ${custom.label}: ${redactUrls(result.error)}`)
+        log(`      ${warn('✗')} ${custom.label}: ${redactUrls(describeFailure(result.error))}`)
         if (result.hints?.length) {
           log(`\n      ${dim('Hints:')}`)
           for (const h of result.hints) log(`        ${dim('•')} ${h}`)

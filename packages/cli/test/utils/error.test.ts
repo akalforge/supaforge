@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { errMsg, redactUrls, friendlyDbError } from '../../src/utils/error.js'
+import { errMsg, redactUrls, friendlyDbError, describeFailure, UNDESCRIBED_ERROR } from '../../src/utils/error.js'
 
 describe('redactUrls', () => {
   it('redacts password from postgres URL', () => {
@@ -48,16 +48,19 @@ describe('errMsg', () => {
     expect(errMsg(42)).toBe('42')
   })
 
-  it('converts null to string', () => {
-    expect(errMsg(null)).toBe('null')
+  // These three used to render "null", "undefined" and "[object Object]".
+  // All three are strings a user cannot act on, and the last is exactly what
+  // reached the renderer as a bare "not reachable:" in issue #47.
+  it('names an unreportable null as such rather than printing "null"', () => {
+    expect(errMsg(null)).toBe(UNDESCRIBED_ERROR)
   })
 
-  it('converts undefined to string', () => {
-    expect(errMsg(undefined)).toBe('undefined')
+  it('names an unreportable undefined as such', () => {
+    expect(errMsg(undefined)).toBe(UNDESCRIBED_ERROR)
   })
 
-  it('converts object to string', () => {
-    expect(errMsg({ code: 'ENOENT' })).toBe('[object Object]')
+  it('falls back to the error code rather than "[object Object]"', () => {
+    expect(errMsg({ code: 'ENOENT' })).toBe('ENOENT (no further detail reported)')
   })
 
   it('extracts message from TypeError', () => {
@@ -143,5 +146,55 @@ describe('friendlyDbError', () => {
     const err = new Error('Connection refused to postgres://admin:supersecret@prod.host:5432/db')
     const msg = friendlyDbError(err, 'postgres://admin:supersecret@prod.host:5432/db')
     expect(msg).not.toContain('supersecret')
+  })
+})
+
+/**
+ * Issue #47 (3): one connection-failure path produced nothing after the colon —
+ * `✗ Source database not reachable:` — because the thrown value reached the
+ * renderer with no `message`. Whatever arrives, something printable comes out.
+ */
+describe('describeFailure', () => {
+  it('prefers the message when there is one', () => {
+    expect(describeFailure(new Error('connect ECONNREFUSED 127.0.0.1:5434'))).toBe('connect ECONNREFUSED 127.0.0.1:5434')
+    expect(describeFailure('plain string failure')).toBe('plain string failure')
+  })
+
+  it('falls back to the error code when the message is empty', () => {
+    const err = Object.assign(new Error(''), { code: 'ECONNRESET' })
+    expect(describeFailure(err)).toBe('ECONNRESET (no further detail reported)')
+  })
+
+  it('falls back to the error type when there is no message or code', () => {
+    const err = new TypeError('')
+    expect(describeFailure(err)).toBe('TypeError (no further detail reported)')
+  })
+
+  it('never returns an empty string, whatever it is handed', () => {
+    const cases: unknown[] = [
+      new Error(''),
+      new Error('   '),
+      '',
+      '   ',
+      null,
+      undefined,
+      {},
+      Object.assign(new Error(''), { code: '' }),
+    ]
+    for (const value of cases) {
+      const described = describeFailure(value)
+      expect(described.trim().length, `empty for ${JSON.stringify(value)}`).toBeGreaterThan(0)
+    }
+  })
+
+  it('trims, so whitespace alone can never read as a message', () => {
+    expect(describeFailure(new Error('  spaced  '))).toBe('spaced')
+    expect(describeFailure(new Error('   '))).toBe(UNDESCRIBED_ERROR)
+  })
+
+  it('keeps errMsg redacting credentials through the fallback', () => {
+    const err = new Error('failed for postgresql://user:hunter2@db.example.com:5432/postgres')
+    expect(errMsg(err)).toContain(':***@')
+    expect(errMsg(err)).not.toContain('hunter2')
   })
 })

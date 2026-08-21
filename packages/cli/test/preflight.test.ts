@@ -391,3 +391,67 @@ describe('buildConnectionHints', () => {
     expect(hints.some(h => h.includes('podman'))).toBe(true)
   })
 })
+
+/**
+ * Issue #47 (3): a connection failure that reached the renderer with no
+ * `message` printed the label, a colon, and nothing —
+ * `✗ Source database not reachable:`. No failure path may end that way.
+ */
+describe('a connection failure always reports a reason (issue #47)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    clientQueue.length = 0
+    clientConfigs.length = 0
+  })
+
+  it('reports the error code when the driver gives no message', async () => {
+    clientQueue.push({ connectError: Object.assign(new Error(''), { code: 'ECONNRESET' }) })
+    const result = await checkConnection('postgres://user:pass@localhost:5432/db')
+
+    expect(result.reachable).toBe(false)
+    expect(result.error).toContain('ECONNRESET')
+  })
+
+  it('reports something for an error carrying nothing at all', async () => {
+    clientQueue.push({ connectError: new Error('') })
+    const result = await checkConnection('postgres://user:pass@localhost:5432/db')
+
+    expect(result.reachable).toBe(false)
+    expect(result.error?.trim().length ?? 0).toBeGreaterThan(0)
+  })
+
+  it('never renders a bare colon, whatever the failure carried', async () => {
+    const failures = [
+      new Error(''),
+      new Error('   '),
+      Object.assign(new Error(''), { code: 'EPIPE' }),
+      new TypeError(''),
+    ]
+
+    for (const connectError of failures) {
+      clientQueue.length = 0
+      clientQueue.push({ connectError })
+
+      const lines: string[] = []
+      const pre = new Preflight('Test', m => lines.push(m), () => {})
+      pre.addDatabase('Source', 'source', 'postgres://user:pass@localhost:5432/db')
+      await pre.run()
+
+      const failureLine = lines.find(l => l.includes('not reachable'))
+      expect(failureLine, `no failure line for ${connectError.name}`).toBeDefined()
+      expect(failureLine!.trimEnd()).not.toMatch(/not reachable:$/)
+    }
+  })
+
+  it('still reports a populated message unchanged', async () => {
+    clientQueue.push({ connectError: new Error('connect ECONNREFUSED 127.0.0.1:5434') })
+    const result = await checkConnection('postgres://user:pass@localhost:5434/db')
+    expect(result.error).toBe('connect ECONNREFUSED 127.0.0.1:5434')
+  })
+
+  it('still names which wait elapsed on a timeout', async () => {
+    clientQueue.push({ connectError: new Error('timeout expired') })
+    const result = await checkConnection('postgres://user:pass@localhost:5432/db')
+    expect(result.error).toContain('timed out after')
+  })
+})

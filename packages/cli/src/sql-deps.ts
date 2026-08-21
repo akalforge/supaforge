@@ -267,11 +267,19 @@ function linkDependencies(nodes: Node[], texts: string[], provides: string[][]):
 function nextReady(remaining: number[], nodes: Node[], done: Set<number>): number {
   let best: number | undefined
   for (const index of remaining) {
-    const ready = [...nodes[index].after].every(dep => done.has(dep))
-    if (!ready) continue
+    if (!isSatisfied(nodes[index].after, done)) continue
     if (best === undefined || nodes[index].phase < nodes[best].phase) best = index
   }
   return best ?? remaining[0]
+}
+
+/** Have all of `after` already run? Iterated rather than spread — this is the
+ * inner loop of the sort, and a large fix set runs it thousands of times. */
+function isSatisfied(after: Set<number>, done: Set<number>): boolean {
+  for (const dep of after) {
+    if (!done.has(dep)) return false
+  }
+  return true
 }
 
 /**

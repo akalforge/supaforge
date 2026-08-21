@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import { pickTip, renderTip } from '../src/tips.js'
 import type { TipContext } from '../src/tips.js'
+import { CLONE_NOISE_CHECKS, CLONE_SKIP_FLAGS } from '../src/defaults.js'
+import { CHECK_NAMES } from '../src/types/drift.js'
 
 // Use a fixed seed so tests aren't flaky
 const SEED = 0
@@ -267,5 +269,27 @@ describe('post-clone guidance covers roles & grants (issue #47)', () => {
     const combined = [0, 1, 2, 3, 4, 5].map(s => pickTip(ctx, s) ?? '').join(' ')
     expect(combined).toMatch(/Post-clone\?/)
     expect(combined).toMatch(/--skip=roles/)
+  })
+})
+
+/**
+ * The clone guidance drifted from the check list once already: roles arrived as
+ * Layer 14 and no guidance string mentioned it (issue #47). This asserts the
+ * list stays made of real check names, so a typo or a renamed check cannot
+ * silently produce a `--skip=` flag that suppresses nothing.
+ */
+describe('CLONE_NOISE_CHECKS names only real checks', () => {
+  it('every entry is a check the CLI actually has', () => {
+    for (const check of CLONE_NOISE_CHECKS) {
+      expect(CHECK_NAMES, `${check} is not a check name`).toContain(check)
+    }
+  })
+
+  it('includes roles, the layer the guidance originally missed', () => {
+    expect(CLONE_NOISE_CHECKS).toContain('roles')
+  })
+
+  it('renders as the --skip flags the guidance quotes', () => {
+    expect(CLONE_SKIP_FLAGS).toBe(CLONE_NOISE_CHECKS.map(c => `--skip=${c}`).join(' '))
   })
 })

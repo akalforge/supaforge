@@ -53,22 +53,32 @@ export interface PromoteOptions {
   fetchFn?: FetchFn
 }
 
+/** Where a fix came from: which check reported it, and under which issue id. */
+interface FixOrigin {
+  check: string
+  issueId: string
+}
+
+type PlannedSql = FixOrigin & { sql: string }
+type PlannedAction = FixOrigin & { action: SyncAction }
+type PlannedSkip = FixOrigin & { reason: string }
+
 export interface PromoteResult {
-  applied: { check: string; issueId: string; sql?: string; action?: string }[]
-  skipped: { check: string; issueId: string; reason: string }[]
-  errors: { check: string; issueId: string; error: string }[]
+  applied: (FixOrigin & { sql?: string; action?: string })[]
+  skipped: PlannedSkip[]
+  errors: (FixOrigin & { error: string })[]
   /**
    * Fixes that ran and were then undone because a later statement in the same
    * transaction failed. Reported separately from `applied`, which only ever
    * lists what is actually in the target now.
    */
-  rolledBack?: { check: string; issueId: string; sql?: string }[]
+  rolledBack?: (FixOrigin & { sql?: string })[]
 }
 
 interface PlannedWork {
-  sqlStatements: { check: string; issueId: string; sql: string }[]
-  apiActions: { check: string; issueId: string; action: SyncAction }[]
-  skipped: { check: string; issueId: string; reason: string }[]
+  sqlStatements: PlannedSql[]
+  apiActions: PlannedAction[]
+  skipped: PlannedSkip[]
 }
 
 /** What `planWork` needs to know beyond the scan result itself. */
@@ -185,7 +195,7 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
  */
 async function executeSql(
   dbUrl: string,
-  statements: PlannedWork['sqlStatements'],
+  statements: PlannedSql[],
   result: PromoteResult,
   transactional: boolean,
 ): Promise<void> {
@@ -204,7 +214,7 @@ async function executeSql(
 /** One statement at a time: a failure is recorded and the rest still run. */
 async function runIndependently(
   client: pg.Client,
-  statements: PlannedWork['sqlStatements'],
+  statements: PlannedSql[],
   result: PromoteResult,
 ): Promise<void> {
   for (const stmt of statements) {
@@ -225,7 +235,7 @@ async function runIndependently(
  */
 async function runInTransaction(
   client: pg.Client,
-  statements: PlannedWork['sqlStatements'],
+  statements: PlannedSql[],
   result: PromoteResult,
 ): Promise<void> {
   const done: PromoteResult['applied'] = []
@@ -249,7 +259,7 @@ async function runInTransaction(
 
 /** Run the planned API-based sync actions, recording per-action failures. */
 async function executeApiActions(
-  actions: PlannedWork['apiActions'],
+  actions: PlannedAction[],
   fetchFn: FetchFn,
   result: PromoteResult,
 ): Promise<void> {

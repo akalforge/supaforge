@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { CheckSkipped } from '../../src/checks/base.js'
-import { AuthCheck, resolveAuthSource, normalizeGoTrueSettings } from '../../src/checks/auth.js'
+import { AuthCheck, resolveAuthSource, normalizeGoTrueSettings, normalizeApiUrl } from '../../src/checks/auth.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { FetchFn } from '../../src/checks/auth.js'
 
@@ -189,6 +189,32 @@ describe('resolveAuthSource', () => {
     expect(src).toEqual({ kind: 'self-hosted', apiUrl: 'https://sb.example.com', key: 'k' })
   })
 
+  it('rejects a gateway URL that is not http(s)', () => {
+    // The service-role key is sent to whatever this names, so it is checked
+    // before it is used rather than interpolated into a request as-is.
+    for (const bad of ['file:///etc/passwd', 'ftp://example.com', 'not a url', 'supabase.example.com']) {
+      expect(() => resolveAuthSource({ dbUrl: 'postgres://x', apiUrl: bad, accessToken: 'k' }))
+        .toThrow(CheckSkipped)
+    }
+  })
+
+  it('rejects credentials embedded in the gateway URL', () => {
+    // Almost always a database URL pasted into the wrong field; they would be
+    // sent on every request.
+    expect(() => resolveAuthSource({ dbUrl: 'postgres://x', apiUrl: 'https://user:pw@sb.example.com', accessToken: 'k' }))
+      .toThrow('not a usable http(s) gateway URL')
+  })
+
+  it('keeps only the origin, so a stray path cannot move the endpoint', () => {
+    const src = resolveAuthSource({ dbUrl: 'postgres://x', apiUrl: 'https://sb.example.com/rest/v1?a=1#f', accessToken: 'k' })
+    expect(src).toEqual({ kind: 'self-hosted', apiUrl: 'https://sb.example.com', key: 'k' })
+  })
+
+  it('allows a local http gateway — the documented self-hosted default', () => {
+    const src = resolveAuthSource({ dbUrl: 'postgres://x', apiUrl: 'http://localhost:54321', accessToken: 'k' })
+    expect(src).toEqual({ kind: 'self-hosted', apiUrl: 'http://localhost:54321', key: 'k' })
+  })
+
   it('falls back to hosted when there is no apiUrl', () => {
     expect(resolveAuthSource({ dbUrl: 'postgres://x', projectRef: 'ref', accessToken: 'tok' }))
       .toEqual({ kind: 'hosted', ref: 'ref', token: 'tok' })
@@ -197,6 +223,32 @@ describe('resolveAuthSource', () => {
   it('is null without a token, whichever kind', () => {
     expect(resolveAuthSource({ dbUrl: 'postgres://x', apiUrl: 'https://sb.example.com' })).toBeNull()
     expect(resolveAuthSource({ dbUrl: 'postgres://x', projectRef: 'ref' })).toBeNull()
+  })
+})
+
+describe('normalizeApiUrl', () => {
+  it('returns the origin for a valid gateway', () => {
+    expect(normalizeApiUrl('https://supabase.example.com')).toBe('https://supabase.example.com')
+    expect(normalizeApiUrl('  https://supabase.example.com/  ')).toBe('https://supabase.example.com')
+  })
+
+  it('keeps a non-default port', () => {
+    expect(normalizeApiUrl('http://localhost:54321')).toBe('http://localhost:54321')
+  })
+
+  it('drops path, query and fragment', () => {
+    expect(normalizeApiUrl('https://sb.example.com/a/b?c=d#e')).toBe('https://sb.example.com')
+  })
+
+  it('returns null for anything that is not http(s)', () => {
+    for (const bad of ['file:///etc/passwd', 'ftp://x.com', 'javascript:alert(1)', 'sb.example.com', '', '   ']) {
+      expect(normalizeApiUrl(bad)).toBeNull()
+    }
+  })
+
+  it('returns null when credentials are embedded', () => {
+    expect(normalizeApiUrl('https://user:pw@sb.example.com')).toBeNull()
+    expect(normalizeApiUrl('https://user@sb.example.com')).toBeNull()
   })
 })
 

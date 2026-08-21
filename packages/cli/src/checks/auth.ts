@@ -5,6 +5,9 @@ import { SUPABASE_MGMT_API } from '../constants'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
+/** GoTrue's settings endpoint on a self-hosted gateway. */
+const AUTH_SETTINGS_PATH = '/auth/v1/settings'
+
 /**
  * Where an environment's auth config is read from.
  *
@@ -27,12 +30,44 @@ export type AuthSource =
  */
 export function resolveAuthSource(env: EnvironmentConfig): AuthSource | null {
   if (env.apiUrl && env.accessToken) {
-    return { kind: 'self-hosted', apiUrl: stripTrailingSlashes(env.apiUrl), key: env.accessToken }
+    const apiUrl = normalizeApiUrl(env.apiUrl)
+    if (!apiUrl) {
+      throw new CheckSkipped(
+        `apiUrl "${env.apiUrl}" is not a usable http(s) gateway URL — expected something like https://supabase.example.com`,
+      )
+    }
+    return { kind: 'self-hosted', apiUrl, key: env.accessToken }
   }
   if (env.projectRef && env.accessToken) {
     return { kind: 'hosted', ref: env.projectRef, token: env.accessToken }
   }
   return null
+}
+
+/**
+ * Validate and canonicalise a configured gateway URL, or return null.
+ *
+ * The service-role key is sent to whatever this names, so it is checked before
+ * being used rather than interpolated into a request as-is:
+ *
+ * - It must parse, and be http or https. Anything else — `file:`, `ftp:`, a
+ *   bare hostname — is a misconfiguration, and some of them are worse than
+ *   that.
+ * - Embedded credentials are rejected. They would be sent on every request and
+ *   are almost always a copy-paste of a database URL into the wrong field.
+ * - Only the origin is kept. A path, query or fragment on the base would end
+ *   up merged with `/auth/v1/settings` in ways that are hard to predict.
+ */
+export function normalizeApiUrl(raw: string): string | null {
+  let parsed: URL
+  try {
+    parsed = new URL(stripTrailingSlashes(raw.trim()))
+  } catch {
+    return null
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null
+  if (parsed.username || parsed.password) return null
+  return parsed.origin
 }
 
 /**
@@ -139,7 +174,9 @@ export class AuthCheck extends Check {
    * The gateway routes on the former and GoTrue authorises on the latter.
    */
   private async fetchSelfHostedAuthConfig(apiUrl: string, serviceKey: string): Promise<Record<string, unknown>> {
-    const url = `${apiUrl}/auth/v1/settings`
+    // Built through URL rather than string concatenation, so the path is fixed
+    // and cannot be shifted by whatever the config held.
+    const url = new URL(AUTH_SETTINGS_PATH, apiUrl).toString()
     const res = await this.fetchFn(url, {
       headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
     })

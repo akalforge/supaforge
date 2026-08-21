@@ -14,6 +14,7 @@ import { SchemaCheck } from '../../src/checks/schema'
 import { DataCheck } from '../../src/checks/data'
 import type { CheckContext } from '../../src/checks/base'
 import { SOURCE_URL, TARGET_URL, skipIfNoContainers } from './helpers'
+import { CheckSkipped } from '../../src/checks/base.js'
 
 function makeContext(overrides?: Partial<CheckContext>): CheckContext {
   return {
@@ -193,11 +194,13 @@ describe('integration: DataCheck via @dbdiff/cli', () => {
     expect(issues[0].check).toBe('data')
   })
 
-  it.skipIf(skipIfNoContainers())('returns empty when no data tables configured', async () => {
+  it.skipIf(skipIfNoContainers())('skips with a reason when no data tables configured', async () => {
+    // Was: returned []. Against a live pair that is indistinguishable from a
+    // layer that compared the data and found it identical (issue #42).
     const layer = new DataCheck()
     const ctx = makeContext()
     ctx.config.checks = {} // no data tables
-    const issues = await layer.scan(ctx)
-    expect(issues).toHaveLength(0)
+    await expect(layer.scan(ctx)).rejects.toThrow(CheckSkipped)
+    await expect(layer.scan(ctx)).rejects.toThrow('no tables configured in checks.data.tables')
   })
 })

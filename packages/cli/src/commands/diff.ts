@@ -36,6 +36,18 @@ export default class Diff extends BaseCommand {
     '<%= config.bin %> diff --ci --fail-on=warning',
   ]
 
+  /**
+   * Read from the environment rather than passed as flags, because they tune
+   * limits rather than select behaviour. Rendered as their own `--help`
+   * section (issue #40); the README carries the same table plus the timeout
+   * precedence chain.
+   */
+  static envVars = [
+    { name: 'SUPAFORGE_CONNECT_TIMEOUT', description: 'Seconds before a database connection attempt is abandoned (default 15).' },
+    { name: 'SUPAFORGE_DBDIFF_TIMEOUT', description: 'Seconds before the schema/data diff is abandoned. Overrides checks.schema.timeout (default 600).' },
+    { name: 'SUPAFORGE_DBDIFF_MEMORY', description: "PHP memory limit for @dbdiff/cli — 512M, 2G, or -1 for unlimited (default dbdiff's own 1G)." },
+  ]
+
   static override flags = {
     check: Flags.string({
       char: 'l',

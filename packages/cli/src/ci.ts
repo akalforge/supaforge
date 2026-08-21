@@ -74,7 +74,14 @@ export function computeCiExitCode(result: ScanResult, failOn: FailOn = 'critical
  */
 export function formatCiSummary(result: ScanResult): {
   timestamp: string
+  /** Drift between the two environments, over the comparison checks only. */
   score: number
+  /**
+   * The target's own security and tracking posture, over the non-comparative
+   * checks. Reported separately so a pre-existing RLS gap cannot mask, or be
+   * mistaken for, environments having diverged (issue #40).
+   */
+  postureScore: number | null
   summary: ScanResult['summary']
   /**
    * Checks that failed to run. Empty on a healthy scan.
@@ -122,6 +129,7 @@ export function formatCiSummary(result: ScanResult): {
   return {
     timestamp: result.timestamp,
     score: result.score,
+    postureScore: result.postureScore ?? null,
     summary: result.summary,
     errors,
     skipped,

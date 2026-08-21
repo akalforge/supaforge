@@ -9,6 +9,7 @@ function makeResult(overrides: Partial<ScanResult> = {}): ScanResult {
     target: 'production',
     checks: [],
     score: 100,
+    postureScore: null,
     summary: { total: 0, critical: 0, warning: 0, info: 0 },
     ...overrides,
   }
@@ -262,6 +263,7 @@ describe('formatCiSummary error signal (issue #29)', () => {
       { check: 'rls', status: 'clean', issues: [], durationMs: 10 },
     ],
     score: 97,
+    postureScore: null,
     summary: { total: 0, critical: 0, warning: 0, info: 0 },
   }
 
@@ -305,6 +307,7 @@ describe('formatCiSummary reports skipped checks (issue #42)', () => {
       { check: 'rls', status: 'error', issues: [], error: 'connection refused', durationMs: 5 },
     ],
     score: 97,
+    postureScore: null,
     summary: { total: 0, critical: 0, warning: 0, info: 0 },
   }
 
@@ -352,5 +355,45 @@ describe('formatCiSummary reports skipped checks (issue #42)', () => {
       checks: [{ check: 'auth', status: 'skipped', issues: [], skipReason: 'no credentials', durationMs: 0 }],
     }
     expect(computeCiExitCode(skipOnly, 'any')).toBe(0)
+  })
+})
+
+describe('formatCiSummary carries the posture score (issue #40)', () => {
+  it('reports drift and posture as separate numbers', () => {
+    const r: ScanResult = {
+      timestamp: 't', source: 'a', target: 'a',
+      checks: [
+        { check: 'schema', status: 'clean', issues: [], durationMs: 1 },
+        { check: 'rls-coverage', status: 'drifted', durationMs: 1, issues: [{ id: 'x', check: 'rls-coverage', severity: 'critical', title: 'RLS disabled', description: 'd' }] },
+      ],
+      score: 100,
+      postureScore: 85,
+      summary: { total: 1, critical: 1, warning: 0, info: 0 },
+    }
+    const out = formatCiSummary(r)
+    expect(out.score).toBe(100)
+    expect(out.postureScore).toBe(85)
+  })
+
+  it('is null when no posture check ran', () => {
+    const r: ScanResult = {
+      timestamp: 't', source: 'a', target: 'b',
+      checks: [{ check: 'schema', status: 'clean', issues: [], durationMs: 1 }],
+      score: 100, postureScore: null,
+      summary: { total: 0, critical: 0, warning: 0, info: 0 },
+    }
+    expect(formatCiSummary(r).postureScore).toBeNull()
+  })
+
+  it('a critical posture finding still fails CI', () => {
+    // Excluding posture from the *score* must not weaken the security gate:
+    // an RLS gap is still something a pipeline should refuse to merge past.
+    const r: ScanResult = {
+      timestamp: 't', source: 'a', target: 'a',
+      checks: [{ check: 'rls-coverage', status: 'drifted', durationMs: 1, issues: [{ id: 'x', check: 'rls-coverage', severity: 'critical', title: 'RLS disabled', description: 'd' }] }],
+      score: 100, postureScore: 85,
+      summary: { total: 1, critical: 1, warning: 0, info: 0 },
+    }
+    expect(computeCiExitCode(r, 'critical')).toBe(1)
   })
 })

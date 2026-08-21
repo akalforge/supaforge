@@ -3,7 +3,7 @@ import type { CheckRegistry } from './checks/registry'
 import type { SupaForgeConfig } from './types/config'
 import type { CheckName, CheckResult, ScanResult } from './types/drift'
 import { CHECK_NAMES } from './types/drift'
-import { computeScore, summarize } from './scoring'
+import { computeScore, computePostureScore, summarize } from './scoring'
 import { isCheckSkipped } from './checks/base'
 import { friendlyDbError } from './utils/error'
 
@@ -121,6 +121,7 @@ export async function scan(
 
   const summary = summarize(results)
   const score = computeScore(results)
+  const postureScore = computePostureScore(results)
 
   const scanResult: ScanResult = {
     timestamp: new Date().toISOString(),
@@ -128,6 +129,7 @@ export async function scan(
     target: config.target!,
     checks: results,
     score,
+    postureScore,
     summary,
   }
 

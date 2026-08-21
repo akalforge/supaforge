@@ -270,6 +270,14 @@ beats a committed value.
 The MCP server accepts a `skip` argument on `scan_drift` for the same reason —
 an agent can avoid a slow layer without editing the project config.
 
+### Drift score vs posture score
+
+RLS Coverage and Migration History are not source↔target comparisons — they
+report on the target alone and fire identically whichever pair you diff. They
+are scored separately as a **posture score**, so a genuinely synchronised pair
+reaches `Drift score: 100/100` even when it carries pre-existing findings on
+both sides. The findings keep their severity and a critical one still fails CI.
+
 ### Environment variables
 
 | Variable | Default | Purpose |

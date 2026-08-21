@@ -1,5 +1,5 @@
 import type { ScanResult, CheckResult, DriftIssue } from './types/drift'
-import { CHECK_META } from './types/drift'
+import { CHECK_META, isComparisonCheck } from './types/drift'
 import { CHECK_LINE_PADDING } from './constants'
 import { ok, warn, dim, bold, c } from './ui'
 
@@ -43,11 +43,35 @@ export function coverage(result: Pick<ScanResult, 'checks'>): { compared: number
   return { compared, total }
 }
 
+/**
+ * Split the issue counts by whether they represent drift between the two
+ * environments or the target's own posture.
+ *
+ * RLS Coverage and Migration History fire identically whichever pair you diff,
+ * so counting them as drift made "9 drift issues found" the headline for a
+ * comparison that found none (issue #40).
+ */
+export function splitCounts(result: Pick<ScanResult, 'checks'>): { drift: number; posture: number } {
+  if (!Array.isArray(result?.checks)) return { drift: 0, posture: 0 }
+  let drift = 0
+  let posture = 0
+  for (const check of result.checks) {
+    const count = check?.issues?.length ?? 0
+    if (isComparisonCheck(check?.check)) drift += count
+    else posture += count
+  }
+  return { drift, posture }
+}
+
 export function renderSummary(result: ScanResult): string {
   const lines: string[] = ['']
 
-  const noun = result.summary.total === 1 ? 'issue' : 'issues'
-  const driftedCount = result.checks.filter(l => l.status === 'drifted').length
+  // Counted separately: a posture finding is real but is not a difference
+  // between the two environments (issue #40).
+  const { drift, posture } = splitCounts(result)
+  const noun = drift === 1 ? 'issue' : 'issues'
+  const postureNoun = posture === 1 ? 'finding' : 'findings'
+  const driftedCount = result.checks.filter(l => l.status === 'drifted' && isComparisonCheck(l.check)).length
   const checkNoun = driftedCount === 1 ? 'check' : 'checks'
 
   // A check that errored measured nothing. Reporting that as "no drift
@@ -62,9 +86,9 @@ export function renderSummary(result: ScanResult): string {
   const skippedCount = countSkipped(result)
   const skippedNoun = skippedCount === 1 ? 'check was' : 'checks were'
 
-  if (result.summary.total > 0) {
+  if (drift > 0) {
     lines.push(
-      `${bold('SupaForge scan complete:')} ${warn(`${result.summary.total} drift ${noun}`)} found across ${driftedCount} ${checkNoun}.`,
+      `${bold('SupaForge scan complete:')} ${warn(`${drift} drift ${noun}`)} found across ${driftedCount} ${checkNoun}.`,
     )
   } else if (erroredCount > 0) {
     lines.push(
@@ -74,13 +98,19 @@ export function renderSummary(result: ScanResult): string {
     lines.push(`${bold('SupaForge scan complete:')} ${ok('no drift detected. ✓')}`)
   }
 
+  // Named as what they are, so they cannot be read as the environments having
+  // diverged. They are reported and scored, just not as drift.
+  if (posture > 0) {
+    lines.push(dim(`${posture} posture ${postureNoun} (RLS coverage / migration history) — present regardless of which pair you diff.`))
+  }
+
   if (skippedCount > 0) {
     lines.push(dim(`${skippedCount} ${skippedNoun} skipped — coverage is partial.`))
   }
 
   // Drift was found *and* something failed: say so, or the count reads as the
   // whole picture.
-  if (result.summary.total > 0 && erroredCount > 0) {
+  if (drift > 0 && erroredCount > 0) {
     lines.push(warn(`${erroredCount} further ${erroredNoun} could not complete — drift may be understated.`))
   }
   lines.push(`${dim('Source:')} ${result.source} ${dim('→')} ${dim('Target:')} ${result.target}`)
@@ -97,6 +127,11 @@ export function renderSummary(result: ScanResult): string {
   const { compared, total } = coverage(result)
   const coverageNote = compared === total ? '' : dim(` (${compared} of ${total} checks compared)`)
   lines.push(`${dim('Drift score:')} ${c(scoreColor as Parameters<typeof c>[0], `${result.score}/100`)}${coverageNote}`)
+
+  if (result.postureScore !== null && result.postureScore !== undefined) {
+    const pColor = result.postureScore >= 80 ? 'green' : result.postureScore >= 50 ? 'yellow' : 'red'
+    lines.push(`${dim('Posture score:')} ${c(pColor as Parameters<typeof c>[0], `${result.postureScore}/100`)}${dim(' (target only — RLS coverage, migration history)')}`)
+  }
   lines.push('')
 
   return lines.join('\n')

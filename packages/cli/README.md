@@ -49,7 +49,35 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 | Vault Secrets | `vault.secrets` | ✅ | SQL (`vault.create_secret` / `vault.update_secret`) |
 | Postgres Extensions | `pg_extension` | ✅ | SQL (CREATE/DROP EXTENSION) |
 
+### Drift score vs posture score
 
+Twelve of the fourteen checks compare source against target. Two do not:
+
+- **RLS Coverage** reads only the target, listing tables with RLS disabled.
+- **Migration History** compares local migration *files* against the target's
+  tracking table.
+
+Both fire identically whichever pair you diff, so they are scored separately.
+Counting them as drift meant a diff of an environment *against itself* could
+never reach 100, and any project with a long-standing RLS gap scored 0 no
+matter how well synchronised its environments were:
+
+```
+SupaForge scan complete: no drift detected. ✓
+9 posture findings (RLS coverage / migration history) — present regardless of which pair you diff.
+
+  ✓ Layer 1 (Schema):                   0 issues
+  ● Layer 3 (RLS Coverage):             8 issues[CRITICAL]
+  ● Layer 13 (Migration History):       1 issue[INFO]
+
+Drift score: 100/100
+Posture score: 0/100 (target only — RLS coverage, migration history)
+```
+
+The findings are not discarded or downgraded — they keep their severity, appear
+in `--detail`, and a critical one **still fails CI**. Only the drift score
+changes, so `no drift detected` becomes a trustworthy synchronisation signal.
+`--ci` output carries `postureScore` alongside `score`.
 
 ### Self-hosted Supabase
 

@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
-import { computeScore, summarize } from '../src/scoring.js'
-import type { CheckResult } from '../src/types/drift.js'
+import { computeScore, computePostureScore, summarize } from '../src/scoring.js'
+import { isComparisonCheck, CHECK_NAMES } from '../src/types/drift.js'
+import { SCORE_PENALTY_CRITICAL, SCORE_PENALTY_ERROR } from '../src/constants.js'
+import type { CheckResult, CheckName, DriftIssue } from '../src/types/drift.js'
 
 const clean: CheckResult = {
   check: 'schema',
@@ -116,5 +118,96 @@ describe('computeScore', () => {
     // drifted: 1 critical (15) + 1 warning (5) = 20
     // errored: 1 error (3) = 3
     expect(score).toBe(77) // 100 - 20 - 3
+  })
+})
+
+// ─── issue #40: posture findings are not drift ──────────────────────────────
+
+function issues(check: CheckName, n: number, severity: 'critical' | 'warning' | 'info'): DriftIssue[] {
+  return Array.from({ length: n }, (_, i) => ({
+    id: `${check}-${i}`, check, severity, title: 't', description: 'd',
+  }))
+}
+
+describe('drift score excludes non-comparative checks (issue #40)', () => {
+  it('two identical environments score 100 despite pre-existing RLS gaps', () => {
+    // The reported case: every comparison layer clean, yet 0/100 because RLS
+    // Coverage reports the same tables whichever pair you diff.
+    const results: CheckResult[] = [
+      { check: 'schema', status: 'clean', issues: [], durationMs: 1 },
+      { check: 'rls', status: 'clean', issues: [], durationMs: 1 },
+      { check: 'rls-coverage', status: 'drifted', issues: issues('rls-coverage', 8, 'critical'), durationMs: 1 },
+      { check: 'migrations', status: 'drifted', issues: issues('migrations', 1, 'info'), durationMs: 1 },
+    ]
+    expect(computeScore(results)).toBe(100)
+  })
+
+  it('still penalises genuine drift', () => {
+    const results: CheckResult[] = [
+      { check: 'rls', status: 'drifted', issues: issues('rls', 1, 'critical'), durationMs: 1 },
+    ]
+    expect(computeScore(results)).toBe(100 - SCORE_PENALTY_CRITICAL)
+  })
+
+  it('a posture finding does not dilute a real drift penalty', () => {
+    const withPosture: CheckResult[] = [
+      { check: 'rls', status: 'drifted', issues: issues('rls', 1, 'critical'), durationMs: 1 },
+      { check: 'rls-coverage', status: 'drifted', issues: issues('rls-coverage', 8, 'critical'), durationMs: 1 },
+    ]
+    const without: CheckResult[] = [withPosture[0]]
+    expect(computeScore(withPosture)).toBe(computeScore(without))
+  })
+
+  it('an errored comparison check still costs score', () => {
+    const results: CheckResult[] = [
+      { check: 'rls', status: 'error', issues: [], error: 'boom', durationMs: 1 },
+    ]
+    expect(computeScore(results)).toBe(100 - SCORE_PENALTY_ERROR)
+  })
+})
+
+describe('computePostureScore', () => {
+  it('scores the posture checks so the findings are not discarded', () => {
+    const results: CheckResult[] = [
+      { check: 'schema', status: 'clean', issues: [], durationMs: 1 },
+      { check: 'rls-coverage', status: 'drifted', issues: issues('rls-coverage', 8, 'critical'), durationMs: 1 },
+    ]
+    // 8 criticals is well past the floor — the point is that it is not 100.
+    expect(computePostureScore(results)).toBe(0)
+  })
+
+  it('is 100 when the posture checks ran and found nothing', () => {
+    const results: CheckResult[] = [
+      { check: 'rls-coverage', status: 'clean', issues: [], durationMs: 1 },
+      { check: 'migrations', status: 'clean', issues: [], durationMs: 1 },
+    ]
+    expect(computePostureScore(results)).toBe(100)
+  })
+
+  it('is null when no posture check ran, so no line is printed for it', () => {
+    const results: CheckResult[] = [
+      { check: 'schema', status: 'clean', issues: [], durationMs: 1 },
+    ]
+    expect(computePostureScore(results)).toBeNull()
+  })
+
+  it('ignores drift from the comparison checks', () => {
+    const results: CheckResult[] = [
+      { check: 'rls', status: 'drifted', issues: issues('rls', 4, 'critical'), durationMs: 1 },
+      { check: 'migrations', status: 'clean', issues: [], durationMs: 1 },
+    ]
+    expect(computePostureScore(results)).toBe(100)
+  })
+})
+
+describe('isComparisonCheck', () => {
+  it('classifies the two target-only checks as posture', () => {
+    expect(isComparisonCheck('rls-coverage')).toBe(false)
+    expect(isComparisonCheck('migrations')).toBe(false)
+  })
+
+  it('classifies every other check as a comparison', () => {
+    const posture = CHECK_NAMES.filter(n => !isComparisonCheck(n))
+    expect(posture).toEqual(['rls-coverage', 'migrations'])
   })
 })

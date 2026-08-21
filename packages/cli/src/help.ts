@@ -1,6 +1,23 @@
 import { Help, type Command, type Interfaces } from '@oclif/core'
 
 /**
+ * Environment variables a command reads, rendered as their own help section.
+ *
+ * These were documented only in the README, and `--help` is where users look
+ * first — especially for `diff`, whose behaviour they change (issue #40).
+ * Declared as a static on the command so the list sits next to the flags it
+ * complements rather than in a table someone has to remember to update.
+ */
+export interface CommandWithEnvVars {
+  envVars?: ReadonlyArray<{ name: string; description: string }>
+}
+
+function envVarsOf(command: Command.Loadable): CommandWithEnvVars['envVars'] {
+  const declared = (command as unknown as CommandWithEnvVars).envVars
+  return Array.isArray(declared) && declared.length > 0 ? declared : undefined
+}
+
+/**
  * Desired command order — matches the natural workflow:
  * setup → detect → snapshot → clone → restore → easter egg
  */
@@ -15,6 +32,17 @@ const ORDER = [
 ]
 
 export default class CustomHelp extends Help {
+  /** Append an ENVIRONMENT VARIABLES section to commands that declare one. */
+  protected override formatCommand(command: Command.Loadable): string {
+    const base = super.formatCommand(command)
+    const envVars = envVarsOf(command)
+    if (!envVars) return base
+
+    const width = Math.max(...envVars.map(v => v.name.length))
+    const rows = envVars.map(v => `  ${v.name.padEnd(width)}  ${v.description}`)
+    return [base, '', 'ENVIRONMENT VARIABLES', ...rows].join('\n')
+  }
+
   protected override get sortedCommands(): Command.Loadable[] {
     const sorted = super.sortedCommands
     const ordered = ORDER

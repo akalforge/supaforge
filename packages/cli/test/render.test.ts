@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { renderSummary, renderDetailed, countErrored, countSkipped, coverage } from '../src/render.js'
+import { renderSummary, renderDetailed, countErrored, countSkipped, coverage, splitCounts } from '../src/render.js'
 import type { ScanResult } from '../src/types/drift.js'
 
 const cleanResult: ScanResult = {
@@ -10,6 +10,7 @@ const cleanResult: ScanResult = {
     { check: 'rls', status: 'clean', issues: [], durationMs: 10 },
   ],
   score: 100,
+  postureScore: null,
   summary: { total: 0, critical: 0, warning: 0, info: 0 },
 }
 
@@ -419,6 +420,7 @@ const partialResult: ScanResult = {
     { check: 'data', status: 'skipped', issues: [], skipReason: 'no tables configured in checks.data.tables', durationMs: 0 },
   ],
   score: 100,
+  postureScore: null,
   summary: { total: 0, critical: 0, warning: 0, info: 0 },
 }
 
@@ -496,5 +498,84 @@ describe('renderSummary with skipped checks (issue #42)', () => {
 
   it('says nothing about skips when there are none', () => {
     expect(renderSummary(cleanResult)).not.toContain('coverage is partial')
+  })
+})
+
+// ─── issue #40: posture findings must not read as drift ─────────────────────
+
+const postureOnlyResult: ScanResult = {
+  timestamp: '2026-03-21T00:00:00.000Z',
+  source: 'env-a',
+  target: 'env-a',
+  checks: [
+    { check: 'schema', status: 'clean', issues: [], durationMs: 3200 },
+    {
+      check: 'rls-coverage',
+      status: 'drifted',
+      durationMs: 300,
+      issues: Array.from({ length: 8 }, (_, i) => ({
+        id: `rls-cov-${i}`, check: 'rls-coverage' as const, severity: 'critical' as const,
+        title: `Table public.t${i} has RLS disabled`, description: 'd',
+      })),
+    },
+    {
+      check: 'migrations',
+      status: 'drifted',
+      durationMs: 120,
+      issues: [{ id: 'mig-1', check: 'migrations' as const, severity: 'info' as const, title: 'Untracked workflow', description: 'd' }],
+    },
+  ],
+  score: 100,
+  postureScore: 0,
+  summary: { total: 9, critical: 8, warning: 0, info: 1 },
+}
+
+describe('splitCounts', () => {
+  it('separates drift from posture findings', () => {
+    expect(splitCounts(postureOnlyResult)).toEqual({ drift: 0, posture: 9 })
+  })
+
+  it('counts comparison-check issues as drift', () => {
+    expect(splitCounts(driftedResult).drift).toBeGreaterThan(0)
+    expect(splitCounts(driftedResult).posture).toBe(0)
+  })
+
+  it('tolerates a malformed result', () => {
+    expect(splitCounts({ checks: undefined as never })).toEqual({ drift: 0, posture: 0 })
+  })
+})
+
+describe('renderSummary separates posture from drift (issue #40)', () => {
+  it('reports no drift when only posture checks found anything', () => {
+    // Diffing an environment against itself previously read
+    // "9 drift issues found across 2 checks" with a 0/100 score.
+    const out = renderSummary(postureOnlyResult)
+    expect(out).toContain('no drift detected')
+    expect(out).not.toContain('9 drift issues')
+  })
+
+  it('still surfaces the posture findings — they are not discarded', () => {
+    const out = renderSummary(postureOnlyResult)
+    expect(out).toContain('9 posture findings')
+    expect(out).toContain('present regardless of which pair you diff')
+    expect(out).toMatch(/Layer 3 \(RLS Coverage\):\s+8 issues/)
+  })
+
+  it('prints both scores, so a clean sync and a poor posture are both visible', () => {
+    const out = renderSummary(postureOnlyResult)
+    expect(out).toContain('Drift score:')
+    expect(out).toContain('100/100')
+    expect(out).toContain('Posture score:')
+    expect(out).toContain('0/100')
+  })
+
+  it('omits the posture line entirely when no posture check ran', () => {
+    expect(renderSummary(cleanResult)).not.toContain('Posture score')
+    expect(renderSummary(cleanResult)).not.toContain('posture findings')
+  })
+
+  it('still headlines genuine drift', () => {
+    const out = renderSummary(driftedResult)
+    expect(out).toMatch(/drift issue/)
   })
 })

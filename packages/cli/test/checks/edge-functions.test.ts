@@ -150,3 +150,46 @@ describe('EdgeFunctionsCheck', () => {
     await expect(check.scan(mockContext())).rejects.toThrow('Unauthorized')
   })
 })
+
+// ─── issue #41: no self-hosted "list functions" endpoint exists ─────────────
+
+describe('EdgeFunctionsCheck against self-hosted Supabase (issue #41)', () => {
+  function ctxWith(apiUrlOn: 'source' | 'target' | 'both'): CheckContext {
+    const selfHosted = { dbUrl: 'postgres://x', apiUrl: 'https://sb.example.com', projectRef: 'my-project', accessToken: 'service-key' }
+    const hosted = { dbUrl: 'postgres://y', projectRef: 'ref', accessToken: 'tok' }
+    return {
+      source: apiUrlOn === 'target' ? hosted : selfHosted,
+      target: apiUrlOn === 'source' ? hosted : selfHosted,
+      config: { environments: {}, source: 'a', target: 'b' },
+    }
+  }
+
+  it('skips with an accurate reason instead of calling a hosted-only endpoint', async () => {
+    // Previously the hosted URL was built regardless and the layer failed with
+    // a bare `Unauthorized`, which reads as a fixable credentials problem.
+    const check = new EdgeFunctionsCheck(makeFetchFn([], []))
+    await expect(check.scan(ctxWith('both'))).rejects.toThrow(CheckSkipped)
+    await expect(check.scan(ctxWith('both'))).rejects.toThrow('requires hosted Supabase')
+  })
+
+  it('makes no network call at all when self-hosted', async () => {
+    let called = false
+    const check = new EdgeFunctionsCheck(async () => {
+      called = true
+      return { ok: false, statusText: 'Unauthorized' } as Response
+    })
+    await expect(check.scan(ctxWith('both'))).rejects.toThrow(CheckSkipped)
+    expect(called).toBe(false)
+  })
+
+  it('skips when either side is self-hosted', async () => {
+    const check = new EdgeFunctionsCheck(makeFetchFn([], []))
+    await expect(check.scan(ctxWith('source'))).rejects.toThrow('requires hosted Supabase')
+    await expect(check.scan(ctxWith('target'))).rejects.toThrow('requires hosted Supabase')
+  })
+
+  it('still runs normally for two hosted projects', async () => {
+    const check = new EdgeFunctionsCheck(makeFetchFn([], []))
+    await expect(check.scan(mockContext())).resolves.toEqual([])
+  })
+})

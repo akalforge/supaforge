@@ -79,9 +79,9 @@ supaforge snapshot --env=prod --migration
 | Schema | `@dbdiff/cli` | ✅ Ready |
 | Data | `@dbdiff/cli --type=data` | ✅ Ready |
 | RLS Policies | `pg_policies` view | ✅ Ready |
-| Edge Functions | Management API | ✅ Ready |
+| Edge Functions | Management API | ✅ Ready — hosted only, skipped on self-hosted |
 | Storage | Storage API | ✅ Ready |
-| Auth Config | Management API | ✅ Ready |
+| Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Ready |
 | Cron Jobs | `cron.job` table | ✅ Ready |
 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ Ready |
 | Realtime Publications | `pg_publication` + `pg_publication_tables` | ✅ Ready |

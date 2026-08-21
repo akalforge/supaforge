@@ -40,15 +40,54 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 | Schema | `@dbdiff/cli` | ✅ Tables, views, triggers, functions, enum types | SQL (up/down) |
 | Data | `@dbdiff/cli --type=data` | ✅ Row-level diff for all public tables (configurable). Checksum-based fast skip for unchanged tables. | SQL (up/down) |
 | RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
-| Edge Functions | Management API | ✅ | DELETE extras via API; missing/outdated → manual `supabase functions deploy` |
+| Edge Functions | Management API | ✅ **Hosted only** — skipped on self-hosted | DELETE extras via API; missing/outdated → manual `supabase functions deploy` |
 | Storage | Storage API + `pg_policies` | ✅ Buckets, policies. `--include-files` adds file-level drift detection (checksums for JSON, size/date for binary). | Buckets via API (POST/PUT/DELETE); Policies via SQL |
-| Auth Config | Management API | ✅ | PATCH via API |
+| Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Self-hosted covers provider flags and signup settings, not `JWT_EXP` / `MFA_ENABLED` | PATCH via API (hosted only) |
 | Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ | SQL when trigger metadata available |
 | Realtime Publications | `pg_publication` + `pg_publication_tables` | ✅ | SQL (CREATE/ALTER PUBLICATION) |
 | Vault Secrets | `vault.secrets` | ✅ | SQL (`vault.create_secret` / `vault.update_secret`) |
 | Postgres Extensions | `pg_extension` | ✅ | SQL (CREATE/DROP EXTENSION) |
 
+
+
+### Self-hosted Supabase
+
+Set `apiUrl` on an environment and every API-backed check targets that gateway
+instead of `api.supabase.com`, authenticating with the service-role key in
+`accessToken`. `projectRef` is not required when `apiUrl` is set — it is only a
+path segment on a hosted URL that will not be called.
+
+```json
+{
+  "environments": {
+    "self-hosted-a": {
+      "dbUrl": "$DB_URL_A",
+      "apiUrl": "https://supabase.example.com",
+      "accessToken": "$SUPABASE_SERVICE_KEY"
+    }
+  }
+}
+```
+
+Thirteen of the fourteen checks run against self-hosted. **Edge Functions is
+hosted-only**: self-hosted Supabase exposes no equivalent "list functions"
+management endpoint, so the check reports
+
+```
+  ○ Layer 4 (Edge Functions):           skipped — Edge Functions comparison requires hosted Supabase — self-hosted exposes no management endpoint
+```
+
+rather than attempting a call that can only return `Unauthorized`. Add it to
+`checks.exclude` if you would rather not see the line at all.
+
+Auth Config reads GoTrue's `/auth/v1/settings` on self-hosted, which exposes
+fewer keys than the hosted Management API's `/config/auth` — provider flags and
+signup settings, but not `JWT_EXP` or `MFA_ENABLED`. Because the two shapes are
+not comparable, a self-hosted source and a hosted target are reported as
+skipped rather than diffed against each other. Self-hosted GoTrue also has no
+config write endpoint, so its findings carry no `--apply` action: change the
+target deployment's environment and restart it.
 
 ### Skipped checks
 

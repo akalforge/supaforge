@@ -1,3 +1,5 @@
+import { escapeRegex } from './utils/strings.js'
+
 /**
  * Dependency analysis for the SQL statements a diff produces.
  *
@@ -94,8 +96,15 @@ export function statementPhase(sql: string): number {
 /** Dollar-quoted routine bodies: `$$ ... $$`, `$fn$ ... $fn$`. */
 const DOLLAR_BODY = /\$([A-Za-z0-9_]*)\$[\s\S]*?\$\1\$/g
 
-/** Single-quoted literals, doubled quotes included. */
-const STRING_LITERAL = /'(?:[^']|'')*'/g
+/**
+ * Single-quoted literals, doubled quotes included.
+ *
+ * Written as the unrolled `'[^']*(?:''[^']*)*'` rather than the equivalent
+ * `'(?:[^']|'')*'`: only one alternative can match at any position either way,
+ * but the unrolled form has no alternation to backtrack through at all, which
+ * matters for a pattern run over SQL from an external process.
+ */
+const STRING_LITERAL = /'[^']*(?:''[^']*)*'/g
 
 /**
  * A statement with its literals and routine bodies blanked out.
@@ -121,7 +130,7 @@ export function bareName(identifier: string): string {
 
 /** `CREATE [OR REPLACE] [UNIQUE|MATERIALIZED|TEMP] <kind> [IF NOT EXISTS] <name>` */
 const CREATES = new RegExp(
-  String.raw`\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:UNIQUE\s+|MATERIALIZED\s+|TEMP(?:ORARY)?\s+|CONSTRAINT\s+)*` +
+  String.raw`\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:UNIQUE\s+|MATERIALIZED\s+|TEMP(?:ORARY)?\s+|CONSTRAINT\s+){0,2}` +
     String.raw`(?:TABLE|VIEW|FUNCTION|PROCEDURE|TYPE|DOMAIN|SEQUENCE|INDEX|TRIGGER|POLICY)\s+` +
     String.raw`(?:IF\s+NOT\s+EXISTS\s+)?(${IDENT})`,
   'gi',
@@ -215,17 +224,13 @@ interface Node {
   after: Set<number>
 }
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
 /**
  * Match `name` used as a whole identifier, quoted or not, schema-qualified or
  * not. Built once per name rather than per comparison — a large fix set is
  * thousands of pairings.
  */
 function identifierMatcher(name: string): RegExp {
-  return new RegExp(String.raw`(?<![\w$])"?${escapeRegExp(name)}"?(?![\w$])`, 'i')
+  return new RegExp(String.raw`(?<![\w$])"?${escapeRegex(name)}"?(?![\w$])`, 'i')
 }
 
 /**

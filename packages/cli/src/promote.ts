@@ -4,7 +4,8 @@ import type { ScanResult, SyncAction } from './types/drift'
 import { errMsg } from './utils/error'
 import { isDestructiveSql } from './dbdiff'
 import { orderStatements, referencedTables } from './sql-deps.js'
-import { applyTableFilter, isFiltered, matchesPattern, type TableFilter } from './utils/table-filter.js'
+import { applyTableFilter, isFiltered, type TableFilter } from './utils/table-filter.js'
+import { matchesGlob } from './utils/strings.js'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
@@ -105,7 +106,7 @@ export function outOfScopeReason(sql: string, filter: TableFilter | undefined): 
 /** Does this issue id match any of the `--only` selectors? */
 function isSelected(issueId: string, only: string[] | undefined): boolean {
   if (!only?.length) return true
-  return only.some(pattern => matchesPattern(issueId, pattern))
+  return only.some(pattern => matchesGlob(issueId, pattern))
 }
 
 /**

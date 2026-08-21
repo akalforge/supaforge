@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { slugify, normalizeRoles } from '../../src/utils/strings.js'
+import { slugify, normalizeRoles, parseFlagList, matchesGlob, escapeRegex } from '../../src/utils/strings.js'
 
 // ─── slugify ─────────────────────────────────────────────────────────────────
 
@@ -105,5 +105,56 @@ describe('normalizeRoles', () => {
 
   it('handles array of Postgres literals (multiple rows merged)', () => {
     expect(normalizeRoles(['{anon}', '{authenticated}'])).toEqual(['anon', 'authenticated'])
+  })
+})
+
+/**
+ * Extracted from table-filter so the same splitting and globbing serve every
+ * repeatable list flag — `--tables`, `--exclude-tables` and `--only` — rather
+ * than each call site growing its own copy.
+ */
+describe('parseFlagList', () => {
+  it('splits comma-separated and repeated forms the same way', () => {
+    expect(parseFlagList(['a,b', 'c'])).toEqual(['a', 'b', 'c'])
+    expect(parseFlagList(['a', 'b', 'c'])).toEqual(['a', 'b', 'c'])
+  })
+
+  it('trims and drops empties', () => {
+    expect(parseFlagList([' a , b ', '', ' '])).toEqual(['a', 'b'])
+  })
+
+  it('tolerates undefined and a non-array', () => {
+    expect(parseFlagList(undefined)).toEqual([])
+    expect(parseFlagList('a,b' as unknown as string[])).toEqual([])
+  })
+})
+
+describe('matchesGlob', () => {
+  it('matches * and ? the way @dbdiff/cli does', () => {
+    expect(matchesGlob('schema-create-view-2', 'schema-create-*')).toBe(true)
+    expect(matchesGlob('schema-alter-2', 'schema-create-*')).toBe(false)
+    expect(matchesGlob('schema-alter-2', 'schema-alter-?')).toBe(true)
+  })
+
+  it('is anchored, so a prefix is not a match on its own', () => {
+    expect(matchesGlob('schema-create-view-2', 'schema-create')).toBe(false)
+  })
+
+  it('is case-insensitive', () => {
+    expect(matchesGlob('Schema-Alter-1', 'schema-alter-1')).toBe(true)
+  })
+
+  it('treats regex metacharacters in the pattern literally', () => {
+    expect(matchesGlob('a.b', 'a.b')).toBe(true)
+    expect(matchesGlob('axb', 'a.b')).toBe(false)
+    expect(matchesGlob('schema-alter-1', 'schema-alter-1|schema-drop-1')).toBe(false)
+  })
+})
+
+describe('escapeRegex', () => {
+  it('escapes every metacharacter so a value matches literally', () => {
+    const rx = new RegExp(escapeRegex('a.b*c'))
+    expect(rx.test('a.b*c')).toBe(true)
+    expect(rx.test('axbbc')).toBe(false)
   })
 })

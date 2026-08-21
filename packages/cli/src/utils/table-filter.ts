@@ -1,4 +1,5 @@
 import type { SupaForgeConfig } from '../types/config.js'
+import { parseFlagList, globToRegExp } from './strings.js'
 
 /**
  * Which tables a diff should look at.
@@ -15,19 +16,13 @@ export interface TableFilter {
 }
 
 /**
- * Split a repeatable flag into individual patterns.
+ * Split a repeatable table flag into individual patterns.
  *
  * `--tables=a,b --tables=c` and `--tables=a --tables=b --tables=c` mean the
- * same thing; oclif gives us the raw strings and commas are the natural
- * separator for a list of table names, none of which can contain one.
+ * same thing. The splitting itself is shared with every other repeatable list
+ * flag; this name is what the table call sites read by.
  */
-export function parseTableList(values?: string[]): string[] {
-  if (!Array.isArray(values)) return []
-  return values
-    .flatMap(v => String(v).split(','))
-    .map(v => v.trim())
-    .filter(v => v.length > 0)
-}
+export const parseTableList = parseFlagList
 
 /**
  * Resolve the effective filter from config and CLI flags.
@@ -102,24 +97,6 @@ export function matchesPattern(name: string, pattern: string): boolean {
 
   const rx = globToRegExp(pattern.toLowerCase())
   return candidates.some(c => rx.test(c))
-}
-
-/**
- * Compile a `*`/`?` glob to an anchored regular expression.
- *
- * Every other character is escaped, so a table name containing regex
- * metacharacters cannot turn a filter into a different pattern. `*` becomes
- * `[^]*` rather than `.*` only for clarity; both are linear here because the
- * pattern is anchored and has no nested quantifiers.
- */
-function globToRegExp(pattern: string): RegExp {
-  let out = '^'
-  for (const ch of pattern) {
-    if (ch === '*') out += '.*'
-    else if (ch === '?') out += '.'
-    else out += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  }
-  return new RegExp(out + '$')
 }
 
 /**

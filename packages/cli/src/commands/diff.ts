@@ -11,7 +11,8 @@ import { ok, warn, dim, cmd, bold } from '../ui.js'
 import { sanitizeForReport } from '../utils/sanitize.js'
 import { renderTip } from '../tips.js'
 import { formatGitHubAnnotations, computeCiExitCode, formatCiSummary, type FailOn } from '../ci.js'
-import { resolveTableFilter, isFiltered, describeTableFilter, parseTableList } from '../utils/table-filter.js'
+import { resolveTableFilter, isFiltered, describeTableFilter } from '../utils/table-filter.js'
+import { parseFlagList } from '../utils/strings.js'
 import { isCloneDatabase } from '../branch.js'
 
 /**
@@ -281,7 +282,7 @@ export default class Diff extends BaseCommand {
         dryRun,
         allowDestructive: flags['allow-destructive'],
         tableFilter,
-        only: parseTableList(flags.only),
+        only: parseFlagList(flags.only),
         transactional: !flags['no-transaction'],
       })
 

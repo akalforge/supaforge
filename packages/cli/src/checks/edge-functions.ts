@@ -1,5 +1,5 @@
 import type { DriftIssue, SyncAction } from '../types/drift'
-import { Check, type CheckContext } from './base'
+import { Check, CheckSkipped, type CheckContext } from './base'
 import { SUPABASE_MGMT_API } from '../constants'
 
 interface EdgeFunction {
@@ -27,7 +27,7 @@ export class EdgeFunctionsCheck extends Check {
     const targetKey = ctx.target.accessToken
 
     if (!sourceRef || !targetRef || !sourceKey || !targetKey) {
-      return []
+      throw new CheckSkipped('no projectRef or accessToken configured')
     }
 
     const [source, target] = await Promise.all([

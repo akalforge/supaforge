@@ -4,11 +4,12 @@ import type { SupaForgeConfig } from './types/config'
 import type { CheckName, CheckResult, ScanResult } from './types/drift'
 import { CHECK_NAMES } from './types/drift'
 import { computeScore, summarize } from './scoring'
+import { isCheckSkipped } from './checks/base'
 import { friendlyDbError } from './utils/error'
 
 export type ScanProgressEvent =
   | { phase: 'check:start'; check: CheckName; index: number; total: number }
-  | { phase: 'check:done'; check: CheckName; index: number; total: number; status: CheckResult['status']; issueCount: number; durationMs: number }
+  | { phase: 'check:done'; check: CheckName; index: number; total: number; status: CheckResult['status']; issueCount: number; durationMs: number; skipReason?: string }
 
 export interface ScanOptions {
   config: SupaForgeConfig
@@ -79,8 +80,9 @@ export async function scan(
     }
 
     if (!check) {
-      results.push({ check: name, status: 'skipped', issues: [], durationMs: 0 })
-      options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'skipped', issueCount: 0, durationMs: 0 })
+      const skipReason = 'not registered'
+      results.push({ check: name, status: 'skipped', issues: [], skipReason, durationMs: 0 })
+      options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'skipped', issueCount: 0, durationMs: 0, skipReason })
       continue
     }
 
@@ -95,14 +97,23 @@ export async function scan(
       options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status, issueCount: issues.length, durationMs })
     } catch (err) {
       const durationMs = Math.round(performance.now() - start)
-      results.push({
-        check: name,
-        status: 'error',
-        issues: [],
-        error: friendlyDbError(err, source.dbUrl),
-        durationMs,
-      })
-      options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'error', issueCount: 0, durationMs })
+
+      // A skip is a normal outcome, not a failure — the layer declined to run
+      // for a reason the user can act on, rather than breaking (issue #42).
+      if (isCheckSkipped(err)) {
+        const skipReason = err.message
+        results.push({ check: name, status: 'skipped', issues: [], skipReason, durationMs })
+        options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'skipped', issueCount: 0, durationMs, skipReason })
+      } else {
+        results.push({
+          check: name,
+          status: 'error',
+          issues: [],
+          error: friendlyDbError(err, source.dbUrl),
+          durationMs,
+        })
+        options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'error', issueCount: 0, durationMs })
+      }
     }
 
     await bus?.emit('supaforge.check.after', { check: name, result: results.at(-1) })

@@ -113,9 +113,12 @@ export default class Diff extends BaseCommand {
           if (process.stdout.isTTY) process.stdout.write('\r\u001b[2K')
           const dur = `${(event.durationMs / 1000).toFixed(1)}s`
           const issues = event.status === 'error' ? warn('error')
-            : event.status === 'skipped' ? dim('skipped')
+            : event.status === 'skipped' ? dim(`skipped — ${event.skipReason ?? 'no reason given'}`)
             : `${event.issueCount} issues`
-          process.stdout.write(`  ${ok('✓')} ${idx} ${label.padEnd(24)} ${issues}  (${dur})\n`)
+          // A skipped layer gets its own glyph. A green tick beside "0 issues"
+          // was indistinguishable from a comparison that passed (issue #42).
+          const glyph = event.status === 'skipped' ? dim('○') : event.status === 'error' ? warn('✗') : ok('✓')
+          process.stdout.write(`  ${glyph} ${idx} ${label.padEnd(24)} ${issues}  (${dur})\n`)
         }
       }
     }

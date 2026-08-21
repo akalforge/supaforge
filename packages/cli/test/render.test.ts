@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { renderSummary, renderDetailed, countErrored } from '../src/render.js'
+import { renderSummary, renderDetailed, countErrored, countSkipped, coverage } from '../src/render.js'
 import type { ScanResult } from '../src/types/drift.js'
 
 const cleanResult: ScanResult = {
@@ -403,5 +403,98 @@ describe('countErrored', () => {
     expect(countErrored({ checks: null as never })).toBe(0)
     expect(countErrored({ checks: 'nope' as never })).toBe(0)
     expect(countErrored({ checks: [null as never] })).toBe(0)
+  })
+})
+
+// ─── issue #42: a skipped layer must not render as a passing one ────────────
+
+const partialResult: ScanResult = {
+  timestamp: '2026-03-21T00:00:00.000Z',
+  source: 'dev',
+  target: 'prod',
+  checks: [
+    { check: 'cron', status: 'clean', issues: [], durationMs: 1700 },
+    { check: 'auth', status: 'skipped', issues: [], skipReason: 'no projectRef or accessToken configured', durationMs: 0 },
+    { check: 'edge-functions', status: 'skipped', issues: [], skipReason: 'no projectRef or accessToken configured', durationMs: 0 },
+    { check: 'data', status: 'skipped', issues: [], skipReason: 'no tables configured in checks.data.tables', durationMs: 0 },
+  ],
+  score: 100,
+  summary: { total: 0, critical: 0, warning: 0, info: 0 },
+}
+
+describe('countSkipped', () => {
+  it('counts skipped checks', () => {
+    expect(countSkipped(partialResult)).toBe(3)
+  })
+
+  it('is zero when nothing was skipped', () => {
+    expect(countSkipped(cleanResult)).toBe(0)
+  })
+
+  it('tolerates a malformed result rather than throwing', () => {
+    expect(countSkipped({ checks: undefined as never })).toBe(0)
+    expect(countSkipped({ checks: [null as never] })).toBe(0)
+  })
+})
+
+describe('coverage', () => {
+  it('counts only checks that actually compared', () => {
+    expect(coverage(partialResult)).toEqual({ compared: 1, total: 4 })
+  })
+
+  it('counts an errored check as not compared', () => {
+    const r = { checks: [{ check: 'rls', status: 'error', issues: [], durationMs: 1 }] } as Pick<ScanResult, 'checks'>
+    expect(coverage(r)).toEqual({ compared: 0, total: 1 })
+  })
+
+  it('is full when every check ran', () => {
+    expect(coverage(cleanResult)).toEqual({ compared: 1, total: 1 })
+  })
+
+  it('tolerates a malformed result', () => {
+    expect(coverage({ checks: undefined as never })).toEqual({ compared: 0, total: 0 })
+  })
+})
+
+describe('renderSummary with skipped checks (issue #42)', () => {
+  it('shows the skip reason instead of "0 issues"', () => {
+    const out = renderSummary(partialResult)
+    expect(out).toContain('skipped — no projectRef or accessToken configured')
+    expect(out).toContain('skipped — no tables configured in checks.data.tables')
+  })
+
+  it('does not render a skipped layer as a zero-issue pass', () => {
+    const out = renderSummary(partialResult)
+    // Cron genuinely ran and found nothing, so it keeps the issue count.
+    expect(out).toMatch(/Layer 7 \(Cron Jobs\):\s+0 issues/)
+    // The three that never ran must not say the same thing.
+    expect(out).not.toMatch(/Layer 6 \(Auth Config\):\s+0 issues/)
+    expect(out).not.toMatch(/Layer 4 \(Edge Functions\):\s+0 issues/)
+  })
+
+  it('says coverage is partial in the closing line', () => {
+    expect(renderSummary(partialResult)).toContain('3 checks were skipped — coverage is partial')
+  })
+
+  it('uses the singular for one skipped check', () => {
+    const one = { ...partialResult, checks: partialResult.checks.slice(0, 2) }
+    expect(renderSummary(one)).toContain('1 check was skipped')
+  })
+
+  it('qualifies a perfect score with the number of checks compared', () => {
+    // 100/100 across a partial run otherwise reads as full coverage.
+    expect(renderSummary(partialResult)).toContain('(1 of 4 checks compared)')
+  })
+
+  it('leaves the score unqualified when everything ran', () => {
+    expect(renderSummary(cleanResult)).not.toContain('checks compared')
+  })
+
+  it('still reports no drift — a skip is not drift', () => {
+    expect(renderSummary(partialResult)).toContain('no drift detected')
+  })
+
+  it('says nothing about skips when there are none', () => {
+    expect(renderSummary(cleanResult)).not.toContain('coverage is partial')
   })
 })

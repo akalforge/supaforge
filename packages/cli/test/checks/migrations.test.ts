@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { CheckSkipped } from '../../src/checks/base.js'
 import {
   MigrationsCheck,
   parseFilename,
@@ -352,9 +353,14 @@ describe('checks.migrations.mode (issue #31)', () => {
     const readDirFn: ReadDirFn = async () => { readDir = true; return ['001_x.sql'] }
 
     const check = new MigrationsCheck(queryFn, readDirFn)
-    const issues = await check.scan(mockContext({ checks: { migrations: { mode: 'ignore' } } }))
 
-    expect(issues).toEqual([])
+    // Reported as skipped rather than clean: switching the check off should
+    // not look like a layer that ran and passed (issue #42). The
+    // short-circuit itself is unchanged — nothing is read or queried.
+    await expect(
+      check.scan(mockContext({ checks: { migrations: { mode: 'ignore' } } })),
+    ).rejects.toThrow(CheckSkipped)
+
     expect(queried).toBe(false)
     expect(readDir).toBe(false)
   })

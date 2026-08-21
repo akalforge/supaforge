@@ -56,6 +56,15 @@ export interface CheckResult {
   status: 'clean' | 'drifted' | 'error' | 'skipped'
   issues: DriftIssue[]
   error?: string
+  /**
+   * Why the check declined to run — missing credentials, an absent extension,
+   * nothing configured to compare.
+   *
+   * Present only when status is 'skipped'. Without it a skipped layer was
+   * indistinguishable from a clean one in both the terminal output and the
+   * JSON payload (issue #42).
+   */
+  skipReason?: string
   durationMs: number
 }
 

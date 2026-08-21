@@ -1,7 +1,7 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
-import { Check, type CheckContext } from './base'
+import { Check, CheckSkipped, type CheckContext } from './base'
 
 interface CronJob {
   jobid: number
@@ -27,15 +27,28 @@ export class CronCheck extends Check {
       this.fetchCronJobs(ctx.source.dbUrl),
       this.fetchCronJobs(ctx.target.dbUrl),
     ])
-    return diffCronJobs(source, target)
+
+    // Neither side has pg_cron, so there was nothing to compare — the same
+    // reason `snapshot` already reports for this layer. Reported as skipped
+    // rather than as a clean pass (issue #42).
+    //
+    // Only when *both* sides are missing it. One side having the extension and
+    // the other not is genuine drift, and must still surface as every source
+    // job missing from the target.
+    if (!source.available && !target.available) {
+      throw new CheckSkipped('pg_cron extension not installed')
+    }
+
+    return diffCronJobs(source.jobs, target.jobs)
   }
 
-  private async fetchCronJobs(dbUrl: string): Promise<CronJob[]> {
+  private async fetchCronJobs(dbUrl: string): Promise<{ jobs: CronJob[]; available: boolean }> {
     try {
-      return await this.queryFn(dbUrl, CRON_SQL) as unknown as CronJob[]
+      const jobs = await this.queryFn(dbUrl, CRON_SQL) as unknown as CronJob[]
+      return { jobs, available: true }
     } catch {
       // pg_cron extension may not be installed
-      return []
+      return { jobs: [], available: false }
     }
   }
 }

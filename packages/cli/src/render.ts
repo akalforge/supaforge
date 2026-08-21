@@ -16,6 +16,33 @@ export function countErrored(result: Pick<ScanResult, 'checks'>): number {
   return result.checks.filter(c => c?.status === 'error').length
 }
 
+/**
+ * Number of checks that declined to run.
+ *
+ * A skipped layer was rendered identically to a clean one, so fourteen green
+ * ticks could mean eleven comparisons and three layers that never opened a
+ * connection (issue #42). Same defensive handling as countErrored.
+ */
+export function countSkipped(result: Pick<ScanResult, 'checks'>): number {
+  if (!Array.isArray(result?.checks)) return 0
+  return result.checks.filter(c => c?.status === 'skipped').length
+}
+
+/**
+ * How many checks actually compared the two environments, over how many were
+ * attempted.
+ *
+ * Printed alongside the score so a perfect number cannot be read as full
+ * coverage. Skipped and errored layers both measured nothing, so neither
+ * counts toward the numerator.
+ */
+export function coverage(result: Pick<ScanResult, 'checks'>): { compared: number; total: number } {
+  if (!Array.isArray(result?.checks)) return { compared: 0, total: 0 }
+  const total = result.checks.length
+  const compared = result.checks.filter(c => c?.status === 'clean' || c?.status === 'drifted').length
+  return { compared, total }
+}
+
 export function renderSummary(result: ScanResult): string {
   const lines: string[] = ['']
 
@@ -29,6 +56,12 @@ export function renderSummary(result: ScanResult): string {
   const erroredCount = countErrored(result)
   const erroredNoun = erroredCount === 1 ? 'check' : 'checks'
 
+  // A skipped check measured nothing either. It is a normal outcome rather
+  // than a failure, so it is reported separately from an error — but it must
+  // never read as a comparison that passed (issue #42).
+  const skippedCount = countSkipped(result)
+  const skippedNoun = skippedCount === 1 ? 'check was' : 'checks were'
+
   if (result.summary.total > 0) {
     lines.push(
       `${bold('SupaForge scan complete:')} ${warn(`${result.summary.total} drift ${noun}`)} found across ${driftedCount} ${checkNoun}.`,
@@ -39,6 +72,10 @@ export function renderSummary(result: ScanResult): string {
     )
   } else {
     lines.push(`${bold('SupaForge scan complete:')} ${ok('no drift detected. ✓')}`)
+  }
+
+  if (skippedCount > 0) {
+    lines.push(dim(`${skippedCount} ${skippedNoun} skipped — coverage is partial.`))
   }
 
   // Drift was found *and* something failed: say so, or the count reads as the
@@ -55,7 +92,11 @@ export function renderSummary(result: ScanResult): string {
 
   lines.push('')
   const scoreColor = result.score >= 80 ? 'green' : result.score >= 50 ? 'yellow' : 'red'
-  lines.push(`${dim('Drift score:')} ${c(scoreColor as Parameters<typeof c>[0], `${result.score}/100`)}`)
+  // The denominator the score was computed over, so 100/100 across a partial
+  // run cannot be mistaken for a full comparison (issue #42).
+  const { compared, total } = coverage(result)
+  const coverageNote = compared === total ? '' : dim(` (${compared} of ${total} checks compared)`)
+  lines.push(`${dim('Drift score:')} ${c(scoreColor as Parameters<typeof c>[0], `${result.score}/100`)}${coverageNote}`)
   lines.push('')
 
   return lines.join('\n')
@@ -106,13 +147,22 @@ function formatErroredCheck(lr: CheckResult): string {
 function formatCheckLine(lr: CheckResult): string {
   const meta = CHECK_META[lr.check]
   const icon = statusIcon(lr.status)
+  const prefix = `  ${icon} Layer ${meta.number} (${meta.label}):`
+
+  // "0 issues" is the wrong thing to print for a layer that never ran — it is
+  // the exact text a clean comparison produces (issue #42). Reuses the
+  // `skipped — reason` form `snapshot` already uses for the same situation.
+  if (lr.status === 'skipped') {
+    const reason = lr.skipReason ? ` — ${lr.skipReason}` : ''
+    return `${prefix.padEnd(CHECK_LINE_PADDING)}${dim(`skipped${reason}`)}`
+  }
+
   const count = lr.issues.length
   const noun = count === 1 ? 'issue' : 'issues'
   const severity = highestSeverity(lr)
   const sevLabel = severity ? colorSeverity(severity) : ''
   const errText = lr.error || (lr.status === 'error' ? 'check failed' : '')
   const errLabel = errText ? `  ${warn(`(error: ${errText})`)}` : ''
-  const prefix = `  ${icon} Layer ${meta.number} (${meta.label}):`
   return `${prefix.padEnd(CHECK_LINE_PADDING)}${count} ${noun}${sevLabel}${errLabel}`
 }
 

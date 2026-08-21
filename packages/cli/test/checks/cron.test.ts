@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { CheckSkipped } from '../../src/checks/base.js'
 import { CronCheck } from '../../src/checks/cron.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { QueryFn } from '../../src/db.js'
@@ -97,15 +98,29 @@ describe('CronCheck', () => {
     expect(issues).toHaveLength(0)
   })
 
-  it('handles pg_cron not installed gracefully', async () => {
+  it('skips with a reason when neither side has pg_cron', async () => {
+    // Was: returned [], reported as a clean pass. `snapshot` already says
+    // "skipped — pg_cron extension not installed" for exactly this (issue #42).
     const queryFn: QueryFn = async () => {
       throw new Error('relation "cron.job" does not exist')
     }
 
     const check = new CronCheck(queryFn)
-    const issues = await check.scan(mockContext())
+    await expect(check.scan(mockContext())).rejects.toThrow(CheckSkipped)
+    await expect(check.scan(mockContext())).rejects.toThrow('pg_cron extension not installed')
+  })
 
-    expect(issues).toHaveLength(0)
+  it('still reports drift when only one side has pg_cron', async () => {
+    // Asymmetric: the source schedules jobs the target does not run at all.
+    // That is genuine drift and must not be swallowed by the skip above.
+    const queryFn: QueryFn = async (dbUrl) => {
+      if (dbUrl.includes('source')) return [makeJob({ jobname: 'nightly' })] as unknown as Record<string, unknown>[]
+      throw new Error('relation "cron.job" does not exist')
+    }
+
+    const check = new CronCheck(queryFn)
+    const issues = await check.scan(mockContext())
+    expect(issues.length).toBeGreaterThan(0)
   })
 
   it('uses jobname as key when available', async () => {

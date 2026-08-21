@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { CheckSkipped } from '../../src/checks/base.js'
 import { SchemaCheck } from '../../src/checks/schema.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { RunDbDiffFn } from '../../src/checks/schema.js'
@@ -77,13 +78,15 @@ describe('SchemaCheck', () => {
     })
   })
 
-  it('returns empty when @dbdiff/cli is not installed', async () => {
+  it('skips with a reason when @dbdiff/cli is not installed', async () => {
+    // Was: returned [], reporting the most important layer in the tool as
+    // clean when it had not run at all (issue #42).
     const runFn: RunDbDiffFn = async () => {
       throw new Error('@dbdiff/cli is not installed. Install it with: npm install -g @dbdiff/cli')
     }
     const check = new SchemaCheck(runFn, noTablesQuery)
-    const issues = await check.scan(mockContext())
-    expect(issues).toEqual([])
+    await expect(check.scan(mockContext())).rejects.toThrow(CheckSkipped)
+    await expect(check.scan(mockContext())).rejects.toThrow('@dbdiff/cli is not installed')
   })
 
   it('rethrows non-installation errors', async () => {

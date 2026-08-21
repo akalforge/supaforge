@@ -1,4 +1,5 @@
 import type { ScanResult, DriftIssue } from './types/drift.js'
+import { coverage } from './render.js'
 
 export type FailOn = 'critical' | 'warning' | 'any'
 
@@ -83,16 +84,30 @@ export function formatCiSummary(result: ScanResult): {
    * that signal, but the artifact did not (issue #29).
    */
   errors: Array<{ check: string; message: string }>
+  /**
+   * Checks that declined to run, with the reason.
+   *
+   * A skipped check is not a failure, so it does not belong in `errors` — but
+   * omitting it entirely left a CI artifact that read as full coverage when
+   * three layers had never opened a connection (issue #42).
+   */
+  skipped: Array<{ check: string; reason: string }>
+  /** How many checks compared the two environments, over how many were attempted. */
+  coverage: { compared: number; total: number }
   criticalIssues: Array<{ check: string; id: string; title: string }>
   warningIssues: Array<{ check: string; id: string; title: string }>
 } {
   const criticalIssues: Array<{ check: string; id: string; title: string }> = []
   const warningIssues:  Array<{ check: string; id: string; title: string }> = []
   const errors: Array<{ check: string; message: string }> = []
+  const skipped: Array<{ check: string; reason: string }> = []
 
   for (const check of result.checks ?? []) {
     if (check?.status === 'error') {
       errors.push({ check: check.check, message: check.error ?? 'Check failed with no error message' })
+    }
+    if (check?.status === 'skipped') {
+      skipped.push({ check: check.check, reason: check.skipReason ?? 'no reason given' })
     }
     for (const issue of check?.issues ?? []) {
       const entry = { check: check.check, id: issue.id, title: issue.title }
@@ -109,6 +124,8 @@ export function formatCiSummary(result: ScanResult): {
     score: result.score,
     summary: result.summary,
     errors,
+    skipped,
+    coverage: coverage(result),
     criticalIssues,
     warningIssues,
   }

@@ -1,4 +1,5 @@
 import { describe, it, expect } from 'vitest'
+import { CheckSkipped } from '../../src/checks/base.js'
 import { EdgeFunctionsCheck } from '../../src/checks/edge-functions.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { FetchFn } from '../../src/checks/edge-functions.js'
@@ -109,7 +110,7 @@ describe('EdgeFunctionsCheck', () => {
     expect(ids).toContain('edge-fn-version-send-email')
   })
 
-  it('returns empty when projectRef or accessToken is missing', async () => {
+  it('skips with a reason when projectRef or accessToken is missing', async () => {
     const ctx: CheckContext = {
       source: { dbUrl: 'postgres://source' },
       target: { dbUrl: 'postgres://target' },
@@ -119,9 +120,10 @@ describe('EdgeFunctionsCheck', () => {
         target: 'prod',
       },
     }
+    // Was: returned [], which rendered as a clean pass (issue #42).
     const check = new EdgeFunctionsCheck(makeFetchFn([], []))
-    const issues = await check.scan(ctx)
-    expect(issues).toHaveLength(0)
+    await expect(check.scan(ctx)).rejects.toThrow(CheckSkipped)
+    await expect(check.scan(ctx)).rejects.toThrow('no projectRef or accessToken configured')
   })
 
   it('calls correct API URL with auth header', async () => {

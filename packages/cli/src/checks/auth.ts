@@ -1,5 +1,5 @@
 import type { DriftIssue, SyncAction } from '../types/drift'
-import { Check, type CheckContext } from './base'
+import { Check, CheckSkipped, type CheckContext } from './base'
 import { SUPABASE_MGMT_API } from '../constants'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
@@ -27,7 +27,9 @@ export class AuthCheck extends Check {
     const targetKey = ctx.target.accessToken
 
     if (!sourceRef || !targetRef || !sourceKey || !targetKey) {
-      return []
+      // Returning [] here rendered as a green zero-issue pass, identical to a
+      // layer that was compared and found clean (issue #42).
+      throw new CheckSkipped('no projectRef or accessToken configured')
     }
 
     const [source, target] = await Promise.all([

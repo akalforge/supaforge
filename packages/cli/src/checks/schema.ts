@@ -2,7 +2,7 @@ import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
 import { runDbDiff, sqlToIssues, type DbDiffOptions } from '../dbdiff'
-import { Check, type CheckContext } from './base'
+import { Check, CheckSkipped, type CheckContext } from './base'
 import { DEFAULT_IGNORE_SCHEMAS } from '../defaults'
 
 export type RunDbDiffFn = (options: DbDiffOptions) => ReturnType<typeof runDbDiff>
@@ -45,7 +45,7 @@ export class SchemaCheck extends Check {
       return sqlToIssues(result, 'schema', ignoreSchemas, ignoredSchemaTables)
     } catch (err) {
       if (err instanceof Error && err.message.includes('@dbdiff/cli is not installed')) {
-        return []
+        throw new CheckSkipped('@dbdiff/cli is not installed')
       }
       throw err
     }

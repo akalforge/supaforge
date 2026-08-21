@@ -49,6 +49,44 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 | Vault Secrets | `vault.secrets` | ✅ | SQL (`vault.create_secret` / `vault.update_secret`) |
 | Postgres Extensions | `pg_extension` | ✅ | SQL (CREATE/DROP EXTENSION) |
 
+
+### Skipped checks
+
+A check that cannot run — no credentials configured, an extension absent, no
+tables listed to compare — is reported as **skipped with the reason**, never as
+a clean pass:
+
+```
+  ✓ Layer 1 (Schema):                   0 issues
+  ○ Layer 4 (Edge Functions):           skipped — no projectRef or accessToken configured
+  ○ Layer 6 (Auth Config):              skipped — no projectRef or accessToken configured
+  ✓ Layer 7 (Cron Jobs):                0 issues
+  ○ Layer 8 (Reference Data):           skipped — no tables configured in checks.data.tables
+
+Drift score: 100/100 (2 of 5 checks compared)
+```
+
+The closing line says `N checks were skipped — coverage is partial`, and the
+score carries the denominator it was computed over, so a perfect number across
+a partial run cannot be read as a full comparison.
+
+A skip is not drift and does not reduce the score or fail CI — penalising it
+would give every self-hosted project a permanently depressed score for layers
+it deliberately cannot run. `--ci` output carries a `skipped` array and a
+`coverage` object alongside the existing `errors` array, so a pipeline can gate
+on coverage explicitly if it wants to:
+
+```json
+{
+  "score": 100,
+  "coverage": { "compared": 2, "total": 5 },
+  "skipped": [
+    { "check": "auth", "reason": "no projectRef or accessToken configured" }
+  ],
+  "errors": []
+}
+```
+
 ## Commands
 
 ```

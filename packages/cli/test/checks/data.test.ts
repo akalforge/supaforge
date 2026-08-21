@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
+import { CheckSkipped } from '../../src/checks/base.js'
 import { DataCheck } from '../../src/checks/data.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { RunDbDiffFn } from '../../src/checks/data.js'
@@ -36,7 +37,7 @@ describe('DataCheck', () => {
     expect(check.name).toBe('data')
   })
 
-  it('returns empty when no tables configured', async () => {
+  it('skips with a reason when no tables configured', async () => {
     const ctx: CheckContext = {
       source: { dbUrl: 'postgres://source' },
       target: { dbUrl: 'postgres://target' },
@@ -46,9 +47,11 @@ describe('DataCheck', () => {
         target: 'prod',
       },
     }
+    // Nothing configured to compare is a skip, not a clean comparison — this
+    // layer reported a green pass having read nothing at all (issue #42).
     const check = new DataCheck(async () => ({ up: 'INSERT ...;', down: 'DELETE ...;' }), mockChangedQueryFn())
-    const issues = await check.scan(ctx)
-    expect(issues).toEqual([])
+    await expect(check.scan(ctx)).rejects.toThrow(CheckSkipped)
+    await expect(check.scan(ctx)).rejects.toThrow('no tables configured in checks.data.tables')
   })
 
   it('returns empty when no diff found', async () => {

@@ -3,7 +3,7 @@ import { runDbDiff, sqlToIssues, type DbDiffOptions } from '../dbdiff'
 import { filterChangedTables } from '../checksum'
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
-import { Check, type CheckContext } from './base'
+import { Check, CheckSkipped, type CheckContext } from './base'
 
 export type RunDbDiffFn = (options: DbDiffOptions) => ReturnType<typeof runDbDiff>
 
@@ -28,7 +28,9 @@ export class DataCheck extends Check {
 
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     const tables = ctx.config.checks?.data?.tables
-    if (!tables?.length) return []
+    // Nothing configured to compare is a skip, not a clean comparison — this
+    // layer reported a green pass having read nothing at all (issue #42).
+    if (!tables?.length) throw new CheckSkipped('no tables configured in checks.data.tables')
 
     // Fast fingerprint check — skip tables that haven't changed
     const { changed } = await filterChangedTables(

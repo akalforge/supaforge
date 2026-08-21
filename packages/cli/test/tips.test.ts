@@ -239,3 +239,33 @@ describe('pickTip — diff: --apply advice depends on the direction (issue #48)'
     expect(allTips(ctx)).toMatch(/execute all the SQL fixes above/)
   })
 })
+
+/**
+ * Issue #47 (2): the post-clone guidance predates Postgres Roles & Grants,
+ * which arrived as Layer 14 after the advice was written for a 13-layer set.
+ * It is the second-largest source of clone noise — 227 findings on the diff
+ * that prompted the issue — and the string `roles` appeared nowhere in any
+ * user-facing guidance.
+ */
+describe('post-clone guidance covers roles & grants (issue #47)', () => {
+  it('recommends --skip=roles after a clone', () => {
+    const tip = pickTip({ command: 'clone', cloneApplied: true }, 0) ?? ''
+    expect(tip).toMatch(/--skip=roles/)
+  })
+
+  it('names every clone-only layer in the post-clone recommendation', () => {
+    const tip = pickTip({ command: 'clone', cloneApplied: true }, 0) ?? ''
+    for (const check of ['storage', 'auth', 'edge-functions', 'vault', 'realtime', 'roles']) {
+      expect(tip, `missing --skip=${check}`).toMatch(new RegExp(`--skip=${check}\\b`))
+    }
+  })
+
+  it('gives the same list in the diff-side post-clone hint', () => {
+    const ctx: TipContext = {
+      command: 'diff', detail: false, driftTotal: 5, driftedChecks: ['schema'], skippedChecks: [],
+    }
+    const combined = [0, 1, 2, 3, 4, 5].map(s => pickTip(ctx, s) ?? '').join(' ')
+    expect(combined).toMatch(/Post-clone\?/)
+    expect(combined).toMatch(/--skip=roles/)
+  })
+})

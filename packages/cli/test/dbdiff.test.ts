@@ -15,6 +15,7 @@ import {
   extractRoutineName,
   mergeRoutineReplacements,
   parseDbDiffProgress,
+  extractQualifiedName,
 } from '../src/dbdiff.js'
 import { DBDIFF_EXEC_TIMEOUT_MS } from '../src/constants.js'
 
@@ -430,7 +431,8 @@ describe('summariseStatement', () => {
     ['ALTER TABLE "users" ADD COLUMN "bio" text;', 'schema', 'Table altered: users'],
     ['CREATE TABLE "posts" (id int);', 'schema', 'Table missing: posts'],
     ['DROP TABLE "posts";', 'schema', 'Extra table: posts'],
-    ['CREATE INDEX idx_bio ON users(bio);', 'schema', 'Index missing on users'],
+    // Named by the index, not the table it is on, and not the schema (issue #47).
+    ['CREATE INDEX idx_bio ON users(bio);', 'schema', 'Index missing: idx_bio'],
     ['DROP INDEX idx_bio;', 'schema', 'Extra index: idx_bio'],
   ] as const)('summarises %j (%s) → %s', (sql, check, expected) => {
     expect(summariseStatement(sql, check)).toBe(expected)
@@ -962,5 +964,122 @@ describe('routineLabel', () => {
   it('returns the bare name when there is no argument list at all', () => {
     // MySQL has no overloading and pre-rc.7 dbdiff emitted no signature.
     expect(routineLabel('DROP FUNCTION IF EXISTS "f";')).toBe('f')
+  })
+})
+
+/**
+ * Issue #47 (1): titles across the schema check did not agree on a format, and
+ * two of them dropped information the SQL fix just below carried. Both came
+ * from per-kind regexes that reached the schema qualifier rather than the
+ * identifier.
+ */
+describe('schema titles are one schema-qualified format (issue #47)', () => {
+  it('names an index by the index, qualified by its table\'s schema', () => {
+    const sql = 'CREATE INDEX idx_orders_status ON public.orders USING btree (status);'
+    // Was "Index missing on public" — the schema, in the name's place.
+    expect(summariseStatement(sql, 'schema')).toBe('Index missing: public.idx_orders_status')
+  })
+
+  it('leaves an index bare when its table carries no schema either', () => {
+    expect(summariseStatement('CREATE INDEX idx_bio ON users (bio);', 'schema')).toBe('Index missing: idx_bio')
+  })
+
+  it('handles a quoted, qualified table in the ON clause', () => {
+    const sql = 'CREATE UNIQUE INDEX "idx_a" ON "billing"."invoices" USING btree (a);'
+    expect(summariseStatement(sql, 'schema')).toBe('Index missing: billing.idx_a')
+  })
+
+  it('qualifies an Extra function from the DOWN statement that restores it', () => {
+    // dbdiff emits the DROP unqualified and the DOWN from pg_get_functiondef,
+    // which is qualified — so the schema is reported, never invented.
+    const up = 'DROP FUNCTION IF EXISTS "example_fn"(uuid,integer);'
+    const down = 'CREATE OR REPLACE FUNCTION public.example_fn(a uuid, b integer) RETURNS void AS $$ $$;'
+    expect(summariseStatement(up, 'schema', down)).toBe('Extra function: public.example_fn(uuid,integer)')
+  })
+
+  it('keeps the signature that tells two overloads apart', () => {
+    const down = 'CREATE OR REPLACE FUNCTION public.example_fn(a text, b text) RETURNS void AS $$ $$;'
+    const a = summariseStatement('DROP FUNCTION IF EXISTS "example_fn"(uuid,integer);', 'schema', down)
+    const b = summariseStatement('DROP FUNCTION IF EXISTS "example_fn"(text,text);', 'schema', down)
+    expect(a).not.toBe(b)
+  })
+
+  it('never borrows a schema from a counterpart naming a different routine', () => {
+    const up = 'DROP FUNCTION IF EXISTS "example_fn"(uuid);'
+    const down = 'CREATE OR REPLACE FUNCTION billing.other_fn(a uuid) RETURNS void AS $$ $$;'
+    expect(summariseStatement(up, 'schema', down)).toBe('Extra function: example_fn(uuid)')
+  })
+
+  it('stays unqualified when nothing reports a schema', () => {
+    expect(summariseStatement('DROP FUNCTION IF EXISTS "example_fn"(uuid);', 'schema')).toBe(
+      'Extra function: example_fn(uuid)',
+    )
+  })
+
+  it('keeps the schema an already-qualified title had', () => {
+    const sql = 'CREATE OR REPLACE FUNCTION public.touch_updated() RETURNS trigger AS $$ $$;'
+    expect(summariseStatement(sql, 'schema')).toBe('Function missing: public.touch_updated()')
+  })
+
+  it('qualifies every other kind that names a schema', () => {
+    expect(summariseStatement('CREATE VIEW public.active_orders AS SELECT 1;', 'schema'))
+      .toBe('View missing: public.active_orders')
+    expect(summariseStatement('ALTER TABLE "public"."orders" ADD COLUMN s text;', 'schema'))
+      .toBe('Table altered: public.orders')
+    expect(summariseStatement('DROP TABLE public.legacy_notes;', 'schema'))
+      .toBe('Extra table: public.legacy_notes')
+    expect(summariseStatement('CREATE SEQUENCE public.orders_seq;', 'schema'))
+      .toBe('Sequence missing: public.orders_seq')
+    expect(summariseStatement('DROP INDEX public.idx_bio;', 'schema'))
+      .toBe('Extra index: public.idx_bio')
+  })
+
+  it('uses a colon everywhere, so no title reads as prose', () => {
+    const statements = [
+      'CREATE INDEX idx_a ON public.t (a);',
+      'CREATE VIEW v AS SELECT 1;',
+      'ALTER TABLE "t" ADD COLUMN a int;',
+      'CREATE TYPE mood AS ENUM (\'happy\');',
+    ]
+    for (const sql of statements) {
+      expect(summariseStatement(sql, 'schema')).toMatch(/^[A-Z][a-z]+ [a-z]+: \S/)
+    }
+  })
+
+  it('reads a trigger as a trigger even though it executes a function', () => {
+    const sql = 'CREATE TRIGGER trg_orders_touch BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION touch_updated();'
+    expect(summariseStatement(sql, 'schema')).toBe('Trigger missing: trg_orders_touch')
+  })
+
+  it('carries the recovered schema through sqlToIssues', () => {
+    const issues = sqlToIssues(
+      {
+        up: 'DROP FUNCTION IF EXISTS "example_fn"(uuid);',
+        down: 'CREATE OR REPLACE FUNCTION public.example_fn(a uuid) RETURNS void AS $$ $$;',
+      },
+      'schema',
+    )
+    expect(issues[0].title).toBe('Extra function: public.example_fn(uuid)')
+  })
+})
+
+describe('extractQualifiedName', () => {
+  it('reads a bare, a qualified and a quoted identifier alike', () => {
+    const head = /\bTABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:ONLY\s+)?/i
+    expect(extractQualifiedName('ALTER TABLE orders ADD COLUMN a int;', head)).toBe('orders')
+    expect(extractQualifiedName('ALTER TABLE public.orders ADD COLUMN a int;', head)).toBe('public.orders')
+    expect(extractQualifiedName('ALTER TABLE "public"."orders" ADD COLUMN a int;', head)).toBe('public.orders')
+    expect(extractQualifiedName('ALTER TABLE "public" . "orders" ADD a int;', head)).toBe('public.orders')
+  })
+
+  it('skips the optional IF EXISTS / ONLY noise rather than naming it', () => {
+    const head = /\bTABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:ONLY\s+)?/i
+    expect(extractQualifiedName('DROP TABLE IF EXISTS "posts";', head)).toBe('posts')
+    expect(extractQualifiedName('ALTER TABLE ONLY public.posts ADD a int;', head)).toBe('public.posts')
+  })
+
+  it('returns "unknown" when the keyword is absent or nothing follows it', () => {
+    expect(extractQualifiedName('SELECT 1;', /\bTABLE\s+/i)).toBe('unknown')
+    expect(extractQualifiedName('ALTER TABLE ', /\bTABLE\s+/i)).toBe('unknown')
   })
 })

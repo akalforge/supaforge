@@ -1,5 +1,6 @@
 import { dim, cmd } from './ui.js'
 import type { CheckName } from './types/drift.js'
+import { CLONE_SKIP_FLAGS } from './defaults.js'
 
 // ─── Context ──────────────────────────────────────────────────────────────────
 
@@ -91,7 +92,7 @@ function diffTips(ctx: TipContext): Tip[] {
       tips.push({ text: `Focus on one layer: ${cmd(`--check=${driftedChecks[0]}`)} to see just that check.` })
     }
     if (skippedChecks.length === 0) {
-      tips.push({ text: `Post-clone? Use ${cmd('--skip=storage --skip=auth --skip=vault')} to suppress Supabase-only noise.` })
+      tips.push({ text: `Post-clone? Use ${cmd(CLONE_SKIP_FLAGS)} to suppress clone-only noise, roles and grants included.` })
     }
   } else if (driftTotal > 0 && detail) {
     // Detail mode with drift
@@ -119,7 +120,7 @@ function cloneTips(ctx: TipContext): Tip[] {
   // Post-clone: most important tip is about skipping non-Postgres checks
   return [
     {
-      text: `Diff against this clone with: ${cmd('supaforge diff --skip=storage --skip=auth --skip=edge-functions --skip=vault --skip=realtime')} — or add ${cmd('"checks": { "exclude": [...] }')} to config to make it permanent.`,
+      text: `Diff against this clone with: ${cmd(`supaforge diff ${CLONE_SKIP_FLAGS}`)} — or add ${cmd('"checks": { "exclude": [...] }')} to config to make it permanent.`,
     },
     { text: `Restore from a snapshot any time: ${cmd('supaforge restore --env=local --from-snapshot=latest --apply')}.` },
     { text: `Run ${cmd('supaforge snapshot')} on the remote after a deploy to track incremental drift.` },

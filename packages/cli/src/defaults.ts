@@ -36,3 +36,29 @@ export const INIT_HINTS = {
 
 /** Error fragment for a relation that simply doesn't exist (expected for optional features). */
 export const RELATION_NOT_FOUND = 'does not exist'
+
+/**
+ * The checks a local clone can only report noise for.
+ *
+ * A clone is vanilla PostgreSQL restored from a pg_dump: the Supabase-managed
+ * layers have no local equivalent, and Postgres Roles & Grants is the same
+ * story — Supabase's service roles do not exist on a plain server, so every
+ * one of them reads as drift. On the diff that prompted issue #47 that was 227
+ * findings, all of them clone artefacts, confirmed by a remote-to-remote diff
+ * reporting zero.
+ *
+ * One list because the same advice was written out by hand in three places and
+ * had already drifted into three different answers. Roles was in none of them:
+ * it arrived as Layer 14, after the clone advice was written for a 13-layer set.
+ */
+export const CLONE_NOISE_CHECKS = [
+  'storage',
+  'auth',
+  'edge-functions',
+  'vault',
+  'realtime',
+  'roles',
+] as const
+
+/** The `--skip=` flags that suppress clone-only noise, as one command fragment. */
+export const CLONE_SKIP_FLAGS = CLONE_NOISE_CHECKS.map(c => `--skip=${c}`).join(' ')

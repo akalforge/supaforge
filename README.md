@@ -363,7 +363,7 @@ run prints what it is scoped to before it starts.
 SUPAFORGE_DBDIFF_TIMEOUT=600 SUPAFORGE_DBDIFF_MEMORY=2G supaforge diff
 ```
 
-`checks.exclude` permanently skips the listed checks on every `diff`/`hukam`/`sync` run — useful when diffing against a clone where checks like `storage`, `auth`, `edge-functions`, `vault`, and `realtime` have no local equivalent and produce only noise. The `--skip` CLI flag does the same on a one-off basis; both are merged at runtime.
+`checks.exclude` permanently skips the listed checks on every `diff`/`hukam`/`sync` run — useful when diffing against a clone, where `storage`, `auth`, `edge-functions`, `vault`, `realtime` and `roles` have no local equivalent and produce only noise. Roles is easy to overlook and is the second-largest source of it: a clone is vanilla PostgreSQL, so Supabase's service roles do not exist and every grant referencing one reads as drift. The `--skip` CLI flag does the same on a one-off basis; both are merged at runtime.
 
 ## Extending with Hooks
 

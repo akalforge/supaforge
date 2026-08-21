@@ -503,10 +503,19 @@ supaforge diff
 
 ### Diffing a Clone (Suppressing Expected Noise)
 
-After `supaforge clone`, the local copy has no Supabase-managed services (`storage`, `auth`, `edge-functions`, `vault`, `realtime`). Running `diff` against it will always report drift on those checks. Use `--skip` to suppress them:
+After `supaforge clone`, the local copy has no Supabase-managed services
+(`storage`, `auth`, `edge-functions`, `vault`, `realtime`) — and, because it is
+vanilla PostgreSQL, none of Supabase's service roles either, so **Postgres Roles
+& Grants** (`roles`) reports every grant referencing one as drift. On a real
+clone → remote diff that was 227 findings, the second-largest source of clone
+noise after schema; a remote-to-remote diff of the same pair reports zero,
+confirming all of them are clone artefacts.
+
+Running `diff` against a clone will always report drift on those six checks. Use
+`--skip` to suppress them:
 
 ```bash
-supaforge diff --skip=storage --skip=auth --skip=edge-functions --skip=vault --skip=realtime
+supaforge diff --skip=storage --skip=auth --skip=edge-functions --skip=vault --skip=realtime --skip=roles
 ```
 
 Or lock the exclusions in config so you never have to repeat them:
@@ -514,7 +523,7 @@ Or lock the exclusions in config so you never have to repeat them:
 ```json
 {
   "checks": {
-    "exclude": ["storage", "auth", "edge-functions", "vault", "realtime"]
+    "exclude": ["storage", "auth", "edge-functions", "vault", "realtime", "roles"]
   }
 }
 ```

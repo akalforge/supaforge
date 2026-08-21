@@ -1,7 +1,17 @@
 import type { EnvironmentConfig, SupaForgeConfig } from '../types/config'
+import type { TableFilter } from '../utils/table-filter'
 import type { DriftIssue, CheckName } from '../types/drift'
 
 export interface CheckContext {
+  /**
+   * Which tables this run is scoped to, resolved from `checks.tables` /
+   * `checks.excludeTables` and the `--tables` / `--exclude-tables` flags.
+   *
+   * Only the schema and data layers act on it — they are the ones backed by
+   * @dbdiff/cli, which is where the table concept exists (issue #43). Absent
+   * or empty means every table, which is the default.
+   */
+  tableFilter?: TableFilter
   /**
    * Optional sink for sub-check progress, e.g. the table counter emitted
    * during a long schema diff (issue #29). Checks that have nothing

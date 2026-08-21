@@ -3,6 +3,7 @@ import { CheckSkipped } from '../../src/checks/base.js'
 import { SchemaCheck } from '../../src/checks/schema.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { RunDbDiffFn } from '../../src/checks/schema.js'
+import type { DbDiffOptions } from '../../src/dbdiff.js'
 import type { QueryFn } from '../../src/db.js'
 
 function mockContext(): CheckContext {
@@ -214,5 +215,65 @@ describe('SchemaCheck', () => {
 
     // The main diff result is still returned despite queryFn failure
     expect(issues).toHaveLength(1)
+  })
+})
+
+// ─── issue #43: scoping the comparison to specific tables ───────────────────
+
+describe('SchemaCheck honours the table filter (issue #43)', () => {
+  function capture(): { calls: DbDiffOptions[]; runFn: RunDbDiffFn } {
+    const calls: DbDiffOptions[] = []
+    const runFn: RunDbDiffFn = async (opts) => {
+      calls.push(opts)
+      return { up: '', down: '' }
+    }
+    return { calls, runFn }
+  }
+
+  it('forwards the include list to dbdiff rather than filtering afterwards', async () => {
+    // DbDiffOptions.tables was already forwarded to --tables; nothing populated
+    // it, so the capability was unreachable from outside.
+    const { calls, runFn } = capture()
+    await new SchemaCheck(runFn, noTablesQuery).scan({
+      ...mockContext(),
+      tableFilter: { tables: ['orders', 'order_items'] },
+    })
+    expect(calls[0].tables).toEqual(['orders', 'order_items'])
+  })
+
+  it('forwards the exclude list as ignoreTables', async () => {
+    const { calls, runFn } = capture()
+    await new SchemaCheck(runFn, noTablesQuery).scan({
+      ...mockContext(),
+      tableFilter: { excludeTables: ['*_audit'] },
+    })
+    expect(calls[0].ignoreTables).toEqual(['*_audit'])
+  })
+
+  it('passes both together', async () => {
+    const { calls, runFn } = capture()
+    await new SchemaCheck(runFn, noTablesQuery).scan({
+      ...mockContext(),
+      tableFilter: { tables: ['billing_*'], excludeTables: ['*_audit'] },
+    })
+    expect(calls[0].tables).toEqual(['billing_*'])
+    expect(calls[0].ignoreTables).toEqual(['*_audit'])
+  })
+
+  it('omits both when unfiltered, so the default still compares everything', async () => {
+    const { calls, runFn } = capture()
+    await new SchemaCheck(runFn, noTablesQuery).scan(mockContext())
+    expect(calls[0].tables).toBeUndefined()
+    expect(calls[0].ignoreTables).toBeUndefined()
+  })
+
+  it('leaves ignoreSchemas alone — schema and table filtering are separate', async () => {
+    const { calls, runFn } = capture()
+    await new SchemaCheck(runFn, noTablesQuery).scan({
+      ...mockContext(),
+      tableFilter: { excludeTables: ['*_audit'] },
+    })
+    expect(calls[0].ignoreSchemas).toBeDefined()
+    expect(calls[0].ignoreSchemas).not.toContain('*_audit')
   })
 })

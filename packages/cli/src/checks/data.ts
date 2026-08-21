@@ -4,6 +4,7 @@ import { filterChangedTables } from '../checksum'
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import { Check, CheckSkipped, type CheckContext } from './base'
+import { applyTableFilter } from '../utils/table-filter'
 
 export type RunDbDiffFn = (options: DbDiffOptions) => ReturnType<typeof runDbDiff>
 
@@ -27,10 +28,19 @@ export class DataCheck extends Check {
   }
 
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
-    const tables = ctx.config.checks?.data?.tables
+    const configured = ctx.config.checks?.data?.tables
     // Nothing configured to compare is a skip, not a clean comparison — this
     // layer reported a green pass having read nothing at all (issue #42).
-    if (!tables?.length) throw new CheckSkipped('no tables configured in checks.data.tables')
+    if (!configured?.length) throw new CheckSkipped('no tables configured in checks.data.tables')
+
+    // Narrowed here rather than through dbdiff's --tables, because this check
+    // picks its tables from config and fingerprints them before dbdiff is
+    // invoked (issue #43). A filter that excludes all of them is a skip, not a
+    // clean pass — the same distinction #42 drew.
+    const tables = applyTableFilter(configured, ctx.tableFilter)
+    if (tables.length === 0) {
+      throw new CheckSkipped('no configured data tables match the --tables / --exclude-tables filter')
+    }
 
     // Fast fingerprint check — skip tables that haven't changed
     const { changed } = await filterChangedTables(

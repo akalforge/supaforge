@@ -11,6 +11,7 @@ import { ok, warn, dim, cmd } from '../ui.js'
 import { sanitizeForReport } from '../utils/sanitize.js'
 import { renderTip } from '../tips.js'
 import { formatGitHubAnnotations, computeCiExitCode, formatCiSummary, type FailOn } from '../ci.js'
+import { resolveTableFilter, isFiltered, describeTableFilter } from '../utils/table-filter.js'
 
 /**
  * Glyph and text for a finished check, so the three outcomes are visually
@@ -47,6 +48,9 @@ export default class Diff extends BaseCommand {
     '<%= config.bin %> diff --check=rls --apply',
     '<%= config.bin %> diff --source=staging --target=production',
     '<%= config.bin %> diff --skip=storage --skip=vault',
+    '<%= config.bin %> diff --tables=orders,order_items',
+    "<%= config.bin %> diff --tables='billing_*' --exclude-tables='*_audit'",
+    '<%= config.bin %> diff --tables=orders --detail',
     '<%= config.bin %> diff --skip=auth --skip=edge-functions --skip=realtime',
     '<%= config.bin %> diff --ci',
     '<%= config.bin %> diff --ci --fail-on=warning',
@@ -92,6 +96,14 @@ export default class Diff extends BaseCommand {
       description: 'Include file-level drift detection in storage check',
       default: false,
     }),
+    tables: Flags.string({
+      description: 'Only compare these tables in the schema and data checks (repeatable, comma-separated, globs allowed). Overrides checks.tables.',
+      multiple: true,
+    }),
+    'exclude-tables': Flags.string({
+      description: 'Never compare these tables (repeatable, comma-separated, globs allowed). Merged with checks.excludeTables.',
+      multiple: true,
+    }),
     json: Flags.boolean({ description: 'Output results as JSON' }),
     source: Flags.string({ char: 's', description: 'Source environment name' }),
     target: Flags.string({ char: 't', description: 'Target environment name' }),
@@ -115,6 +127,17 @@ export default class Diff extends BaseCommand {
     const registry = createDefaultRegistry({ includeFiles: flags['include-files'] })
     const checks = flags.check ? [flags.check as CheckName] : undefined
     const skip = flags.skip?.length ? (flags.skip as CheckName[]) : undefined
+
+    const tableFilter = resolveTableFilter(config, {
+      tables: flags.tables,
+      excludeTables: flags['exclude-tables'],
+    })
+
+    // Stated up front: a narrowed run must not look like a full one, and with
+    // --apply the difference is which statements actually execute (issue #43).
+    if (isFiltered(tableFilter) && !flags.json && !flags.ci) {
+      this.log(`\n  ${dim(describeTableFilter(tableFilter)!)}`)
+    }
 
     // ── Preflight: verify both databases are reachable ────────────────────────
     if (!flags.json && !flags.ci) {
@@ -166,7 +189,7 @@ export default class Diff extends BaseCommand {
     // ── Apply mode (was: promote) ───────────────────────────────────────────────
     if (flags.apply) {
       const onProgress = makeProgress()
-      const scanResult = await scan(registry, { config, checks, skip, onProgress, onDetail: makeDetail() })
+      const scanResult = await scan(registry, { config, checks, skip, tableFilter, onProgress, onDetail: makeDetail() })
       this.setCheckSummaries(scanResult.checks.map(c => ({
         check: c.check,
         status: c.status,
@@ -228,7 +251,7 @@ export default class Diff extends BaseCommand {
 
     // ── Scan mode (summary, detail, CI, or JSON) ────────────────────────────
     const onProgress = makeProgress()
-    const result = await scan(registry, { config, checks, skip, onProgress, onDetail: makeDetail() })
+    const result = await scan(registry, { config, checks, skip, tableFilter, onProgress, onDetail: makeDetail() })
     this.setCheckSummaries(result.checks.map(c => ({
       check: c.check,
       status: c.status,

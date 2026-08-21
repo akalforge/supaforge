@@ -27,12 +27,25 @@ export type AuthSource =
  */
 export function resolveAuthSource(env: EnvironmentConfig): AuthSource | null {
   if (env.apiUrl && env.accessToken) {
-    return { kind: 'self-hosted', apiUrl: env.apiUrl.replace(/\/+$/, ''), key: env.accessToken }
+    return { kind: 'self-hosted', apiUrl: stripTrailingSlashes(env.apiUrl), key: env.accessToken }
   }
   if (env.projectRef && env.accessToken) {
     return { kind: 'hosted', ref: env.projectRef, token: env.accessToken }
   }
   return null
+}
+
+/**
+ * Trim trailing slashes so the path is not doubled.
+ *
+ * Scanned rather than matched with /\/+$/, whose repeated group backtracks
+ * super-linearly on a long run of slashes. The value comes from user config,
+ * so it is worth not having the sharp edge at all.
+ */
+function stripTrailingSlashes(url: string): string {
+  let end = url.length
+  while (end > 0 && url[end - 1] === '/') end--
+  return url.slice(0, end)
 }
 
 /**

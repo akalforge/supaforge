@@ -63,6 +63,41 @@ export function splitCounts(result: Pick<ScanResult, 'checks'>): { drift: number
   return { drift, posture }
 }
 
+/** Colour a 0–100 score green / amber / red. */
+function colorScore(score: number): string {
+  let style: Parameters<typeof c>[0] = 'red'
+  if (score >= 80) style = 'green'
+  else if (score >= 50) style = 'yellow'
+  return c(style, `${score}/100`)
+}
+
+interface HeadlineCounts {
+  drift: number
+  noun: string
+  driftedCount: number
+  checkNoun: string
+  erroredCount: number
+  erroredNoun: string
+}
+
+/**
+ * The one-line verdict.
+ *
+ * Drift wins over an error, and an error wins over silence: a check that could
+ * not run measured nothing, so "no drift detected" would be a claim the scan
+ * never earned (issue #29).
+ */
+function formatHeadline(counts: HeadlineCounts): string {
+  const prefix = bold('SupaForge scan complete:')
+  if (counts.drift > 0) {
+    return `${prefix} ${warn(`${counts.drift} drift ${counts.noun}`)} found across ${counts.driftedCount} ${counts.checkNoun}.`
+  }
+  if (counts.erroredCount > 0) {
+    return `${prefix} ${warn(`${counts.erroredCount} ${counts.erroredNoun} could not complete`)} — drift is unknown.`
+  }
+  return `${prefix} ${ok('no drift detected. ✓')}`
+}
+
 export function renderSummary(result: ScanResult): string {
   const lines: string[] = ['']
 
@@ -86,17 +121,7 @@ export function renderSummary(result: ScanResult): string {
   const skippedCount = countSkipped(result)
   const skippedNoun = skippedCount === 1 ? 'check was' : 'checks were'
 
-  if (drift > 0) {
-    lines.push(
-      `${bold('SupaForge scan complete:')} ${warn(`${drift} drift ${noun}`)} found across ${driftedCount} ${checkNoun}.`,
-    )
-  } else if (erroredCount > 0) {
-    lines.push(
-      `${bold('SupaForge scan complete:')} ${warn(`${erroredCount} ${erroredNoun} could not complete`)} — drift is unknown.`,
-    )
-  } else {
-    lines.push(`${bold('SupaForge scan complete:')} ${ok('no drift detected. ✓')}`)
-  }
+  lines.push(formatHeadline({ drift, noun, driftedCount, checkNoun, erroredCount, erroredNoun }))
 
   // Named as what they are, so they cannot be read as the environments having
   // diverged. They are reported and scored, just not as drift.
@@ -121,16 +146,14 @@ export function renderSummary(result: ScanResult): string {
   }
 
   lines.push('')
-  const scoreColor = result.score >= 80 ? 'green' : result.score >= 50 ? 'yellow' : 'red'
   // The denominator the score was computed over, so 100/100 across a partial
   // run cannot be mistaken for a full comparison (issue #42).
   const { compared, total } = coverage(result)
   const coverageNote = compared === total ? '' : dim(` (${compared} of ${total} checks compared)`)
-  lines.push(`${dim('Drift score:')} ${c(scoreColor as Parameters<typeof c>[0], `${result.score}/100`)}${coverageNote}`)
+  lines.push(`${dim('Drift score:')} ${colorScore(result.score)}${coverageNote}`)
 
   if (result.postureScore !== null && result.postureScore !== undefined) {
-    const pColor = result.postureScore >= 80 ? 'green' : result.postureScore >= 50 ? 'yellow' : 'red'
-    lines.push(`${dim('Posture score:')} ${c(pColor as Parameters<typeof c>[0], `${result.postureScore}/100`)}${dim(' (target only — RLS coverage, migration history)')}`)
+    lines.push(`${dim('Posture score:')} ${colorScore(result.postureScore)}${dim(' (target only — RLS coverage, migration history)')}`)
   }
   lines.push('')
 
@@ -201,10 +224,18 @@ function formatCheckLine(lr: CheckResult): string {
   return `${prefix.padEnd(CHECK_LINE_PADDING)}${count} ${noun}${sevLabel}${errLabel}`
 }
 
+/** Glyph for an issue's severity. */
+function severityIcon(severity: DriftIssue['severity']): string {
+  switch (severity) {
+    case 'critical': return c('red', '✖')
+    case 'warning': return warn('⚠')
+    default: return c('blue', 'ℹ')
+  }
+}
+
 function formatIssue(issue: DriftIssue): string {
   const lines: string[] = []
-  const sevIcon = issue.severity === 'critical' ? c('red', '✖') : issue.severity === 'warning' ? warn('⚠') : c('blue', 'ℹ')
-  lines.push(`  ${sevIcon} ${colorSeverity(issue.severity)} ${bold(issue.title)}`)
+  lines.push(`  ${severityIcon(issue.severity)} ${colorSeverity(issue.severity)} ${bold(issue.title)}`)
   lines.push(`    ${dim(issue.description)}`)
 
   if (issue.sql) {

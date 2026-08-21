@@ -289,6 +289,9 @@ describe('normalizeGoTrueSettings', () => {
 describe('AuthCheck against self-hosted Supabase (issue #41)', () => {
   const selfHosted = (apiUrl: string) => ({ dbUrl: 'postgres://x', apiUrl, projectRef: 'my-project', accessToken: 'service-key' })
 
+  /** Which of the two fake gateways a request went to, matched on host. */
+  const isSourceGateway = (url: string): boolean => new URL(url).host === 'a.example.com'
+
   function selfHostedContext(): CheckContext {
     return {
       source: selfHosted('https://a.example.com'),
@@ -314,7 +317,10 @@ describe('AuthCheck against self-hosted Supabase (issue #41)', () => {
       'https://a.example.com/auth/v1/settings',
       'https://b.example.com/auth/v1/settings',
     ])
-    expect(urls.some(u => u.includes('api.supabase.com'))).toBe(false)
+    // Host compared exactly rather than by substring: `includes` would also
+    // pass for `api.supabase.com.evil.test`, which is the opposite of what
+    // this asserts.
+    expect(urls.map(u => new URL(u).host)).toEqual(['a.example.com', 'b.example.com'])
   })
 
   it('authenticates with the service-role key in both headers', async () => {
@@ -332,7 +338,7 @@ describe('AuthCheck against self-hosted Supabase (issue #41)', () => {
   it('detects real drift between two self-hosted deployments', async () => {
     const fetchFn: FetchFn = async (url) => ({
       ok: true,
-      json: async () => ({ external: { email: url.includes('a.example.com'), phone: true } }),
+      json: async () => ({ external: { email: isSourceGateway(url), phone: true } }),
     } as Response)
 
     const issues = await new AuthCheck(fetchFn).scan(selfHostedContext())
@@ -352,7 +358,7 @@ describe('AuthCheck against self-hosted Supabase (issue #41)', () => {
     // Attaching a hosted PATCH would hand --apply a request that cannot succeed.
     const fetchFn: FetchFn = async (url) => ({
       ok: true,
-      json: async () => ({ external: { email: url.includes('a.example.com') } }),
+      json: async () => ({ external: { email: isSourceGateway(url) } }),
     } as Response)
 
     const issues = await new AuthCheck(fetchFn).scan(selfHostedContext())

@@ -51,10 +51,15 @@ export class StorageCheck extends Check {
       this.hasStorageSchema(ctx.target.dbUrl),
     ])
     if (!srcHasStorage || !tgtHasStorage) {
+      // Name the side, and say what to do about it: "not a Supabase project"
+      // alone leaves the reader wondering whether they misconfigured something.
       const which = !srcHasStorage && !tgtHasStorage ? 'neither environment has'
         : !srcHasStorage ? 'the source does not have'
         : 'the target does not have'
-      throw new CheckSkipped(`${which} a storage schema — not a Supabase project`)
+      throw new CheckSkipped(
+        `${which} a storage schema — not a Supabase project. `
+        + 'Skip this check explicitly with --skip=storage to keep runs quiet.',
+      )
     }
 
     const bucketIssues = await this.scanBuckets(ctx)

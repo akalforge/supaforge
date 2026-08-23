@@ -121,6 +121,23 @@ describe('friendlyDbError', () => {
     expect(msg).toContain('localhost:5432')
   })
 
+  it('does not mistake an unrelated "does not exist" for a missing database', () => {
+    // dbdiff prints this when SupaForge passes a flag its version lacks. The
+    // old bare /does not exist/ pattern rewrote it into "Database does not
+    // exist on localhost:5432", pointing at a database name that was fine and
+    // hiding the real cause (an outdated @dbdiff/cli).
+    const err = new Error('The "--allow-destructive" option does not exist.')
+    const msg = friendlyDbError(err, dbUrl)
+    expect(msg).not.toContain('Database does not exist')
+    expect(msg).toContain('--allow-destructive')
+  })
+
+  it('does not mistake a missing relation for a missing database', () => {
+    const err = new Error('relation "customers" does not exist')
+    const msg = friendlyDbError(err, dbUrl)
+    expect(msg).not.toContain('Database does not exist')
+  })
+
   it('translates SSL/pg_hba errors', () => {
     const err = new Error('no pg_hba.conf entry for host "1.2.3.4"')
     const msg = friendlyDbError(err, dbUrl)

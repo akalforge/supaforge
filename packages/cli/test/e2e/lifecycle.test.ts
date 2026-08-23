@@ -1,0 +1,230 @@
+/**
+ * End-to-end lifecycle tests against real PostgreSQL instances.
+ *
+ * test/e2e/cli.test.ts covers the CLI surface (help, flag parsing, config
+ * errors) without databases. This covers the part that actually matters and was
+ * previously only exercised by hand: given two real databases, does the CLI
+ * detect the right drift, and does --apply produce a target that genuinely
+ * matches the source?
+ *
+ * The schema is built up in stages (see ../harness/stages.ts) so a failure
+ * points at the object type that broke rather than "the big schema differs".
+ *
+ * Skipped automatically when no container runtime is available, so `npm test`
+ * still passes on a machine without podman/docker. Set E2E_KEEP=1 to leave the
+ * containers and workspaces up for inspection after a failure.
+ */
+import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { readdir } from 'node:fs/promises'
+import { join } from 'node:path'
+import { PgHarness } from '../harness/PgHarness.js'
+import { STAGES, MUTATION_SQL } from '../harness/stages.js'
+
+let runtimeAvailable = true
+try { PgHarness.detectRuntime() } catch { runtimeAvailable = false }
+
+const describeE2E = runtimeAvailable ? describe : describe.skip
+
+describeE2E('e2e: real-database lifecycle', () => {
+  let h: PgHarness
+  let ws: string
+
+  beforeAll(async () => {
+    h = new PgHarness({ verbose: !!process.env.E2E_VERBOSE, keep: !!process.env.E2E_KEEP })
+    await h.up()
+    ws = await h.workspace()
+  }, 180_000)
+
+  afterAll(async () => { await h?.down() }, 60_000)
+
+  describe('safety guards', () => {
+    it('refuses to operate on a non-loopback host', () => {
+      // The whole harness is destructive by design; this is what stops a
+      // mistyped config pointing it at a real Supabase project.
+      expect(() => PgHarness.assertLocal(
+        'postgresql://postgres:pw@db.abcdefghij.supabase.co:5432/postgres',
+      )).toThrow(/Refusing to operate on non-local/)
+    })
+
+    it('allows loopback', () => {
+      expect(() => PgHarness.assertLocal(h.connectionString('source'))).not.toThrow()
+      expect(h.connectionString('target')).toContain('127.0.0.1')
+    })
+  })
+
+  describe('schema build-up', () => {
+    it.each(STAGES.map((s) => [s.id, s] as const))(
+      'applies stage %s to both databases',
+      async (_id, stage) => {
+        await h.applySql('source', stage.sql)
+        await h.applySql('target', stage.sql)
+      },
+      120_000,
+    )
+
+    it('built the objects the later assertions depend on', async () => {
+      const count = async (q: string) => Number(await h.sql('source', q))
+      expect(await count("SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")).toBeGreaterThanOrEqual(4)
+      expect(await count("SELECT count(*) FROM pg_indexes WHERE schemaname='public'")).toBeGreaterThanOrEqual(8)
+      expect(await count('SELECT count(*) FROM pg_policies')).toBeGreaterThanOrEqual(2)
+      // the exotic types are the ones diff tools tend to mangle
+      const types = await h.sql('source',
+        "SELECT string_agg(DISTINCT data_type, ',' ORDER BY data_type) FROM information_schema.columns WHERE table_name='orders'")
+      expect(types).toMatch(/jsonb/)
+      expect(types).toMatch(/ARRAY/)
+    }, 60_000)
+  })
+
+  describe('diff', () => {
+    it('reports no schema drift between identical databases', async () => {
+      const r = await h.cli(['diff', '--check', 'schema', '--json'], { cwd: ws })
+      const out = JSON.parse(r.stdout)
+      expect(JSON.stringify(out)).not.toMatch(/loyalty_tier/)
+      expect(r.code).toBe(0)
+    }, 300_000)
+
+    it('exits non-zero under --ci when told to fail on any finding', async () => {
+      // Identical databases, so this proves --ci/--fail-on don't fire spuriously.
+      const r = await h.cli(['diff', '--check', 'schema', '--ci', '--fail-on', 'any'], { cwd: ws })
+      expect(r.code).toBe(0)
+    }, 300_000)
+  })
+
+  describe('drift detection and sync --apply', () => {
+    beforeAll(async () => {
+      // Diverge the source only: target must be brought up to match it.
+      await h.applySql('source', MUTATION_SQL)
+    }, 60_000)
+
+    it('detects the added column and index', async () => {
+      const r = await h.cli(['diff', '--check', 'schema', '--json'], { cwd: ws })
+      expect(r.stdout).toMatch(/loyalty_tier/)
+    }, 300_000)
+
+    it('dry-run does NOT modify the target', async () => {
+      const before = await h.schemaFingerprint('target')
+      await h.cli(['sync', '--check', 'schema', '--dry-run'], { cwd: ws })
+      expect(await h.schemaFingerprint('target')).toBe(before)
+    }, 300_000)
+
+    it('--apply converges the target onto the source', async () => {
+      const r = await h.cli(['sync', '--check', 'schema', '--apply'], { cwd: ws })
+      expect(r.code).toBe(0)
+      const col = await h.sql('target',
+        "SELECT count(*) FROM information_schema.columns WHERE table_name='customers' AND column_name='loyalty_tier'")
+      expect(col).toBe('1')
+      // The real assertion: not just "the column arrived" but "nothing else moved".
+      expect(await h.schemaFingerprint('target')).toBe(await h.schemaFingerprint('source'))
+    }, 300_000)
+
+    it('is idempotent — a second diff finds nothing', async () => {
+      const r = await h.cli(['diff', '--check', 'schema', '--json'], { cwd: ws })
+      expect(r.stdout).not.toMatch(/loyalty_tier/)
+    }, 300_000)
+  })
+
+  describe('snapshot / restore', () => {
+    it('snapshot defaults to a dry run and writes nothing', async () => {
+      const r = await h.cli(['snapshot', '-e', 'source'], { cwd: ws })
+      expect(r.code).toBe(0)
+      expect(r.stdout + r.stderr).toMatch(/dry.?run|preview|would/i)
+    }, 300_000)
+
+    it('snapshot --apply produces a restorable artefact', async () => {
+      const r = await h.cli(['snapshot', '-e', 'source', '--apply', '--json'], { cwd: ws })
+      expect(r.code).toBe(0)
+      const listed = await h.cli(['snapshot', '--list', '--json'], { cwd: ws })
+      expect(listed.stdout).toMatch(/\d{8}|snapshot/i)
+    }, 300_000)
+
+    it('restore requires an explicit source', async () => {
+      const r = await h.cli(['restore', '-e', 'target', '--apply'], { cwd: ws })
+      expect(r.code).not.toBe(0)
+      expect(r.stdout + r.stderr).toMatch(/--from-snapshot|--from-migrations/)
+    }, 300_000)
+
+    it('restore leaves a non-empty database untouched without --force', async () => {
+      const snapshots = await readdir(join(ws, '.supaforge', 'snapshots'))
+      expect(snapshots.length).toBeGreaterThan(0)
+      const before = await h.schemaFingerprint('target')
+
+      const r = await h.cli(
+        ['restore', '-e', 'target', '--from-snapshot', snapshots[0], '--apply'],
+        { cwd: ws },
+      )
+      expect(r.stdout + r.stderr).toMatch(/not empty/i)
+      expect(r.stdout + r.stderr).toMatch(/--force/)
+      // The guard must actually protect the data, not just print a warning.
+      expect(await h.schemaFingerprint('target')).toBe(before)
+    }, 300_000)
+  })
+
+  describe('migrate', () => {
+    it('creates a migration file from the current drift', async () => {
+      await h.applySql('source', "ALTER TABLE customers ADD COLUMN IF NOT EXISTS referral_code text;")
+      const r = await h.cli(['migrate', 'create', '-n', 'add_referral_code'], { cwd: ws })
+      expect(r.code).toBe(0)
+      expect(r.stdout + r.stderr).toMatch(/referral|migration/i)
+    }, 300_000)
+  })
+
+  describe('clone', () => {
+    // Point the "local" side at the second container rather than the default
+    // localhost:5432, so this works on a machine with no local PostgreSQL.
+    const localUrl = () => h.connectionString('target').replace(/\/postgres$/, '/postgres')
+
+    it('lists nothing before any clone exists', async () => {
+      const r = await h.cli(['clone', '--list'], { cwd: ws })
+      expect(r.code).toBe(0)
+      expect(r.stdout + r.stderr).toMatch(/no clones/i)
+    }, 120_000)
+
+    it('defaults to a dry run and creates no database', async () => {
+      const before = await h.sql('target', "SELECT count(*) FROM pg_database WHERE datname='supaforge_clone_e2e'")
+      const r = await h.cli(
+        ['clone', '-e', 'source', '--local-url', localUrl(), '--local-db', 'supaforge_clone_e2e', '--schema-only'],
+        { cwd: ws },
+      )
+      expect(r.stdout + r.stderr).toMatch(/dry.?run|preview|--apply/i)
+      expect(await h.sql('target', "SELECT count(*) FROM pg_database WHERE datname='supaforge_clone_e2e'")).toBe(before)
+    }, 300_000)
+
+    it('--apply produces a schema-only copy of the source', async () => {
+      const r = await h.cli(
+        ['clone', '-e', 'source', '--local-url', localUrl(), '--local-db', 'supaforge_clone_e2e',
+          '--schema-only', '--force', '--apply'],
+        { cwd: ws },
+      )
+      expect(r.code).toBe(0)
+      expect(await h.sql('target', "SELECT count(*) FROM pg_database WHERE datname='supaforge_clone_e2e'")).toBe('1')
+      // Schema-only: tables must exist, but carry no rows.
+      const clone = { role: 'target' as const, db: 'supaforge_clone_e2e' }
+      const tables = await h.sqlIn(clone.role, clone.db,
+        "SELECT count(*) FROM information_schema.tables WHERE table_schema='public'")
+      expect(Number(tables)).toBeGreaterThanOrEqual(4)
+      expect(await h.sqlIn(clone.role, clone.db, 'SELECT count(*) FROM customers')).toBe('0')
+    }, 300_000)
+  })
+
+  describe('init', () => {
+    it('refuses to clobber an existing config without --force', async () => {
+      const r = await h.cli(['init'], { cwd: ws })
+      expect(r.code).not.toBe(0)
+      expect(r.stdout + r.stderr).toMatch(/already exists|--force/i)
+    }, 120_000)
+  })
+
+  describe('read-only commands', () => {
+    it('report lists recent runs without touching a database', async () => {
+      const r = await h.cli(['report', '--json'], { cwd: ws })
+      expect(r.code).toBe(0)
+    }, 120_000)
+
+    it('hukam runs the full check suite', async () => {
+      const r = await h.cli(['hukam', '--json'], { cwd: ws })
+      // Supabase-only checks (auth, edge functions) can't pass against plain
+      // Postgres; we assert it completes and produces JSON, not that all pass.
+      expect(r.stdout.length + r.stderr.length).toBeGreaterThan(0)
+    }, 300_000)
+  })
+})

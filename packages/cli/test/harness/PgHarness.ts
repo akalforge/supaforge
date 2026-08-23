@@ -21,6 +21,8 @@
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 const exec = promisify(execFile);
@@ -45,12 +47,16 @@ export interface PgHarnessOptions {
   readyTimeoutSec?: number;
   /** Log container lifecycle to stderr. */
   verbose?: boolean;
+  /** Override the CLI entrypoint (defaults to the package's bin/run.js). */
+  cliEntry?: string;
 }
 
 export interface CliResult {
   code: number;
   stdout: string;
   stderr: string;
+  /** Working directory the command ran in — inspect .supaforge/ artefacts here. */
+  cwd: string;
 }
 
 export class PgHarness {
@@ -62,8 +68,10 @@ export class PgHarness {
   private readonly keep: boolean;
   private readonly readyTimeoutSec: number;
   private readonly verbose: boolean;
+  private readonly cliEntryOverride?: string;
   private readonly runId: string;
   private started: Role[] = [];
+  private workspaces: string[] = [];
 
   constructor(opts: PgHarnessOptions = {}) {
     this.runtime = opts.runtime ?? PgHarness.detectRuntime();
@@ -75,6 +83,7 @@ export class PgHarness {
     this.keep = opts.keep ?? false;
     this.readyTimeoutSec = opts.readyTimeoutSec ?? 60;
     this.verbose = opts.verbose ?? false;
+    this.cliEntryOverride = opts.cliEntry;
     this.runId = `sf-${process.pid}-${Math.random().toString(36).slice(2, 7)}`;
   }
 
@@ -159,11 +168,15 @@ export class PgHarness {
   }
 
   async down(): Promise<void> {
-    if (this.keep) { this.log('keep=true, leaving containers up'); return; }
+    if (this.keep) { this.log(`keep=true, leaving containers and workspaces (${this.workspaces.join(', ')})`); return; }
     for (const role of this.started) {
       await this.rt(['rm', '-f', this.name(role)]).catch(() => undefined);
     }
     this.started = [];
+    for (const dir of this.workspaces) {
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+    }
+    this.workspaces = [];
   }
 
   // ---- sql ---------------------------------------------------------------
@@ -173,6 +186,16 @@ export class PgHarness {
     const { stdout } = await this.rt([
       'exec', '-i', this.name(role),
       'psql', '-U', 'postgres', '-p', String(this.port(role)), '-d', this.database,
+      '-v', 'ON_ERROR_STOP=1', '-tAc', statement,
+    ]);
+    return stdout.trim();
+  }
+
+  /** Run SQL against a *different* database on the same instance (e.g. a clone). */
+  async sqlIn(role: Role, database: string, statement: string): Promise<string> {
+    const { stdout } = await this.rt([
+      'exec', '-i', this.name(role),
+      'psql', '-U', 'postgres', '-p', String(this.port(role)), '-d', database,
       '-v', 'ON_ERROR_STOP=1', '-tAc', statement,
     ]);
     return stdout.trim();
@@ -213,27 +236,52 @@ export class PgHarness {
 
   // ---- cli ---------------------------------------------------------------
 
-  /** Invoke the real SupaForge CLI with the harness connection strings. */
-  async cli(args: string[], env: Record<string, string> = {}): Promise<CliResult> {
-    // ESM: derive the package root from this module's URL.
-    const here = fileURLToPath(new URL('.', import.meta.url));
-    const cliEntry = join(here, '..', '..', 'dist', 'index.js');
+  /**
+   * Create a throwaway working directory containing a real supaforge.config.json
+   * pointing at the harness databases. Commands write `.supaforge/` (snapshots,
+   * migrations) relative to cwd, so each test gets its own directory rather than
+   * polluting the repo.
+   */
+  async workspace(overrides: Record<string, unknown> = {}): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'sf-ws-'));
+    const config = {
+      environments: {
+        source: { dbUrl: this.connectionString('source') },
+        target: { dbUrl: this.connectionString('target') },
+      },
+      source: 'source',
+      target: 'target',
+      ...overrides,
+    };
+    await writeFile(join(dir, 'supaforge.config.json'), JSON.stringify(config, null, 2) + '\n');
+    this.workspaces.push(dir);
+    return dir;
+  }
+
+  /**
+   * Invoke the real CLI the way a user would — the built dist entrypoint, in a
+   * workspace with a config file. Non-zero exits are returned rather than
+   * thrown, because "does this command fail cleanly?" is itself under test.
+   */
+  async cli(args: string[], opts: { cwd?: string; env?: Record<string, string> } = {}): Promise<CliResult> {
+    // Use the real oclif launcher (package.json "bin") rather than dist/index.js:
+    // the latter resolves no commands and exits 0 on everything, which would make
+    // every assertion here vacuously pass.
+    // test/harness/ -> packages/cli/
+    const cliEntry = this.cliEntryOverride
+      ?? join(fileURLToPath(new URL('.', import.meta.url)), '..', '..', 'bin', 'run.js');
+    const cwd = opts.cwd ?? (await this.workspace());
     try {
       const { stdout, stderr } = await exec('node', [cliEntry, ...args], {
-        env: {
-          ...process.env,
-          SUPAFORGE_SOURCE_URL: this.connectionString('source'),
-          SUPAFORGE_TARGET_URL: this.connectionString('target'),
-          NO_COLOR: '1',
-          ...env,
-        },
-        timeout: 180_000,
+        cwd,
+        env: { ...process.env, NO_COLOR: '1', FORCE_COLOR: '0', CI: '1', ...opts.env },
+        timeout: 300_000,
         maxBuffer: 20 * 1024 * 1024,
       });
-      return { code: 0, stdout, stderr };
+      return { code: 0, stdout, stderr, cwd };
     } catch (e: unknown) {
       const err = e as { code?: number; stdout?: string; stderr?: string; message?: string };
-      return { code: err.code ?? 1, stdout: err.stdout ?? '', stderr: err.stderr ?? err.message ?? '' };
+      return { code: err.code ?? 1, stdout: err.stdout ?? '', stderr: err.stderr ?? err.message ?? '', cwd };
     }
   }
 

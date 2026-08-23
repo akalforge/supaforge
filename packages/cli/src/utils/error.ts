@@ -126,7 +126,13 @@ const CONNECTION_ERROR_PATTERNS: Array<{ test: (msg: string) => boolean; build: 
     build: (host) => `Authentication failed for ${host} — check the username and password in your database URL.`,
   },
   {
-    test: (m) => /does not exist|database .* does not exist/i.test(m),
+    // Must stay anchored to "database ... does not exist" (Postgres SQLSTATE
+    // 3D000). A bare /does not exist/ is the same trap as the timeout pattern
+    // above: it matched dbdiff's own CLI complaint — The "--allow-destructive"
+    // option does not exist — and rewrote it into "Database does not exist on
+    // 127.0.0.1:5432", sending you off to check a database name that was fine
+    // while the real cause (an outdated @dbdiff/cli) went unmentioned.
+    test: (m) => /database\s+"[^"]*"\s+does not exist|3D000/i.test(m),
     build: (host) => `Database does not exist on ${host} — verify the database name in your config.`,
   },
   {

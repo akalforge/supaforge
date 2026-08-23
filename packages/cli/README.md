@@ -448,6 +448,39 @@ Higher-priority files win for duplicate keys. Existing `process.env` values are 
 
 See [`supaforge.config.example.jsonc`](supaforge.config.example.jsonc) and [`.env.example`](.env.example) for fully commented examples.
 
+## Exit Codes
+
+Every command follows the same contract, so a pipeline can branch on the exit
+code without parsing output:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Did what was asked — including when there was nothing to do |
+| `1` | Ran, but declined to act, found drift above the threshold, or an operation failed |
+| `2` | Could not run: a usage error, or (in `--ci`) a check that could not complete |
+
+The distinction that matters is between **0** and **1**. A command that refuses
+to act is not a success:
+
+```bash
+# Refused because the target is not empty — exits 1, so this does NOT deploy
+supaforge restore --env=prod --from-snapshot=latest --apply && ./deploy.sh
+```
+
+`--ci` gives `diff`, `sync` and `hukam` a stricter contract, with the drift
+threshold under your control:
+
+```bash
+supaforge diff --ci                      # 1 only on CRITICAL drift (default)
+supaforge diff --ci --fail-on=warning    # 1 on CRITICAL or WARNING
+supaforge diff --ci --fail-on=any        # 1 on any issue at all
+```
+
+In `--ci` mode a check that **could not complete** exits `2` rather than `0`,
+because unmeasured is not the same as clean. Outside `--ci` those commands
+report the problem in their output but keep their exit code, so existing
+non-CI callers are unaffected — use `--ci` when a script depends on the result.
+
 ## Workflows
 
 ### Multi-DB: Compare Two Environments (Remote ↔ Remote)

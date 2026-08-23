@@ -301,6 +301,54 @@ describeE2E('e2e: real-database lifecycle', () => {
     }, 120_000)
   })
 
+  // The exit code is the only thing a pipeline reads. Each case below is a row
+  // of the documented contract in README.md; if one changes, the contract has
+  // changed and the docs need to change with it.
+  //
+  // 0 = did what was asked (including "nothing to do")
+  // 1 = ran, but declined to act / found drift above threshold / an op failed
+  // 2 = could not run: usage error, or a check that could not complete (--ci)
+  describe('exit-code contract', () => {
+    it('0 when there is nothing to do', async () => {
+      const r = await h.cli(['diff', '--check', 'schema'], { cwd: ws })
+      expect(r.code).toBe(0)
+    }, 300_000)
+
+    it('0 for a dry run, which is a successful preview', async () => {
+      const r = await h.cli(['snapshot', '-e', 'source'], { cwd: ws })
+      expect(r.code).toBe(0)
+    }, 300_000)
+
+    it('1 when --apply is refused by a safety guard', async () => {
+      // The target is non-empty by this point, so restore must decline.
+      const snapshots = await readdir(join(ws, '.supaforge', 'snapshots'))
+      const before = await h.schemaFingerprint('target')
+
+      const r = await h.cli(
+        ['restore', '-e', 'target', '--from-snapshot', snapshots[0], '--apply'],
+        { cwd: ws },
+      )
+      expect(r.code).toBe(1)
+      expect(r.stdout + r.stderr).toMatch(/not empty/i)
+      // Refusing must still mean refusing: the data is untouched.
+      expect(await h.schemaFingerprint('target')).toBe(before)
+    }, 300_000)
+
+    it('2 for a usage error', async () => {
+      const r = await h.cli(['restore', '-e', 'target', '--apply'], { cwd: ws })
+      expect(r.code).toBe(2)
+      expect(r.stdout + r.stderr).toMatch(/--from-snapshot|--from-migrations/)
+    }, 300_000)
+
+    it('--ci --fail-on any is 0 on a clean comparison', async () => {
+      const r = await h.cli(
+        ['diff', '--check', 'schema', '--ci', '--fail-on', 'any'],
+        { cwd: ws },
+      )
+      expect(r.code).toBe(0)
+    }, 300_000)
+  })
+
   describe('read-only commands', () => {
     it('report lists recent runs without touching a database', async () => {
       const r = await h.cli(['report', '--json'], { cwd: ws })

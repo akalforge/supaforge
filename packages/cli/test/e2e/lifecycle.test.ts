@@ -168,6 +168,46 @@ describeE2E('e2e: real-database lifecycle', () => {
     }, 300_000)
   })
 
+  describe('creating objects that exist only on the source', () => {
+    // Until @dbdiff/cli 3.0.0-rc.8 this could not work at all: the generated
+    // CREATE TABLE carried two PRIMARY KEY clauses, a serial column referenced
+    // a sequence that was never created, and an enum column was emitted as the
+    // literal 'USER-DEFINED'. Each produced invalid SQL, so the whole migration
+    // aborted and nothing was applied. See DBDiff/DBDiff#190.
+    //
+    // The existing drift tests only ever ADD A COLUMN to a table both databases
+    // already have, which is why they never caught it.
+    it('creates a brand-new table with a primary key, serial and enum', async () => {
+      await h.applySql('source', `
+        CREATE TYPE shipment_state AS ENUM ('queued','sent','lost');
+        CREATE TABLE shipments (
+          id       serial PRIMARY KEY,
+          state    shipment_state NOT NULL DEFAULT 'queued',
+          courier  text NOT NULL,
+          CONSTRAINT shipments_courier_uq UNIQUE (courier)
+        );
+      `)
+
+      const r = await h.cli(['sync', '--check', 'schema', '--apply'], { cwd: ws })
+      expect(r.code).toBe(0)
+
+      // Assert the target's catalog, not the generated SQL: the point is that
+      // the table really exists and round-tripped faithfully.
+      expect(await h.sql('target',
+        "SELECT count(*) FROM information_schema.tables WHERE table_name='shipments'")).toBe('1')
+      expect(await h.sql('target',
+        "SELECT count(*) FROM information_schema.table_constraints WHERE table_name='shipments' AND constraint_type='PRIMARY KEY'")).toBe('1')
+      expect(await h.sql('target',
+        "SELECT column_default FROM information_schema.columns WHERE table_name='shipments' AND column_name='id'"))
+        .toBe("nextval('shipments_id_seq'::regclass)")
+      expect(await h.sql('target',
+        "SELECT udt_name FROM information_schema.columns WHERE table_name='shipments' AND column_name='state'"))
+        .toBe('shipment_state')
+
+      expect(await h.schemaFingerprint('target')).toBe(await h.schemaFingerprint('source'))
+    }, 300_000)
+  })
+
   describe('clone', () => {
     // Point the "local" side at the second container rather than the default
     // localhost:5432, so this works on a machine with no local PostgreSQL.

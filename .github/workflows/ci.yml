@@ -48,7 +48,7 @@ jobs:
 
       - name: Install MCP dependencies
         working-directory: packages/mcp
-        run: npm install
+        run: npm ci
 
       - name: Lint MCP (type-check)
         working-directory: packages/mcp

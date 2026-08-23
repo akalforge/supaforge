@@ -19,6 +19,7 @@
  *    destructive operations at a real Supabase project.
  */
 import { execFile, execFileSync, spawn } from 'node:child_process';
+import { createServer } from 'node:net';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { mkdtemp, writeFile, rm } from 'node:fs/promises';
@@ -35,7 +36,11 @@ export interface PgHarnessOptions {
   runtime?: Runtime;
   /** Postgres image. */
   image?: string;
-  /** Host ports for each role. */
+  /**
+   * Host ports for each role. Omit to have a free port chosen at startup, which
+   * is the default: fixed ports collide when suites run in parallel, and there
+   * is no reason to pin a listening port to a predictable value.
+   */
   ports?: { source: number; target: number };
   /** Leave containers running after down() — useful when debugging a failure. */
   keep?: boolean;
@@ -62,7 +67,7 @@ export interface CliResult {
 export class PgHarness {
   readonly runtime: Runtime;
   readonly image: string;
-  readonly ports: { source: number; target: number };
+  private resolvedPorts: { source: number; target: number } | null;
   readonly password: string;
   readonly database: string;
   private readonly keep: boolean;
@@ -76,8 +81,8 @@ export class PgHarness {
   constructor(opts: PgHarnessOptions = {}) {
     this.runtime = opts.runtime ?? PgHarness.detectRuntime();
     this.image = opts.image ?? 'docker.io/library/postgres:16-alpine';
-    // Default to high, unusual ports so we never collide with a real service.
-    this.ports = opts.ports ?? { source: 55432, target: 55433 };
+    // Resolved in up() when not supplied, so each run gets its own free ports.
+    this.resolvedPorts = opts.ports ?? null;
     this.password = opts.password ?? 'supaforge-test';
     this.database = opts.database ?? 'postgres';
     this.keep = opts.keep ?? false;
@@ -106,7 +111,28 @@ export class PgHarness {
   }
 
   port(role: Role): number {
-    return this.ports[role];
+    if (!this.resolvedPorts) {
+      throw new Error('Ports are assigned in up(); call it before asking for one.');
+    }
+    return this.resolvedPorts[role];
+  }
+
+  /**
+   * Ask the OS for a free port by binding to 0 and reading back what it gave
+   * us. There is a small race between closing the socket and the container
+   * binding it, which is acceptable for a test harness and far less
+   * collision-prone than hardcoding.
+   */
+  private static freePort(): Promise<number> {
+    return new Promise((resolve, reject) => {
+      const srv = createServer();
+      srv.once('error', reject);
+      srv.listen(0, '127.0.0.1', () => {
+        const addr = srv.address();
+        const port = typeof addr === 'object' && addr ? addr.port : 0;
+        srv.close(() => (port ? resolve(port) : reject(new Error('no port assigned'))));
+      });
+    });
   }
 
   /** libpq connection string for a role. Always loopback. */
@@ -132,6 +158,12 @@ export class PgHarness {
   // ---- lifecycle ----------------------------------------------------------
 
   async up(roles: Role[] = ['source', 'target']): Promise<void> {
+    if (!this.resolvedPorts) {
+      this.resolvedPorts = {
+        source: await PgHarness.freePort(),
+        target: await PgHarness.freePort(),
+      };
+    }
     for (const role of roles) {
       await this.startOne(role);
       this.started.push(role);

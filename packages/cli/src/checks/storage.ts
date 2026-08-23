@@ -4,7 +4,7 @@ import type { DriftIssue, SyncAction } from '../types/drift'
 import { sqlLiteral } from '../utils/sql'
 import { normalizeRoles } from '../utils/strings'
 import { scanStorageFiles, type ScanFilesOptions } from '../storage-files'
-import { Check, type CheckContext } from './base'
+import { Check, CheckSkipped, type CheckContext } from './base'
 
 interface StorageBucket {
   id: string
@@ -12,6 +12,12 @@ interface StorageBucket {
   public: boolean
   file_size_limit: number | null
   allowed_mime_types: string[] | null
+  /** Added by storage migration 0038. STANDARD | ANALYTICS | VECTOR. */
+  type?: string | null
+  /** Whether the storage API auto-detects AVIF for image transforms. */
+  avif_autodetection?: boolean | null
+  /** Added by storage migration 0018; supersedes the deprecated `owner`. */
+  owner_id?: string | null
 }
 
 interface StoragePolicy {
@@ -35,6 +41,22 @@ export class StorageCheck extends Check {
   }
 
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
+    // Comparing a Supabase project against a plain PostgreSQL database used to
+    // fail the whole layer with `relation "storage.buckets" does not exist`.
+    // An errored check reports drift as *unknown*, which is a worse outcome
+    // than saying plainly that one side has no storage to compare — and the
+    // auth check already handles the equivalent case by skipping (issue #42).
+    const [srcHasStorage, tgtHasStorage] = await Promise.all([
+      this.hasStorageSchema(ctx.source.dbUrl),
+      this.hasStorageSchema(ctx.target.dbUrl),
+    ])
+    if (!srcHasStorage || !tgtHasStorage) {
+      const which = !srcHasStorage && !tgtHasStorage ? 'neither environment has'
+        : !srcHasStorage ? 'the source does not have'
+        : 'the target does not have'
+      throw new CheckSkipped(`${which} a storage schema — not a Supabase project`)
+    }
+
     const bucketIssues = await this.scanBuckets(ctx)
     const policyIssues = await this.scanPolicies(ctx)
 
@@ -66,8 +88,23 @@ export class StorageCheck extends Check {
     return diffStoragePolicies(source, target)
   }
 
+  private async hasStorageSchema(dbUrl: string): Promise<boolean> {
+    const rows = await this.queryFn(dbUrl, STORAGE_PRESENT_SQL) as unknown as Array<{ present: boolean }>
+    return rows[0]?.present === true
+  }
+
+  /**
+   * Read the buckets, selecting only the columns this Supabase version actually
+   * has. storage.buckets has grown over time (owner_id in 0018, type in 0038),
+   * so a fixed column list either misses columns on a new instance or fails on
+   * an old one. Resolving them per-connection handles both.
+   */
   private async listBuckets(dbUrl: string): Promise<StorageBucket[]> {
-    return await this.queryFn(dbUrl, STORAGE_BUCKET_SQL) as unknown as StorageBucket[]
+    const present = await this.queryFn(dbUrl, BUCKET_COLUMNS_SQL) as unknown as Array<{ column_name: string }>
+    const names = new Set(present.map(r => r.column_name))
+    const cols = COMPARED_BUCKET_COLUMNS.filter(c => names.has(c))
+    const sql = `SELECT ${cols.join(', ')} FROM storage.buckets ORDER BY name`
+    return await this.queryFn(dbUrl, sql) as unknown as StorageBucket[]
   }
 
   private async fetchStoragePolicies(dbUrl: string): Promise<StoragePolicy[]> {
@@ -96,11 +133,35 @@ export class StorageCheck extends Check {
   }
 }
 
-/** Query storage buckets directly from PostgreSQL. */
-const STORAGE_BUCKET_SQL = `
-  SELECT id, name, public, file_size_limit, allowed_mime_types
-  FROM storage.buckets
-  ORDER BY name
+/**
+ * Bucket columns worth comparing, in select order.
+ *
+ * Only the first five used to be read, so a bucket switched between STANDARD,
+ * ANALYTICS and VECTOR — an entirely different storage backend — compared as
+ * identical and the layer reported "no drift detected".
+ *
+ * Deliberately excludes created_at/updated_at (timestamps differ between any
+ * two environments and mean nothing) and the deprecated `owner` column, which
+ * migration 0018 replaced with owner_id.
+ */
+const COMPARED_BUCKET_COLUMNS = [
+  'id', 'name', 'public', 'file_size_limit', 'allowed_mime_types',
+  'type', 'avif_autodetection', 'owner_id',
+] as const
+
+/** Which of those this particular Supabase version actually has. */
+const BUCKET_COLUMNS_SQL = `
+  SELECT column_name
+  FROM information_schema.columns
+  WHERE table_schema = 'storage' AND table_name = 'buckets'
+`
+
+/** Whether this database is a Supabase project at all. */
+const STORAGE_PRESENT_SQL = `
+  SELECT EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'storage' AND table_name = 'buckets'
+  ) AS present
 `
 
 /** Query RLS policies specifically on the storage schema (normally excluded from main RLS layer). */
@@ -250,12 +311,59 @@ function diffBuckets(
       })
     }
 
+    // Changing a bucket's type switches its storage backend outright, so this
+    // is critical rather than a tweak. Compared only when both sides report the
+    // column, since it arrived in storage migration 0038.
+    if (sb.type !== undefined && tb.type !== undefined && sb.type !== tb.type) {
+      setClauses.push(`type = ${sqlLiteral(sb.type)}`)
+      issues.push({
+        id: `storage-type-${id}`,
+        check: 'storage',
+        severity: 'critical',
+        title: `Bucket type mismatch: ${sb.name}`,
+        description: `Bucket "${sb.name}" is ${sb.type} in source but ${tb.type} in target — these are different storage backends, not a setting.`,
+        sourceValue: { type: sb.type },
+        targetValue: { type: tb.type },
+      })
+    }
+
+    if (sb.avif_autodetection !== undefined && tb.avif_autodetection !== undefined
+        && sb.avif_autodetection !== tb.avif_autodetection) {
+      setClauses.push(`avif_autodetection = ${sqlLiteral(sb.avif_autodetection)}`)
+      issues.push({
+        id: `storage-avif-${id}`,
+        check: 'storage',
+        severity: 'warning',
+        title: `Bucket AVIF autodetection mismatch: ${sb.name}`,
+        description: `Bucket "${sb.name}" avif_autodetection is ${sb.avif_autodetection} in source but ${tb.avif_autodetection} in target.`,
+        sourceValue: { avif_autodetection: sb.avif_autodetection },
+        targetValue: { avif_autodetection: tb.avif_autodetection },
+      })
+    }
+
+    // owner_id is reported but never synced: it references a user that exists
+    // in one project and not the other, so copying the value across would
+    // point the bucket at an identity that does not exist there.
+    if (sb.owner_id !== undefined && tb.owner_id !== undefined && sb.owner_id !== tb.owner_id) {
+      issues.push({
+        id: `storage-owner-${id}`,
+        check: 'storage',
+        severity: 'info',
+        title: `Bucket owner mismatch: ${sb.name}`,
+        description: `Bucket "${sb.name}" has a different owner_id in each environment. Not synced — the owner is an identity local to its own project.`,
+        sourceValue: { owner_id: sb.owner_id },
+        targetValue: { owner_id: tb.owner_id },
+      })
+    }
+
     // Attach sync fix to the first property-diff issue for this bucket
     if (setClauses.length > 0) {
       const firstBucketIssue = issues.find(i =>
         i.id.startsWith(`storage-visibility-${id}`) ||
         i.id.startsWith(`storage-sizelimit-${id}`) ||
-        i.id.startsWith(`storage-mimetypes-${id}`),
+        i.id.startsWith(`storage-mimetypes-${id}`) ||
+        i.id.startsWith(`storage-type-${id}`) ||
+        i.id.startsWith(`storage-avif-${id}`),
       )
       if (firstBucketIssue) {
         if (useApi) {

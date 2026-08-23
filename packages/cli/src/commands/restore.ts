@@ -86,7 +86,12 @@ export default class Restore extends BaseCommand {
         this.log(`\n  Restore replays SQL into the target and may conflict with existing data.`)
         this.log(`  → Use ${cmd('supaforge sync')} to apply only the differences instead.`)
         this.log(`  → Add ${cmd('--force')} to proceed anyway.\n`)
-        return
+        // --apply was asked for and refused, so this is not success. Returning
+        // 0 made `supaforge restore ... --apply && deploy` continue as though
+        // the restore had happened, which is the worst possible reading of a
+        // safety guard: it protects the data and then lets the pipeline act on
+        // the assumption it did not have to.
+        this.exit(1)
       }
     }
 

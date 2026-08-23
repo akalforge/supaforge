@@ -30,7 +30,8 @@
     "test:watch": "vitest",
     "test:integration": "./scripts/test-integration.sh",
     "test:e2e": "vitest run test/e2e/",
-    "test:e2e:supabase": "./scripts/test-e2e.sh"
+    "test:e2e:supabase": "./scripts/test-e2e.sh",
+    "test:dbdiff-source": "./scripts/test-against-dbdiff-source.sh"
   },
   "oclif": {
     "bin": "supaforge",

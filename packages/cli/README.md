@@ -45,7 +45,7 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 | Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Self-hosted covers provider flags and signup settings, not `JWT_EXP` / `MFA_ENABLED` | PATCH via API (hosted only) |
 | Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ | SQL when trigger metadata available |
-| Realtime Publications | `pg_publication` + `pg_publication_tables` | ✅ | SQL (CREATE/ALTER PUBLICATION) |
+| Realtime | `pg_publication` + `pg_publication_tables`, and `pg_policies` on `realtime` | ✅ Publications, plus **Realtime Authorization** policies on `realtime.messages` (who may join which channel) | SQL (CREATE/ALTER PUBLICATION; CREATE/DROP POLICY) |
 | Vault Secrets | `vault.secrets` | ✅ | SQL (`vault.create_secret` / `vault.update_secret`) |
 | Postgres Extensions | `pg_extension` | ✅ | SQL (CREATE/DROP EXTENSION) |
 
@@ -470,6 +470,24 @@ environments and mean nothing.
 > them to compute checksums so it can *report* drift. There is no upload, copy,
 > move or delete path for storage objects anywhere in SupaForge — syncing a
 > bucket row is cheap and reversible, overwriting user uploads is not.
+
+### Policies inside ignored schemas
+
+Supabase's own schemas are excluded from the RLS layer because their tables are
+product-managed — a difference there means the two projects run different
+Supabase versions, not that anyone changed anything.
+
+Two of them hold policies **you** write, so those are compared anyway, by the
+check that owns them:
+
+| Policy location | Compared by | What it controls |
+|---|---|---|
+| `storage.objects` | Storage | who may read or write which files |
+| `realtime.messages` | Realtime | who may join which channel (Realtime Authorization) |
+
+A missing or altered policy is **critical** — for these schemas it is an access
+rule. An extra policy is **info**: it may be deliberate, and removing it is a
+judgement call rather than a fix to apply blindly.
 
 ### Ignored schemas
 

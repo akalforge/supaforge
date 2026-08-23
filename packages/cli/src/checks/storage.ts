@@ -5,6 +5,9 @@ import { sqlLiteral } from '../utils/sql'
 import { normalizeRoles } from '../utils/strings'
 import { scanStorageFiles, type ScanFilesOptions } from '../storage-files'
 import { Check, CheckSkipped, type CheckContext } from './base'
+import {
+  diffSchemaPolicies, schemaPolicySql, createPolicySql, dropPolicySql,
+} from '../utils/schema-policies'
 
 interface StorageBucket {
   id: string
@@ -90,7 +93,9 @@ export class StorageCheck extends Check {
       this.fetchStoragePolicies(ctx.source.dbUrl),
       this.fetchStoragePolicies(ctx.target.dbUrl),
     ])
-    return diffStoragePolicies(source, target)
+    return diffSchemaPolicies(source, target, {
+      schema: 'storage', check: 'storage', idPrefix: 'storage-policy', label: 'storage',
+    })
   }
 
   private async hasStorageSchema(dbUrl: string): Promise<boolean> {
@@ -170,12 +175,7 @@ const STORAGE_PRESENT_SQL = `
 `
 
 /** Query RLS policies specifically on the storage schema (normally excluded from main RLS layer). */
-const STORAGE_POLICY_SQL = `
-  SELECT tablename, policyname, permissive, roles, cmd, qual, with_check
-  FROM pg_policies
-  WHERE schemaname = 'storage'
-  ORDER BY tablename, policyname
-`
+const STORAGE_POLICY_SQL = schemaPolicySql('storage')
 
 // ─── Bucket diffing ──────────────────────────────────────────────────────────
 
@@ -397,97 +397,5 @@ function diffBuckets(
 
 // ─── Storage policy diffing ──────────────────────────────────────────────────
 
-function storagePolicyKey(p: StoragePolicy): string {
-  return `${p.tablename}.${p.policyname}`
-}
-
-function storagePoliciesEqual(a: StoragePolicy, b: StoragePolicy): boolean {
-  return (
-    a.permissive === b.permissive &&
-    a.cmd === b.cmd &&
-    JSON.stringify(normalizeRoles(a.roles)) === JSON.stringify(normalizeRoles(b.roles)) &&
-    (a.qual ?? '') === (b.qual ?? '') &&
-    (a.with_check ?? '') === (b.with_check ?? '')
-  )
-}
-
 // normalizeRoles imported from utils/strings
 
-function generateStorageCreatePolicySql(p: StoragePolicy): string {
-  const roles = normalizeRoles(p.roles).join(', ')
-  const lines = [
-    `CREATE POLICY "${p.policyname}"`,
-    `  ON "storage"."${p.tablename}"`,
-    `  AS ${p.permissive}`,
-    `  FOR ${p.cmd}`,
-    `  TO ${roles}`,
-  ]
-  if (p.qual) lines.push(`  USING (${p.qual})`)
-  if (p.with_check) lines.push(`  WITH CHECK (${p.with_check})`)
-  lines.push(';')
-  return lines.join('\n')
-}
-
-function generateStorageDropPolicySql(p: StoragePolicy): string {
-  return `DROP POLICY IF EXISTS "${p.policyname}" ON "storage"."${p.tablename}";`
-}
-
-function diffStoragePolicies(source: StoragePolicy[], target: StoragePolicy[]): DriftIssue[] {
-  const issues: DriftIssue[] = []
-  const sourceMap = new Map(source.map(p => [storagePolicyKey(p), p]))
-  const targetMap = new Map(target.map(p => [storagePolicyKey(p), p]))
-
-  for (const [key, sp] of sourceMap) {
-    if (!targetMap.has(key)) {
-      issues.push({
-        id: `storage-policy-missing-${key}`,
-        check: 'storage',
-        severity: 'critical',
-        title: `Missing storage policy: ${sp.policyname} on ${sp.tablename}`,
-        description: `Storage RLS policy "${sp.policyname}" on storage.${sp.tablename} exists in source but not in target.`,
-        sourceValue: sp,
-        sql: {
-          up: generateStorageCreatePolicySql(sp),
-          down: generateStorageDropPolicySql(sp),
-        },
-      })
-    }
-  }
-
-  for (const [key, tp] of targetMap) {
-    if (!sourceMap.has(key)) {
-      issues.push({
-        id: `storage-policy-extra-${key}`,
-        check: 'storage',
-        severity: 'info',
-        title: `Extra storage policy: ${tp.policyname} on ${tp.tablename}`,
-        description: `Storage RLS policy "${tp.policyname}" on storage.${tp.tablename} exists in target but not in source.`,
-        targetValue: tp,
-        sql: {
-          up: generateStorageDropPolicySql(tp),
-          down: generateStorageCreatePolicySql(tp),
-        },
-      })
-    }
-  }
-
-  for (const [key, sp] of sourceMap) {
-    const tp = targetMap.get(key)
-    if (!tp || storagePoliciesEqual(sp, tp)) continue
-    issues.push({
-      id: `storage-policy-changed-${key}`,
-      check: 'storage',
-      severity: 'critical',
-      title: `Storage policy changed: ${sp.policyname} on ${sp.tablename}`,
-      description: `Storage RLS policy "${sp.policyname}" on storage.${sp.tablename} differs between source and target.`,
-      sourceValue: sp,
-      targetValue: tp,
-      sql: {
-        up: [generateStorageDropPolicySql(sp), generateStorageCreatePolicySql(sp)].join('\n'),
-        down: [generateStorageDropPolicySql(tp), generateStorageCreatePolicySql(tp)].join('\n'),
-      },
-    })
-  }
-
-  return issues
-}

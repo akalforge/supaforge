@@ -3,6 +3,9 @@ import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
 import { quoteName } from '../utils/sql'
 import { Check, type CheckContext } from './base'
+import {
+  diffSchemaPolicies, schemaPolicySql, type SchemaPolicy,
+} from '../utils/schema-policies'
 
 interface RealtimePublication {
   pubname: string
@@ -22,7 +25,34 @@ export class RealtimeCheck extends Check {
       this.fetchPublications(ctx.source.dbUrl),
       this.fetchPublications(ctx.target.dbUrl),
     ])
-    return diffPublications(source, target)
+    const publicationIssues = diffPublications(source, target)
+
+    // Realtime Authorization policies live on realtime.messages and decide who
+    // may join which channel. They are written by the user, but the realtime
+    // schema is excluded from the main RLS layer because its other tables are
+    // product-managed — so nothing compared them at all. A policy relaxed from
+    // `topic LIKE 'user:%'` to `true` reported no drift.
+    const [srcPolicies, tgtPolicies] = await Promise.all([
+      this.fetchPolicies(ctx.source.dbUrl),
+      this.fetchPolicies(ctx.target.dbUrl),
+    ])
+    const policyIssues = diffSchemaPolicies(srcPolicies, tgtPolicies, {
+      schema: 'realtime',
+      check: 'realtime',
+      idPrefix: 'realtime-policy',
+      label: 'realtime authorization',
+    })
+
+    return [...publicationIssues, ...policyIssues]
+  }
+
+  private async fetchPolicies(dbUrl: string): Promise<SchemaPolicy[]> {
+    try {
+      return await this.queryFn(dbUrl, schemaPolicySql('realtime')) as unknown as SchemaPolicy[]
+    } catch {
+      // No realtime schema at all — nothing to compare.
+      return []
+    }
   }
 
   private async fetchPublications(dbUrl: string): Promise<RealtimePublication[]> {

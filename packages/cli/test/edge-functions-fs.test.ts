@@ -20,6 +20,8 @@ beforeAll(async () => {
   await fn('hello', { 'index.ts': 'export default () => new Response("hi")' })
   await fn('nested', { 'index.ts': 'a', 'lib/util.ts': 'b' })
   await fn('noisy', { 'index.ts': 'c', '.DS_Store': 'junk' })
+  await fn('main', { 'index.ts': 'router' })
+  await fn('_shared', { 'util.ts': 'helper' })
   await mkdir(join(root, '.hidden'), { recursive: true })
   await mkdir(join(root, 'empty'), { recursive: true })
 })
@@ -30,6 +32,17 @@ describe('inventoryFunctions', () => {
   it('lists one entry per function directory', async () => {
     const inv = await inventoryFunctions(root)
     expect(inv.map(f => f.slug)).toEqual(['hello', 'nested', 'noisy'])
+  })
+
+  it('excludes the runtime router and shared code', async () => {
+    // `main` is edge-runtime's --main-service router, present on every
+    // self-hosted instance and deployed by nobody; Studio's API excludes it.
+    // Including it reported "Missing Edge Function: main" when comparing a
+    // directory against Studio on byte-identical content.
+    const slugs = (await inventoryFunctions(root)).map(f => f.slug)
+    expect(slugs).not.toContain('main')
+    // _shared is the Supabase convention for code imported by functions.
+    expect(slugs).not.toContain('_shared')
   })
 
   it('skips hidden and empty directories', async () => {

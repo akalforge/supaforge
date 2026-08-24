@@ -26,6 +26,19 @@ export interface FunctionInventory {
 /** Files that say nothing about behaviour and differ for uninteresting reasons. */
 const IGNORED = new Set(['.DS_Store', 'Thumbs.db', '.gitkeep'])
 
+/**
+ * Directories that are not deployable functions.
+ *
+ * `main` is the edge-runtime router, passed as --main-service; it exists on
+ * every self-hosted instance and is not something anyone deploys. Studio's API
+ * excludes it, so including it here reported "Missing Edge Function: main" when
+ * comparing a directory against Studio on byte-identical content.
+ *
+ * Underscore-prefixed directories are the Supabase convention for shared code
+ * (`_shared`), which is imported by functions rather than being one.
+ */
+const NOT_FUNCTIONS = new Set(['main'])
+
 async function hashDirectory(dir: string): Promise<{ hash: string; fileCount: number }> {
   const files: string[] = []
 
@@ -70,7 +83,9 @@ export async function inventoryFunctions(root: string): Promise<FunctionInventor
 
   const out: FunctionInventory[] = []
   for (const entry of entries) {
-    if (!entry.isDirectory() || entry.name.startsWith('.')) continue
+    if (!entry.isDirectory()) continue
+    if (entry.name.startsWith('.') || entry.name.startsWith('_')) continue
+    if (NOT_FUNCTIONS.has(entry.name)) continue
     const dir = join(root, entry.name)
     try {
       await stat(dir)

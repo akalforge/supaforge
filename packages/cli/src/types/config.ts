@@ -27,13 +27,20 @@ export interface EnvironmentConfig {
   /** Base URL for self-hosted Supabase API gateway (e.g. http://localhost:54321). Overrides projectRef-based URL construction. */
   apiUrl?: string
   /**
+   * Base URL of this environment's Supabase Studio, e.g. http://localhost:3000.
+   *
+   * Self-hosted Studio serves the same functions API shape as the hosted
+   * Management API, at /api/v1/projects/{ref}/functions. It is NOT behind the
+   * Kong gateway that `apiUrl` points at, which is why it needs its own field.
+   */
+  studioUrl?: string
+  /**
    * Directory holding this environment's Edge Functions, one subdirectory per
    * function (the layout `supabase functions` uses, and the layout self-hosted
    * edge-runtime mounts).
    *
-   * Self-hosted Supabase has no management endpoint to list functions, so
-   * there is nothing to query. Pointing at the directory is the only way to
-   * compare them — see the Edge Functions section of the README.
+   * A fallback for when Studio is not reachable — `studioUrl` is preferred
+   * because it works remotely and needs no filesystem access.
    */
   functionsPath?: string
 }

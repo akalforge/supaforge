@@ -2,6 +2,7 @@ import type { DriftIssue, SyncAction } from '../types/drift'
 import { Check, CheckSkipped, type CheckContext } from './base'
 import { SUPABASE_MGMT_API } from '../constants'
 import { inventoryFunctions, type FunctionInventory } from '../edge-functions-fs'
+import { inventoryFunctionsViaStudio, DEFAULT_SELF_HOSTED_REF } from '../edge-functions-api'
 
 interface EdgeFunction {
   slug: string
@@ -33,26 +34,30 @@ export class EdgeFunctionsCheck extends Check {
     //
     // What self-hosted does have is the directory the functions are mounted
     // from, so if both environments name one, compare those instead.
-    const sourcePath = ctx.source.functionsPath
-    const targetPath = ctx.target.functionsPath
-    if (sourcePath && targetPath) {
-      const [source, target] = await Promise.all([
-        inventoryFunctions(sourcePath),
-        inventoryFunctions(targetPath),
-      ])
+    // Self-hosted Studio serves the same functions API shape as the hosted
+    // Management API, so prefer it: it works remotely, needs no volume mount,
+    // and returns module contents rather than just names. It is not behind the
+    // Kong gateway apiUrl points at, hence its own field.
+    // Each side resolves independently, so a live instance can be compared
+    // against a checkout: both produce the same inventory shape and hash their
+    // modules identically, which is the whole point of sharing the format.
+    const [source, target] = await Promise.all([
+      this.resolveInventory(ctx.source),
+      this.resolveInventory(ctx.target),
+    ])
+    if (source && target) {
       if (source.length === 0 && target.length === 0) {
-        throw new CheckSkipped(
-          `no functions found in either functionsPath (${sourcePath}, ${targetPath})`,
-        )
+        throw new CheckSkipped('no Edge Functions found in either environment')
       }
-      return diffFunctionDirectories(source, target)
+      return diffFunctionInventories(source, target)
     }
 
     if (ctx.source.apiUrl || ctx.target.apiUrl) {
       throw new CheckSkipped(
-        'Edge Functions comparison requires hosted Supabase — self-hosted exposes no '
-        + 'management endpoint. Set "functionsPath" on both environments to compare '
-        + 'them from the filesystem instead.',
+        'Edge Functions comparison needs a source to read from on self-hosted. '
+        + 'Set "studioUrl" on both environments (preferred — Studio serves '
+        + '/api/v1/projects/{ref}/functions), or "functionsPath" to compare the '
+        + 'mounted directories instead.',
       )
     }
 
@@ -60,12 +65,30 @@ export class EdgeFunctionsCheck extends Check {
       throw new CheckSkipped('no projectRef or accessToken configured')
     }
 
-    const [source, target] = await Promise.all([
+    const [hostedSource, hostedTarget] = await Promise.all([
       this.listFunctions(sourceRef, sourceKey),
       this.listFunctions(targetRef, targetKey),
     ])
 
-    return diffFunctions(source, target, targetRef, targetKey)
+    return diffFunctions(hostedSource, hostedTarget, targetRef, targetKey)
+  }
+
+  /**
+   * Where this environment's functions can be read from, or null if nowhere.
+   *
+   * Studio is preferred: it works remotely and returns module contents. The
+   * directory is the fallback for when Studio is not reachable.
+   */
+  private async resolveInventory(
+    env: CheckContext['source'],
+  ): Promise<FunctionInventory[] | null> {
+    if (env.studioUrl) {
+      return inventoryFunctionsViaStudio(
+        env.studioUrl, env.projectRef ?? DEFAULT_SELF_HOSTED_REF, this.fetchFn,
+      )
+    }
+    if (env.functionsPath) return inventoryFunctions(env.functionsPath)
+    return null
   }
 
   private async listFunctions(projectRef: string, accessToken: string): Promise<EdgeFunction[]> {
@@ -146,14 +169,15 @@ function diffFunctions(
 }
 
 /**
- * Compare two filesystem inventories.
+ * Compare two inventories, from either source — Studio's API or the filesystem
+ * both hash modules the same way, so the two are directly comparable.
  *
  * Neither side can be fixed automatically: deploying a function needs the
  * Supabase CLI and, on self-hosted, a restart of edge-runtime. So every issue
  * carries guidance rather than a SyncAction — reporting a fix that cannot be
  * applied is worse than admitting there is not one.
  */
-function diffFunctionDirectories(
+function diffFunctionInventories(
   source: FunctionInventory[],
   target: FunctionInventory[],
 ): DriftIssue[] {

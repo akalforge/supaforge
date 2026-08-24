@@ -560,6 +560,49 @@ self-hosted, an edge-runtime restart. Each issue carries the command to run
 instead, because reporting a fix that cannot be applied is worse than admitting
 there is not one.
 
+## Proving a migration before you run it
+
+A migration that executes without error can still leave the database in a state
+that is not the source. A partitioned table rebuilt as an ordinary one, an enum
+column that lost its type, an index that never reached its partitions — all
+apply cleanly and all produce the wrong database. No comparison of the generated
+SQL can catch that, because the SQL is valid.
+
+`--prove` replays the migration on a throwaway clone of the target and compares
+the result against the source:
+
+```bash
+supaforge sync --apply --prove
+```
+
+```
+Proving convergence on a throwaway clone…
+Migration does not reproduce the source. Nothing was applied.
+
+  missing: idx public.sales_2026_d_idx CREATE INDEX sales_2026_d_idx ON public.sales_2026 …
+
+These objects would still differ after applying.
+```
+
+The target is never touched when the proof fails — it exits 1 having applied
+nothing. On success it reports `Converged` and proceeds.
+
+The clone is created on the target's own server (no extra credentials), holds
+structure only (no data is copied), and is dropped even if the proof throws.
+Supabase-managed schemas are excluded, so the clone costs seconds rather than
+minutes.
+
+If the proof cannot run at all — no `pg_dump`, or the role lacks `CREATEDB` —
+that is reported as *not proven* and the apply continues. Not being able to
+check is a different thing from checking and failing, and conflating them would
+either block legitimate work or hide real failures.
+
+> Order matters more than it looks. `CREATE INDEX … ON ONLY parent` is correct
+> when the index is created *before* partitions attach, because PostgreSQL
+> propagates it to partitions added later — and wrong when they already exist.
+> Nothing in the SQL text distinguishes the two. This is exactly the class of
+> problem that only replaying can decide.
+
 ## Exit Codes
 
 Every command follows the same contract, so a pipeline can branch on the exit

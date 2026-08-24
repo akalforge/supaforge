@@ -291,6 +291,13 @@ export default class Diff extends BaseCommand {
         return
       }
 
+      // An opt-in sorter that quietly declined would otherwise be invisible:
+      // the run still succeeds, so nothing tells the operator the ordering they
+      // asked for was not the ordering they got.
+      if (result.ordering?.fellBackBecause) {
+        this.warn(`Statement ordering fell back to the built-in sorter: ${result.ordering.fellBackBecause}`)
+      }
+
       this.renderApplyResult(result, dryRun)
 
       if (result.errors.length > 0) {

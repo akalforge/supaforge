@@ -867,6 +867,7 @@ narrowing the scan:
 | `SUPAFORGE_DBDIFF_TIMEOUT` | `600` | Seconds before a diff is abandoned. Overrides `checks.schema.timeout` |
 | `SUPAFORGE_DBDIFF_MEMORY` | dbdiff's own `1G` | Passed to `--memory-limit`; takes `512M`, `2G`, or `-1` for unlimited |
 | `SUPAFORGE_CONNECT_TIMEOUT` | `15` | Seconds before a database connection attempt is abandoned. Applies to every connection, including the preflight reachability check |
+| `SUPAFORGE_ORDERING` | `builtin` | Statement-ordering backend. Set to `pg-topo` to order migrations with `@supabase/pg-topo` (optional, install separately). Falls back to the built-in sorter if it is absent or declines. |
 
 ```bash
 SUPAFORGE_DBDIFF_TIMEOUT=600 SUPAFORGE_DBDIFF_MEMORY=2G supaforge diff

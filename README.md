@@ -358,10 +358,34 @@ run prints what it is scoped to before it starts.
 | `SUPAFORGE_DBDIFF_TIMEOUT` | `600` | Seconds before the schema/data diff is abandoned. Overrides `checks.schema.timeout`. |
 | `SUPAFORGE_DBDIFF_MEMORY` | dbdiff's own `1G` | Passed to `@dbdiff/cli --memory-limit`. Takes `512M`, `2G`, or `-1` for unlimited. |
 | `SUPAFORGE_CONNECT_TIMEOUT` | `15` | Seconds before a database connection attempt is abandoned. Applies to every connection, including the preflight reachability check. |
+| `SUPAFORGE_ORDERING` | `builtin` | Statement-ordering backend. Set to `pg-topo` to order migrations with `@supabase/pg-topo` (optional, install separately). Falls back to the built-in sorter if it is absent or declines. |
 
 ```bash
 SUPAFORGE_DBDIFF_TIMEOUT=600 SUPAFORGE_DBDIFF_MEMORY=2G supaforge diff
 ```
+
+#### Statement ordering
+
+A generated migration has to be replayable top to bottom: a type before the
+table that uses it, a function before the trigger that calls it. The built-in
+sorter derives that order from names it recognises in the SQL text, so it only
+knows the dependencies it has been taught.
+
+`SUPAFORGE_ORDERING=pg-topo` instead orders statements with
+[`@supabase/pg-topo`](https://www.npmjs.com/package/@supabase/pg-topo), which
+parses them with PostgreSQL's own grammar and derives dependencies from the
+parse tree. It is an optional dependency — install it yourself:
+
+```bash
+npm install @supabase/pg-topo
+SUPAFORGE_ORDERING=pg-topo supaforge diff --apply
+```
+
+The backend is advisory and never fatal. SupaForge accepts its order only if
+the result is a faithful permutation of the input; a missing statement, an
+unrecognised one, a parse diagnostic or a thrown error all fall back to the
+built-in sorter and print a warning saying why. A migration ordered
+conservatively is fine, whereas a migration missing a statement is not.
 
 `checks.exclude` permanently skips the listed checks on every `diff`/`hukam`/`sync` run — useful when diffing against a clone, where `storage`, `auth`, `edge-functions`, `vault`, `realtime` and `roles` have no local equivalent and produce only noise. Roles is easy to overlook and is the second-largest source of it: a clone is vanilla PostgreSQL, so Supabase's service roles do not exist and every grant referencing one reads as drift. The `--skip` CLI flag does the same on a one-off basis; both are merged at runtime.
 

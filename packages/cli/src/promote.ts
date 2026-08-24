@@ -3,7 +3,8 @@ import { pgClientConfig } from './db.js'
 import type { ScanResult, SyncAction } from './types/drift'
 import { errMsg } from './utils/error'
 import { isDestructiveSql } from './dbdiff'
-import { orderStatements, referencedTables } from './sql-deps.js'
+import { referencedTables } from './sql-deps.js'
+import { orderForExecution, type OrderingBackend } from './ordering.js'
 import { applyTableFilter, isFiltered, type TableFilter } from './utils/table-filter.js'
 import { matchesGlob } from './utils/strings.js'
 
@@ -73,12 +74,20 @@ export interface PromoteResult {
    * lists what is actually in the target now.
    */
   rolledBack?: (FixOrigin & { sql?: string })[]
+  /** Which sorter ordered the statements, and why it was not the one asked for. */
+  ordering?: { backend: OrderingBackend; fellBackBecause?: string }
 }
 
 interface PlannedWork {
   sqlStatements: PlannedSql[]
   apiActions: PlannedAction[]
   skipped: PlannedSkip[]
+  /**
+   * Which sorter produced the statement order. Recorded so a run that quietly
+   * fell back to the built-in sorter can be told apart from one that never
+   * asked for anything else.
+   */
+  ordering?: { backend: OrderingBackend; fellBackBecause?: string }
 }
 
 /** What `planWork` needs to know beyond the scan result itself. */
@@ -157,9 +166,14 @@ function classifyIssue(
  * execution.
  *
  * The SQL comes back in dependency order rather than the order the checks
- * reported it — see `orderStatements`.
+ * reported it — see `orderForExecution`. That step is async only because the
+ * opt-in pg-topo backend parses the statements; the default path does not wait
+ * on anything.
  */
-export function planWork(scanResult: ScanResult, options: PlanOptions = {}): PlannedWork {
+export async function planWork(
+  scanResult: ScanResult,
+  options: PlanOptions = {},
+): Promise<PlannedWork> {
   const plan: PlannedWork = { sqlStatements: [], apiActions: [], skipped: [] }
 
   const relevant = scanResult.checks.filter(
@@ -177,7 +191,9 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
     }
   }
 
-  plan.sqlStatements = orderStatements(plan.sqlStatements, s => s.sql)
+  const ordering = await orderForExecution(plan.sqlStatements, s => s.sql)
+  plan.sqlStatements = ordering.ordered
+  plan.ordering = { backend: ordering.backend, fellBackBecause: ordering.fellBackBecause }
   return plan
 }
 
@@ -299,13 +315,13 @@ export async function promote(options: PromoteOptions): Promise<PromoteResult> {
     fetchFn = globalThis.fetch.bind(globalThis),
   } = options
 
-  const { sqlStatements, apiActions, skipped } = planWork(scanResult, {
+  const { sqlStatements, apiActions, skipped, ordering } = await planWork(scanResult, {
     checks,
     allowDestructive,
     tableFilter,
     only,
   })
-  const result: PromoteResult = { applied: [], skipped, errors: [] }
+  const result: PromoteResult = { applied: [], skipped, errors: [], ordering }
 
   if (dryRun) {
     for (const stmt of sqlStatements) {

@@ -305,8 +305,8 @@ describe('outOfScopeReason', () => {
 })
 
 describe('planWork ordering', () => {
-  it('returns SQL in dependency order, not the order the check reported it', () => {
-    const plan = planWork(makeScopedScanResult())
+  it('returns SQL in dependency order, not the order the check reported it', async () => {
+    const plan = await planWork(makeScopedScanResult())
     const ids = plan.sqlStatements.map(s => s.issueId)
     expect(ids.indexOf('schema-create-function-4')).toBeLessThan(ids.indexOf('schema-create-trigger-3'))
   })

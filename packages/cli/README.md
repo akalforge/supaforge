@@ -40,7 +40,7 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 | Schema | `@dbdiff/cli` | ✅ Tables, views, triggers, functions, enum types | SQL (up/down) |
 | Data | `@dbdiff/cli --type=data` | ✅ Row-level diff for all public tables (configurable). Checksum-based fast skip for unchanged tables. | SQL (up/down) |
 | RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
-| Edge Functions | Management API | ✅ **Hosted only** — skipped on self-hosted | DELETE extras via API; missing/outdated → manual `supabase functions deploy` |
+| Edge Functions | Management API, or the functions directory when `functionsPath` is set | ✅ Hosted via API; **self-hosted by comparing the functions directory** | DELETE extras via API (hosted); otherwise guidance to `supabase functions deploy` |
 | Storage | Storage API + `pg_policies` | ✅ Buckets, policies. `--include-files` adds file-level drift detection (checksums for JSON, size/date for binary). | Buckets via API (POST/PUT/DELETE); Policies via SQL |
 | Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Self-hosted covers provider flags and signup settings, not `JWT_EXP` / `MFA_ENABLED` | PATCH via API (hosted only) |
 | Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
@@ -447,6 +447,40 @@ Sensitive values (`dbUrl`, `accessToken`) support `$VAR` and `${VAR}` syntax —
 Higher-priority files win for duplicate keys. Existing `process.env` values are never overwritten.
 
 See [`supaforge.config.example.jsonc`](supaforge.config.example.jsonc) and [`.env.example`](.env.example) for fully commented examples.
+
+## Edge Functions on self-hosted
+
+Hosted Supabase lists functions over the Management API. Self-hosted exposes no
+equivalent endpoint, so there is nothing to query — the check used to skip
+entirely.
+
+Point both environments at their functions directory and it compares those
+instead:
+
+```jsonc
+{
+  "environments": {
+    "local":  { "dbUrl": "$LOCAL_DATABASE_URL",  "functionsPath": "./supabase/functions" },
+    "server": { "dbUrl": "$SERVER_DATABASE_URL", "functionsPath": "/srv/supabase/volumes/functions" }
+  }
+}
+```
+
+The layout is one subdirectory per function — what `supabase functions new`
+creates and what self-hosted edge-runtime mounts.
+
+Each function is hashed over its file paths and contents, so an edit **and** a
+rename both show as drift. Only the hash is reported, never the source: what
+matters is that they differ, and function code can contain secrets that have no
+business in a drift report.
+
+`.DS_Store`, `Thumbs.db` and `.gitkeep` are ignored; hidden and empty
+directories are not treated as functions.
+
+Nothing is applied automatically — deploying needs the Supabase CLI and, on
+self-hosted, an edge-runtime restart. Each issue carries the command to run
+instead, because reporting a fix that cannot be applied is worse than admitting
+there is not one.
 
 ## Exit Codes
 

@@ -26,6 +26,16 @@ export interface EnvironmentConfig {
   accessToken?: string
   /** Base URL for self-hosted Supabase API gateway (e.g. http://localhost:54321). Overrides projectRef-based URL construction. */
   apiUrl?: string
+  /**
+   * Directory holding this environment's Edge Functions, one subdirectory per
+   * function (the layout `supabase functions` uses, and the layout self-hosted
+   * edge-runtime mounts).
+   *
+   * Self-hosted Supabase has no management endpoint to list functions, so
+   * there is nothing to query. Pointing at the directory is the only way to
+   * compare them — see the Edge Functions section of the README.
+   */
+  functionsPath?: string
 }
 
 export interface ChecksConfig {

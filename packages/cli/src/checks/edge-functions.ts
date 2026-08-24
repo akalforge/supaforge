@@ -1,6 +1,7 @@
 import type { DriftIssue, SyncAction } from '../types/drift'
 import { Check, CheckSkipped, type CheckContext } from './base'
 import { SUPABASE_MGMT_API } from '../constants'
+import { inventoryFunctions, type FunctionInventory } from '../edge-functions-fs'
 
 interface EdgeFunction {
   slug: string
@@ -26,13 +27,33 @@ export class EdgeFunctionsCheck extends Check {
     const sourceKey = ctx.source.accessToken
     const targetKey = ctx.target.accessToken
 
-    // Self-hosted Supabase exposes no equivalent "list functions" management
-    // endpoint, so there is nothing to call. Previously the hosted URL was
-    // built regardless and the layer failed with a bare `Unauthorized`, which
-    // reads as a credentials problem the user could fix — it is not one
-    // (issue #41).
+    // Self-hosted has no "list functions" management endpoint, so the API path
+    // cannot work there (issue #41: building the hosted URL anyway failed with
+    // a bare `Unauthorized`, which reads as a fixable credentials problem).
+    //
+    // What self-hosted does have is the directory the functions are mounted
+    // from, so if both environments name one, compare those instead.
+    const sourcePath = ctx.source.functionsPath
+    const targetPath = ctx.target.functionsPath
+    if (sourcePath && targetPath) {
+      const [source, target] = await Promise.all([
+        inventoryFunctions(sourcePath),
+        inventoryFunctions(targetPath),
+      ])
+      if (source.length === 0 && target.length === 0) {
+        throw new CheckSkipped(
+          `no functions found in either functionsPath (${sourcePath}, ${targetPath})`,
+        )
+      }
+      return diffFunctionDirectories(source, target)
+    }
+
     if (ctx.source.apiUrl || ctx.target.apiUrl) {
-      throw new CheckSkipped('Edge Functions comparison requires hosted Supabase — self-hosted exposes no management endpoint')
+      throw new CheckSkipped(
+        'Edge Functions comparison requires hosted Supabase — self-hosted exposes no '
+        + 'management endpoint. Set "functionsPath" on both environments to compare '
+        + 'them from the filesystem instead.',
+      )
     }
 
     if (!sourceRef || !targetRef || !sourceKey || !targetKey) {
@@ -119,6 +140,68 @@ function diffFunctions(
         // Cannot auto-deploy: source code is not available via the Management API.
       })
     }
+  }
+
+  return issues
+}
+
+/**
+ * Compare two filesystem inventories.
+ *
+ * Neither side can be fixed automatically: deploying a function needs the
+ * Supabase CLI and, on self-hosted, a restart of edge-runtime. So every issue
+ * carries guidance rather than a SyncAction — reporting a fix that cannot be
+ * applied is worse than admitting there is not one.
+ */
+function diffFunctionDirectories(
+  source: FunctionInventory[],
+  target: FunctionInventory[],
+): DriftIssue[] {
+  const issues: DriftIssue[] = []
+  const sourceMap = new Map(source.map(f => [f.slug, f]))
+  const targetMap = new Map(target.map(f => [f.slug, f]))
+
+  for (const [slug, sf] of sourceMap) {
+    if (targetMap.has(slug)) continue
+    issues.push({
+      id: `edge-fn-missing-${slug}`,
+      check: 'edge-functions',
+      severity: 'warning',
+      title: `Missing Edge Function: ${slug}`,
+      description: `Function "${slug}" (${sf.fileCount} file(s)) exists in source but not in target. `
+        + `Deploy it with: supabase functions deploy ${slug}`,
+      sourceValue: { slug, fileCount: sf.fileCount },
+    })
+  }
+
+  for (const [slug, tf] of targetMap) {
+    if (sourceMap.has(slug)) continue
+    issues.push({
+      id: `edge-fn-extra-${slug}`,
+      check: 'edge-functions',
+      severity: 'info',
+      title: `Extra Edge Function: ${slug}`,
+      description: `Function "${slug}" exists in target but not in source. `
+        + `Remove it with: supabase functions delete ${slug}`,
+      targetValue: { slug, fileCount: tf.fileCount },
+    })
+  }
+
+  for (const [slug, sf] of sourceMap) {
+    const tf = targetMap.get(slug)
+    if (!tf || tf.hash === sf.hash) continue
+    issues.push({
+      id: `edge-fn-changed-${slug}`,
+      check: 'edge-functions',
+      severity: 'warning',
+      title: `Edge Function differs: ${slug}`,
+      description: `Function "${slug}" has different contents in source and target. `
+        + `Redeploy with: supabase functions deploy ${slug}`,
+      // Hashes, not source: the point is that they differ, and function code
+      // can contain secrets that have no business in a drift report.
+      sourceValue: { slug, sha256: sf.hash.slice(0, 12) },
+      targetValue: { slug, sha256: tf.hash.slice(0, 12) },
+    })
   }
 
   return issues

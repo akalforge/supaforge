@@ -3,6 +3,11 @@ export const DEFAULT_IGNORE_SCHEMAS = [
   'auth',
   'storage',
   'realtime',
+  // Supabase's own realtime internals live in _realtime (underscore), a
+  // different schema from 'realtime'. Its tables are owned by supabase_admin,
+  // so reporting "RLS not enabled" on them is a finding nobody can act on —
+  // it dragged the posture score down with unfixable noise.
+  '_realtime',
   'vault',
   'net',
   'graphql_public',
@@ -57,6 +62,9 @@ export const CLONE_NOISE_CHECKS = [
   'edge-functions',
   'vault',
   'realtime',
+  // different schema from 'realtime'. Its tables are owned by supabase_admin,
+  // so reporting "RLS not enabled" on them is a finding nobody can act on —
+  // it dragged the posture score down with unfixable noise.
   'roles',
 ] as const
 

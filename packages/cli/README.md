@@ -40,7 +40,7 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 | Schema | `@dbdiff/cli` | ✅ Tables, views, triggers, functions, enum types | SQL (up/down) |
 | Data | `@dbdiff/cli --type=data` | ✅ Row-level diff for all public tables (configurable). Checksum-based fast skip for unchanged tables. | SQL (up/down) |
 | RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
-| Edge Functions | Management API | ✅ **Hosted only** — skipped on self-hosted | DELETE extras via API; missing/outdated → manual `supabase functions deploy` |
+| Edge Functions | Management API (hosted), Studio's `/api/v1/projects/{ref}/functions` (self-hosted), or the functions directory | ✅ Hosted and **self-hosted**, comparing module contents | DELETE extras via API (hosted); otherwise guidance to `supabase functions deploy` |
 | Storage | Storage API + `pg_policies` | ✅ Buckets (`public`, `type`, `file_size_limit`, `allowed_mime_types`, `avif_autodetection`; `owner_id` reported only), analytics and vector buckets, policies. Skipped when either side has no `storage` schema. `--include-files` adds file-level drift detection (checksums for JSON, size/date for binary) — **detection only, files are never transferred**. | Buckets via API (POST/PUT/DELETE); Policies via SQL |
 | Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Self-hosted covers provider flags and signup settings, not `JWT_EXP` / `MFA_ENABLED` | PATCH via API (hosted only) |
 | Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
@@ -508,6 +508,57 @@ things you can actually change:
 Note `_realtime` (underscore) is a *different* schema from `realtime` — its
 tables are owned by `supabase_admin`, so RLS findings on them are not
 actionable. Override with `ignoreSchemas` in your config.
+
+## Edge Functions on self-hosted
+
+Hosted Supabase lists functions over the Management API. Self-hosted Studio
+serves **the same shape** at `/api/v1/projects/{ref}/functions`, so point
+`studioUrl` at it:
+
+```jsonc
+{
+  "environments": {
+    "staging": { "dbUrl": "$STAGING_DATABASE_URL", "studioUrl": "http://staging-host:3000" },
+    "prod":    { "dbUrl": "$PROD_DATABASE_URL",    "studioUrl": "http://prod-host:3000" }
+  }
+}
+```
+
+Note this is **Studio's** port, not the Kong gateway `apiUrl` points at — Kong
+returns 401 for that path even with a service-role key. The project ref is
+`default` on self-hosted unless you set `projectRef`.
+
+> **Studio's functions API has no authentication** on the versions tested — a
+> publicly reachable Studio exposes function *source* via the `/body` endpoint
+> to anyone who asks. Worth checking before you expose one.
+
+### Falling back to the directory
+
+When Studio is not reachable, point `functionsPath` at the directory the
+functions are mounted from instead — one subdirectory per function:
+
+```jsonc
+{ "environments": { "local": { "dbUrl": "…", "functionsPath": "./supabase/functions" } } }
+```
+
+Each environment resolves independently, so the two can be **mixed**: compare a
+local checkout against a live instance by giving one `functionsPath` and the
+other `studioUrl`. Both hash modules identically — sorted by filename, hashing
+filename then contents — so the results are directly comparable.
+
+`main` is excluded: it is edge-runtime's router (`--main-service`), present on
+every self-hosted instance and deployed by nobody. Studio's API omits it too,
+so including it reported a phantom "Missing Edge Function: main". Underscore
+directories (`_shared`) are excluded for the same reason, along with
+`.DS_Store`, `Thumbs.db` and `.gitkeep`.
+
+Only hashes are reported, never source: what matters is that they differ, and
+function code can contain secrets that have no business in a drift report.
+
+Nothing is applied automatically — deploying needs the Supabase CLI and, on
+self-hosted, an edge-runtime restart. Each issue carries the command to run
+instead, because reporting a fix that cannot be applied is worse than admitting
+there is not one.
 
 ## Exit Codes
 

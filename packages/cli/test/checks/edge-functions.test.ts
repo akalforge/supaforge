@@ -169,7 +169,7 @@ describe('EdgeFunctionsCheck against self-hosted Supabase (issue #41)', () => {
     // a bare `Unauthorized`, which reads as a fixable credentials problem.
     const check = new EdgeFunctionsCheck(makeFetchFn([], []))
     await expect(check.scan(ctxWith('both'))).rejects.toThrow(CheckSkipped)
-    await expect(check.scan(ctxWith('both'))).rejects.toThrow('requires hosted Supabase')
+    await expect(check.scan(ctxWith('both'))).rejects.toThrow(/studioUrl.*functionsPath/s)
   })
 
   it('makes no network call at all when self-hosted', async () => {
@@ -184,8 +184,8 @@ describe('EdgeFunctionsCheck against self-hosted Supabase (issue #41)', () => {
 
   it('skips when either side is self-hosted', async () => {
     const check = new EdgeFunctionsCheck(makeFetchFn([], []))
-    await expect(check.scan(ctxWith('source'))).rejects.toThrow('requires hosted Supabase')
-    await expect(check.scan(ctxWith('target'))).rejects.toThrow('requires hosted Supabase')
+    await expect(check.scan(ctxWith('source'))).rejects.toThrow(/studioUrl.*functionsPath/s)
+    await expect(check.scan(ctxWith('target'))).rejects.toThrow(/studioUrl.*functionsPath/s)
   })
 
   it('still runs normally for two hosted projects', async () => {

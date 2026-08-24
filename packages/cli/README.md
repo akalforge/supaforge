@@ -41,7 +41,7 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 | Data | `@dbdiff/cli --type=data` | ✅ Row-level diff for all public tables (configurable). Checksum-based fast skip for unchanged tables. | SQL (up/down) |
 | RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
 | Edge Functions | Management API | ✅ **Hosted only** — skipped on self-hosted | DELETE extras via API; missing/outdated → manual `supabase functions deploy` |
-| Storage | Storage API + `pg_policies` | ✅ Buckets (`public`, `type`, `file_size_limit`, `allowed_mime_types`, `avif_autodetection`; `owner_id` reported only), policies. Skipped when either side has no `storage` schema. `--include-files` adds file-level drift detection (checksums for JSON, size/date for binary) — **detection only, files are never transferred**. | Buckets via API (POST/PUT/DELETE); Policies via SQL |
+| Storage | Storage API + `pg_policies` | ✅ Buckets (`public`, `type`, `file_size_limit`, `allowed_mime_types`, `avif_autodetection`; `owner_id` reported only), analytics and vector buckets, policies. Skipped when either side has no `storage` schema. `--include-files` adds file-level drift detection (checksums for JSON, size/date for binary) — **detection only, files are never transferred**. | Buckets via API (POST/PUT/DELETE); Policies via SQL |
 | Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Self-hosted covers provider flags and signup settings, not `JWT_EXP` / `MFA_ENABLED` | PATCH via API (hosted only) |
 | Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ | SQL when trigger metadata available |
@@ -462,6 +462,14 @@ Bucket **metadata**, not the objects inside them:
 
 Columns are resolved per connection, so an older Supabase without `type` or
 `owner_id` is compared on what it does have rather than failing.
+
+**Analytics and vector buckets** live in their own tables — `storage.buckets_analytics`
+and `storage.buckets_vectors` — not in `storage.buckets`, so they are compared
+separately. Analytics buckets are matched on `name` rather than `id`: that `id`
+is a `gen_random_uuid()` default and differs between any two projects, so
+keying on it would report every bucket as both missing and extra on every run.
+Soft-deleted analytics buckets (`deleted_at`) are excluded. Both tables are
+probed first, so a Supabase predating them is unaffected.
 
 `created_at` and `updated_at` are ignored: they differ between any two
 environments and mean nothing.

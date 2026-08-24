@@ -66,6 +66,7 @@ export class StorageCheck extends Check {
     }
 
     const bucketIssues = await this.scanBuckets(ctx)
+    const typedBucketIssues = await this.scanTypedBuckets(ctx)
     const policyIssues = await this.scanPolicies(ctx)
 
     let fileIssues: DriftIssue[] = []
@@ -73,7 +74,45 @@ export class StorageCheck extends Check {
       fileIssues = await this.scanFiles(ctx)
     }
 
-    return [...bucketIssues, ...policyIssues, ...fileIssues]
+    return [...bucketIssues, ...typedBucketIssues, ...policyIssues, ...fileIssues]
+  }
+
+  /**
+   * Analytics and vector buckets live in their own tables, not storage.buckets,
+   * so creating one was invisible: the check read storage.buckets and reported
+   * no drift at all.
+   *
+   * Both tables arrived with newer storage migrations (0038 analytics, 0044/45
+   * vectors), so each is probed before being read.
+   */
+  private async scanTypedBuckets(ctx: CheckContext): Promise<DriftIssue[]> {
+    const issues: DriftIssue[] = []
+    for (const spec of TYPED_BUCKET_TABLES) {
+      const [srcHas, tgtHas] = await Promise.all([
+        this.hasTable(ctx.source.dbUrl, spec.table),
+        this.hasTable(ctx.target.dbUrl, spec.table),
+      ])
+      // Absent on both sides means this Supabase predates the feature; absent
+      // on one means the versions differ, which the extensions/schema layers
+      // already report far more usefully than a bucket diff would.
+      if (!srcHas || !tgtHas) continue
+
+      const [source, target] = await Promise.all([
+        this.listTypedBuckets(ctx.source.dbUrl, spec),
+        this.listTypedBuckets(ctx.target.dbUrl, spec),
+      ])
+      issues.push(...diffTypedBuckets(source, target, spec))
+    }
+    return issues
+  }
+
+  private async hasTable(dbUrl: string, table: string): Promise<boolean> {
+    const rows = await this.queryFn(dbUrl, tableExistsSql(table)) as unknown as Array<{ present: boolean }>
+    return rows[0]?.present === true
+  }
+
+  private async listTypedBuckets(dbUrl: string, spec: TypedBucketSpec): Promise<TypedBucket[]> {
+    return await this.queryFn(dbUrl, spec.sql) as unknown as TypedBucket[]
   }
 
   private async scanBuckets(ctx: CheckContext): Promise<DriftIssue[]> {
@@ -165,6 +204,110 @@ const BUCKET_COLUMNS_SQL = `
   FROM information_schema.columns
   WHERE table_schema = 'storage' AND table_name = 'buckets'
 `
+
+/**
+ * Buckets that do not live in storage.buckets.
+ *
+ * `key` is what identifies the same logical bucket across two environments.
+ * For analytics that is `name`, NOT `id`: id is a uuid defaulting to
+ * gen_random_uuid(), so it differs between any two projects and keying on it
+ * would report every bucket as both missing and extra.
+ */
+interface TypedBucketSpec {
+  table: string
+  /** Column identifying the bucket to a human. */
+  key: string
+  /** Extra columns worth comparing, beyond the key. */
+  compared: string[]
+  label: string
+  sql: string
+}
+
+interface TypedBucket {
+  key: string
+  [column: string]: unknown
+}
+
+const TYPED_BUCKET_TABLES: TypedBucketSpec[] = [
+  {
+    table: 'buckets_analytics',
+    key: 'name',
+    compared: ['format'],
+    label: 'analytics bucket',
+    // deleted_at is a soft delete — a removed bucket still has its row.
+    sql: `SELECT name AS key, format FROM storage.buckets_analytics
+          WHERE deleted_at IS NULL ORDER BY name`,
+  },
+  {
+    table: 'buckets_vectors',
+    key: 'id',
+    compared: [],
+    label: 'vector bucket',
+    sql: `SELECT id AS key FROM storage.buckets_vectors ORDER BY id`,
+  },
+]
+
+function tableExistsSql(table: string): string {
+  return `
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = 'storage' AND table_name = '${table}'
+    ) AS present
+  `
+}
+
+function diffTypedBuckets(
+  source: TypedBucket[],
+  target: TypedBucket[],
+  spec: TypedBucketSpec,
+): DriftIssue[] {
+  const issues: DriftIssue[] = []
+  const sourceMap = new Map(source.map(b => [String(b.key), b]))
+  const targetMap = new Map(target.map(b => [String(b.key), b]))
+
+  for (const [key, b] of sourceMap) {
+    if (targetMap.has(key)) continue
+    issues.push({
+      id: `storage-${spec.table}-missing-${key}`,
+      check: 'storage',
+      severity: 'warning',
+      title: `Missing ${spec.label}: ${key}`,
+      description: `${spec.label} "${key}" exists in source but not in target.`,
+      sourceValue: b,
+    })
+  }
+
+  for (const [key, b] of targetMap) {
+    if (sourceMap.has(key)) continue
+    issues.push({
+      id: `storage-${spec.table}-extra-${key}`,
+      check: 'storage',
+      severity: 'info',
+      title: `Extra ${spec.label}: ${key}`,
+      description: `${spec.label} "${key}" exists in target but not in source.`,
+      targetValue: b,
+    })
+  }
+
+  for (const [key, sb] of sourceMap) {
+    const tb = targetMap.get(key)
+    if (!tb) continue
+    for (const col of spec.compared) {
+      if (sb[col] === tb[col]) continue
+      issues.push({
+        id: `storage-${spec.table}-${col}-${key}`,
+        check: 'storage',
+        severity: 'warning',
+        title: `${spec.label} ${col} mismatch: ${key}`,
+        description: `${spec.label} "${key}" has ${col} ${String(sb[col])} in source but ${String(tb[col])} in target.`,
+        sourceValue: { [col]: sb[col] },
+        targetValue: { [col]: tb[col] },
+      })
+    }
+  }
+
+  return issues
+}
 
 /** Whether this database is a Supabase project at all. */
 const STORAGE_PRESENT_SQL = `

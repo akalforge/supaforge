@@ -4,7 +4,10 @@ import type { DriftIssue, SyncAction } from '../types/drift'
 import { sqlLiteral } from '../utils/sql'
 import { normalizeRoles } from '../utils/strings'
 import { scanStorageFiles, type ScanFilesOptions } from '../storage-files'
-import { Check, type CheckContext } from './base'
+import { Check, CheckSkipped, type CheckContext } from './base'
+import {
+  diffSchemaPolicies, schemaPolicySql, createPolicySql, dropPolicySql,
+} from '../utils/schema-policies'
 
 interface StorageBucket {
   id: string
@@ -12,6 +15,12 @@ interface StorageBucket {
   public: boolean
   file_size_limit: number | null
   allowed_mime_types: string[] | null
+  /** Added by storage migration 0038. STANDARD | ANALYTICS | VECTOR. */
+  type?: string | null
+  /** Whether the storage API auto-detects AVIF for image transforms. */
+  avif_autodetection?: boolean | null
+  /** Added by storage migration 0018; supersedes the deprecated `owner`. */
+  owner_id?: string | null
 }
 
 interface StoragePolicy {
@@ -35,7 +44,29 @@ export class StorageCheck extends Check {
   }
 
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
+    // Comparing a Supabase project against a plain PostgreSQL database used to
+    // fail the whole layer with `relation "storage.buckets" does not exist`.
+    // An errored check reports drift as *unknown*, which is a worse outcome
+    // than saying plainly that one side has no storage to compare — and the
+    // auth check already handles the equivalent case by skipping (issue #42).
+    const [srcHasStorage, tgtHasStorage] = await Promise.all([
+      this.hasStorageSchema(ctx.source.dbUrl),
+      this.hasStorageSchema(ctx.target.dbUrl),
+    ])
+    if (!srcHasStorage || !tgtHasStorage) {
+      // Name the side, and say what to do about it: "not a Supabase project"
+      // alone leaves the reader wondering whether they misconfigured something.
+      const which = !srcHasStorage && !tgtHasStorage ? 'neither environment has'
+        : !srcHasStorage ? 'the source does not have'
+        : 'the target does not have'
+      throw new CheckSkipped(
+        `${which} a storage schema — not a Supabase project. `
+        + 'Skip this check explicitly with --skip=storage to keep runs quiet.',
+      )
+    }
+
     const bucketIssues = await this.scanBuckets(ctx)
+    const typedBucketIssues = await this.scanTypedBuckets(ctx)
     const policyIssues = await this.scanPolicies(ctx)
 
     let fileIssues: DriftIssue[] = []
@@ -43,7 +74,45 @@ export class StorageCheck extends Check {
       fileIssues = await this.scanFiles(ctx)
     }
 
-    return [...bucketIssues, ...policyIssues, ...fileIssues]
+    return [...bucketIssues, ...typedBucketIssues, ...policyIssues, ...fileIssues]
+  }
+
+  /**
+   * Analytics and vector buckets live in their own tables, not storage.buckets,
+   * so creating one was invisible: the check read storage.buckets and reported
+   * no drift at all.
+   *
+   * Both tables arrived with newer storage migrations (0038 analytics, 0044/45
+   * vectors), so each is probed before being read.
+   */
+  private async scanTypedBuckets(ctx: CheckContext): Promise<DriftIssue[]> {
+    const issues: DriftIssue[] = []
+    for (const spec of TYPED_BUCKET_TABLES) {
+      const [srcHas, tgtHas] = await Promise.all([
+        this.hasTable(ctx.source.dbUrl, spec.table),
+        this.hasTable(ctx.target.dbUrl, spec.table),
+      ])
+      // Absent on both sides means this Supabase predates the feature; absent
+      // on one means the versions differ, which the extensions/schema layers
+      // already report far more usefully than a bucket diff would.
+      if (!srcHas || !tgtHas) continue
+
+      const [source, target] = await Promise.all([
+        this.listTypedBuckets(ctx.source.dbUrl, spec),
+        this.listTypedBuckets(ctx.target.dbUrl, spec),
+      ])
+      issues.push(...diffTypedBuckets(source, target, spec))
+    }
+    return issues
+  }
+
+  private async hasTable(dbUrl: string, table: string): Promise<boolean> {
+    const rows = await this.queryFn(dbUrl, tableExistsSql(table)) as unknown as Array<{ present: boolean }>
+    return rows[0]?.present === true
+  }
+
+  private async listTypedBuckets(dbUrl: string, spec: TypedBucketSpec): Promise<TypedBucket[]> {
+    return await this.queryFn(dbUrl, spec.sql) as unknown as TypedBucket[]
   }
 
   private async scanBuckets(ctx: CheckContext): Promise<DriftIssue[]> {
@@ -63,11 +132,28 @@ export class StorageCheck extends Check {
       this.fetchStoragePolicies(ctx.source.dbUrl),
       this.fetchStoragePolicies(ctx.target.dbUrl),
     ])
-    return diffStoragePolicies(source, target)
+    return diffSchemaPolicies(source, target, {
+      schema: 'storage', check: 'storage', idPrefix: 'storage-policy', label: 'storage',
+    })
   }
 
+  private async hasStorageSchema(dbUrl: string): Promise<boolean> {
+    const rows = await this.queryFn(dbUrl, STORAGE_PRESENT_SQL) as unknown as Array<{ present: boolean }>
+    return rows[0]?.present === true
+  }
+
+  /**
+   * Read the buckets, selecting only the columns this Supabase version actually
+   * has. storage.buckets has grown over time (owner_id in 0018, type in 0038),
+   * so a fixed column list either misses columns on a new instance or fails on
+   * an old one. Resolving them per-connection handles both.
+   */
   private async listBuckets(dbUrl: string): Promise<StorageBucket[]> {
-    return await this.queryFn(dbUrl, STORAGE_BUCKET_SQL) as unknown as StorageBucket[]
+    const present = await this.queryFn(dbUrl, BUCKET_COLUMNS_SQL) as unknown as Array<{ column_name: string }>
+    const names = new Set(present.map(r => r.column_name))
+    const cols = COMPARED_BUCKET_COLUMNS.filter(c => names.has(c))
+    const sql = `SELECT ${cols.join(', ')} FROM storage.buckets ORDER BY name`
+    return await this.queryFn(dbUrl, sql) as unknown as StorageBucket[]
   }
 
   private async fetchStoragePolicies(dbUrl: string): Promise<StoragePolicy[]> {
@@ -96,20 +182,143 @@ export class StorageCheck extends Check {
   }
 }
 
-/** Query storage buckets directly from PostgreSQL. */
-const STORAGE_BUCKET_SQL = `
-  SELECT id, name, public, file_size_limit, allowed_mime_types
-  FROM storage.buckets
-  ORDER BY name
+/**
+ * Bucket columns worth comparing, in select order.
+ *
+ * Only the first five used to be read, so a bucket switched between STANDARD,
+ * ANALYTICS and VECTOR — an entirely different storage backend — compared as
+ * identical and the layer reported "no drift detected".
+ *
+ * Deliberately excludes created_at/updated_at (timestamps differ between any
+ * two environments and mean nothing) and the deprecated `owner` column, which
+ * migration 0018 replaced with owner_id.
+ */
+const COMPARED_BUCKET_COLUMNS = [
+  'id', 'name', 'public', 'file_size_limit', 'allowed_mime_types',
+  'type', 'avif_autodetection', 'owner_id',
+] as const
+
+/** Which of those this particular Supabase version actually has. */
+const BUCKET_COLUMNS_SQL = `
+  SELECT column_name
+  FROM information_schema.columns
+  WHERE table_schema = 'storage' AND table_name = 'buckets'
+`
+
+/**
+ * Buckets that do not live in storage.buckets.
+ *
+ * `key` is what identifies the same logical bucket across two environments.
+ * For analytics that is `name`, NOT `id`: id is a uuid defaulting to
+ * gen_random_uuid(), so it differs between any two projects and keying on it
+ * would report every bucket as both missing and extra.
+ */
+interface TypedBucketSpec {
+  table: string
+  /** Column identifying the bucket to a human. */
+  key: string
+  /** Extra columns worth comparing, beyond the key. */
+  compared: string[]
+  label: string
+  sql: string
+}
+
+interface TypedBucket {
+  key: string
+  [column: string]: unknown
+}
+
+const TYPED_BUCKET_TABLES: TypedBucketSpec[] = [
+  {
+    table: 'buckets_analytics',
+    key: 'name',
+    compared: ['format'],
+    label: 'analytics bucket',
+    // deleted_at is a soft delete — a removed bucket still has its row.
+    sql: `SELECT name AS key, format FROM storage.buckets_analytics
+          WHERE deleted_at IS NULL ORDER BY name`,
+  },
+  {
+    table: 'buckets_vectors',
+    key: 'id',
+    compared: [],
+    label: 'vector bucket',
+    sql: `SELECT id AS key FROM storage.buckets_vectors ORDER BY id`,
+  },
+]
+
+function tableExistsSql(table: string): string {
+  return `
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.tables
+      WHERE table_schema = 'storage' AND table_name = '${table}'
+    ) AS present
+  `
+}
+
+function diffTypedBuckets(
+  source: TypedBucket[],
+  target: TypedBucket[],
+  spec: TypedBucketSpec,
+): DriftIssue[] {
+  const issues: DriftIssue[] = []
+  const sourceMap = new Map(source.map(b => [String(b.key), b]))
+  const targetMap = new Map(target.map(b => [String(b.key), b]))
+
+  for (const [key, b] of sourceMap) {
+    if (targetMap.has(key)) continue
+    issues.push({
+      id: `storage-${spec.table}-missing-${key}`,
+      check: 'storage',
+      severity: 'warning',
+      title: `Missing ${spec.label}: ${key}`,
+      description: `${spec.label} "${key}" exists in source but not in target.`,
+      sourceValue: b,
+    })
+  }
+
+  for (const [key, b] of targetMap) {
+    if (sourceMap.has(key)) continue
+    issues.push({
+      id: `storage-${spec.table}-extra-${key}`,
+      check: 'storage',
+      severity: 'info',
+      title: `Extra ${spec.label}: ${key}`,
+      description: `${spec.label} "${key}" exists in target but not in source.`,
+      targetValue: b,
+    })
+  }
+
+  for (const [key, sb] of sourceMap) {
+    const tb = targetMap.get(key)
+    if (!tb) continue
+    for (const col of spec.compared) {
+      if (sb[col] === tb[col]) continue
+      issues.push({
+        id: `storage-${spec.table}-${col}-${key}`,
+        check: 'storage',
+        severity: 'warning',
+        title: `${spec.label} ${col} mismatch: ${key}`,
+        description: `${spec.label} "${key}" has ${col} ${String(sb[col])} in source but ${String(tb[col])} in target.`,
+        sourceValue: { [col]: sb[col] },
+        targetValue: { [col]: tb[col] },
+      })
+    }
+  }
+
+  return issues
+}
+
+/** Whether this database is a Supabase project at all. */
+const STORAGE_PRESENT_SQL = `
+  SELECT EXISTS (
+    SELECT 1 FROM information_schema.tables
+    WHERE table_schema = 'storage' AND table_name = 'buckets'
+  ) AS present
 `
 
 /** Query RLS policies specifically on the storage schema (normally excluded from main RLS layer). */
-const STORAGE_POLICY_SQL = `
-  SELECT tablename, policyname, permissive, roles, cmd, qual, with_check
-  FROM pg_policies
-  WHERE schemaname = 'storage'
-  ORDER BY tablename, policyname
-`
+const STORAGE_POLICY_SQL = schemaPolicySql('storage')
 
 // ─── Bucket diffing ──────────────────────────────────────────────────────────
 
@@ -250,12 +459,59 @@ function diffBuckets(
       })
     }
 
+    // Changing a bucket's type switches its storage backend outright, so this
+    // is critical rather than a tweak. Compared only when both sides report the
+    // column, since it arrived in storage migration 0038.
+    if (sb.type !== undefined && tb.type !== undefined && sb.type !== tb.type) {
+      setClauses.push(`type = ${sqlLiteral(sb.type)}`)
+      issues.push({
+        id: `storage-type-${id}`,
+        check: 'storage',
+        severity: 'critical',
+        title: `Bucket type mismatch: ${sb.name}`,
+        description: `Bucket "${sb.name}" is ${sb.type} in source but ${tb.type} in target — these are different storage backends, not a setting.`,
+        sourceValue: { type: sb.type },
+        targetValue: { type: tb.type },
+      })
+    }
+
+    if (sb.avif_autodetection !== undefined && tb.avif_autodetection !== undefined
+        && sb.avif_autodetection !== tb.avif_autodetection) {
+      setClauses.push(`avif_autodetection = ${sqlLiteral(sb.avif_autodetection)}`)
+      issues.push({
+        id: `storage-avif-${id}`,
+        check: 'storage',
+        severity: 'warning',
+        title: `Bucket AVIF autodetection mismatch: ${sb.name}`,
+        description: `Bucket "${sb.name}" avif_autodetection is ${sb.avif_autodetection} in source but ${tb.avif_autodetection} in target.`,
+        sourceValue: { avif_autodetection: sb.avif_autodetection },
+        targetValue: { avif_autodetection: tb.avif_autodetection },
+      })
+    }
+
+    // owner_id is reported but never synced: it references a user that exists
+    // in one project and not the other, so copying the value across would
+    // point the bucket at an identity that does not exist there.
+    if (sb.owner_id !== undefined && tb.owner_id !== undefined && sb.owner_id !== tb.owner_id) {
+      issues.push({
+        id: `storage-owner-${id}`,
+        check: 'storage',
+        severity: 'info',
+        title: `Bucket owner mismatch: ${sb.name}`,
+        description: `Bucket "${sb.name}" has a different owner_id in each environment. Not synced — the owner is an identity local to its own project.`,
+        sourceValue: { owner_id: sb.owner_id },
+        targetValue: { owner_id: tb.owner_id },
+      })
+    }
+
     // Attach sync fix to the first property-diff issue for this bucket
     if (setClauses.length > 0) {
       const firstBucketIssue = issues.find(i =>
         i.id.startsWith(`storage-visibility-${id}`) ||
         i.id.startsWith(`storage-sizelimit-${id}`) ||
-        i.id.startsWith(`storage-mimetypes-${id}`),
+        i.id.startsWith(`storage-mimetypes-${id}`) ||
+        i.id.startsWith(`storage-type-${id}`) ||
+        i.id.startsWith(`storage-avif-${id}`),
       )
       if (firstBucketIssue) {
         if (useApi) {
@@ -284,97 +540,5 @@ function diffBuckets(
 
 // ─── Storage policy diffing ──────────────────────────────────────────────────
 
-function storagePolicyKey(p: StoragePolicy): string {
-  return `${p.tablename}.${p.policyname}`
-}
-
-function storagePoliciesEqual(a: StoragePolicy, b: StoragePolicy): boolean {
-  return (
-    a.permissive === b.permissive &&
-    a.cmd === b.cmd &&
-    JSON.stringify(normalizeRoles(a.roles)) === JSON.stringify(normalizeRoles(b.roles)) &&
-    (a.qual ?? '') === (b.qual ?? '') &&
-    (a.with_check ?? '') === (b.with_check ?? '')
-  )
-}
-
 // normalizeRoles imported from utils/strings
 
-function generateStorageCreatePolicySql(p: StoragePolicy): string {
-  const roles = normalizeRoles(p.roles).join(', ')
-  const lines = [
-    `CREATE POLICY "${p.policyname}"`,
-    `  ON "storage"."${p.tablename}"`,
-    `  AS ${p.permissive}`,
-    `  FOR ${p.cmd}`,
-    `  TO ${roles}`,
-  ]
-  if (p.qual) lines.push(`  USING (${p.qual})`)
-  if (p.with_check) lines.push(`  WITH CHECK (${p.with_check})`)
-  lines.push(';')
-  return lines.join('\n')
-}
-
-function generateStorageDropPolicySql(p: StoragePolicy): string {
-  return `DROP POLICY IF EXISTS "${p.policyname}" ON "storage"."${p.tablename}";`
-}
-
-function diffStoragePolicies(source: StoragePolicy[], target: StoragePolicy[]): DriftIssue[] {
-  const issues: DriftIssue[] = []
-  const sourceMap = new Map(source.map(p => [storagePolicyKey(p), p]))
-  const targetMap = new Map(target.map(p => [storagePolicyKey(p), p]))
-
-  for (const [key, sp] of sourceMap) {
-    if (!targetMap.has(key)) {
-      issues.push({
-        id: `storage-policy-missing-${key}`,
-        check: 'storage',
-        severity: 'critical',
-        title: `Missing storage policy: ${sp.policyname} on ${sp.tablename}`,
-        description: `Storage RLS policy "${sp.policyname}" on storage.${sp.tablename} exists in source but not in target.`,
-        sourceValue: sp,
-        sql: {
-          up: generateStorageCreatePolicySql(sp),
-          down: generateStorageDropPolicySql(sp),
-        },
-      })
-    }
-  }
-
-  for (const [key, tp] of targetMap) {
-    if (!sourceMap.has(key)) {
-      issues.push({
-        id: `storage-policy-extra-${key}`,
-        check: 'storage',
-        severity: 'info',
-        title: `Extra storage policy: ${tp.policyname} on ${tp.tablename}`,
-        description: `Storage RLS policy "${tp.policyname}" on storage.${tp.tablename} exists in target but not in source.`,
-        targetValue: tp,
-        sql: {
-          up: generateStorageDropPolicySql(tp),
-          down: generateStorageCreatePolicySql(tp),
-        },
-      })
-    }
-  }
-
-  for (const [key, sp] of sourceMap) {
-    const tp = targetMap.get(key)
-    if (!tp || storagePoliciesEqual(sp, tp)) continue
-    issues.push({
-      id: `storage-policy-changed-${key}`,
-      check: 'storage',
-      severity: 'critical',
-      title: `Storage policy changed: ${sp.policyname} on ${sp.tablename}`,
-      description: `Storage RLS policy "${sp.policyname}" on storage.${sp.tablename} differs between source and target.`,
-      sourceValue: sp,
-      targetValue: tp,
-      sql: {
-        up: [generateStorageDropPolicySql(sp), generateStorageCreatePolicySql(sp)].join('\n'),
-        down: [generateStorageDropPolicySql(tp), generateStorageCreatePolicySql(tp)].join('\n'),
-      },
-    })
-  }
-
-  return issues
-}

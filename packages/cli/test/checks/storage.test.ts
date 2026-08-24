@@ -18,6 +18,12 @@ function mockContext(): CheckContext {
   }
 }
 
+/** Columns a modern Supabase reports; older versions have a subset. */
+const DEFAULT_BUCKET_COLUMNS = [
+  'id', 'name', 'public', 'file_size_limit', 'allowed_mime_types',
+  'type', 'avif_autodetection', 'owner_id',
+]
+
 const makeBucket = (overrides: Record<string, unknown> = {}) => ({
   id: 'avatars',
   name: 'avatars',
@@ -36,6 +42,16 @@ function makeQueryFn(
 ): QueryFn {
   return async (dbUrl: string, sql: string) => {
     const isSource = dbUrl.includes('source')
+    // The check now probes for the storage schema and for which bucket columns
+    // this Supabase version has, before selecting them.
+    if (sql.includes("table_name = 'buckets_analytics'")
+        || sql.includes("table_name = 'buckets_vectors'")) {
+      return [{ present: false }] as never
+    }
+    if (sql.includes('AS present')) return [{ present: true }] as never
+    if (sql.includes('information_schema.columns')) {
+      return DEFAULT_BUCKET_COLUMNS.map(column_name => ({ column_name })) as never
+    }
     if (sql.includes('storage.buckets')) {
       return (isSource ? sourceBuckets : targetBuckets) as never
     }
@@ -61,12 +77,154 @@ const makePolicy = (overrides: Record<string, unknown> = {}) => ({
 function makePolicyQueryFn(sourcePolicies: unknown[], targetPolicies: unknown[]): QueryFn {
   return async (dbUrl: string, sql: string) => {
     const isSource = dbUrl.includes('source')
+    if (sql.includes("table_name = 'buckets_analytics'")
+        || sql.includes("table_name = 'buckets_vectors'")) {
+      return [{ present: false }] as never
+    }
+    if (sql.includes('AS present')) return [{ present: true }] as never
+    if (sql.includes('information_schema.columns')) {
+      return DEFAULT_BUCKET_COLUMNS.map(column_name => ({ column_name })) as never
+    }
     if (sql.includes('storage.buckets')) return [] as never
     return (isSource ? sourcePolicies : targetPolicies) as never
   }
 }
 
 describe('StorageCheck', () => {
+  /** Mock where the typed-bucket tables exist and return the given rows. */
+  const typedBucketQueryFn = (
+    table: string, src: unknown[], tgt: unknown[],
+  ): QueryFn => async (dbUrl: string, sql: string) => {
+    if (sql.includes(`table_name = '${table}'`)) return [{ present: true }] as never
+    if (sql.includes("table_name = 'buckets_analytics'")
+        || sql.includes("table_name = 'buckets_vectors'")) return [{ present: false }] as never
+    if (sql.includes('AS present')) return [{ present: true }] as never
+    if (sql.includes('information_schema.columns')) {
+      return DEFAULT_BUCKET_COLUMNS.map(column_name => ({ column_name })) as never
+    }
+    if (sql.includes(`storage.${table}`)) {
+      return (dbUrl.includes('source') ? src : tgt) as never
+    }
+    return [] as never
+  }
+
+  it('detects an analytics bucket that exists only in source', async () => {
+    // These live in storage.buckets_analytics, not storage.buckets, so creating
+    // one was invisible — the check read the wrong table and saw no drift.
+    const issues = await new StorageCheck(typedBucketQueryFn(
+      'buckets_analytics', [{ key: 'events', format: 'ICEBERG' }], [],
+    )).scan(mockContext())
+    const missing = issues.find(i => i.id === 'storage-buckets_analytics-missing-events')
+    expect(missing?.severity).toBe('warning')
+  })
+
+  it('detects an analytics bucket format change', async () => {
+    const issues = await new StorageCheck(typedBucketQueryFn(
+      'buckets_analytics',
+      [{ key: 'events', format: 'ICEBERG' }],
+      [{ key: 'events', format: 'DELTA' }],
+    )).scan(mockContext())
+    expect(issues.find(i => i.id === 'storage-buckets_analytics-format-events')?.severity).toBe('warning')
+  })
+
+  it('detects a vector bucket that exists only in source', async () => {
+    const issues = await new StorageCheck(typedBucketQueryFn(
+      'buckets_vectors', [{ key: 'embeddings' }], [],
+    )).scan(mockContext())
+    expect(issues.find(i => i.id === 'storage-buckets_vectors-missing-embeddings')?.severity).toBe('warning')
+  })
+
+  it('keys analytics buckets on name, not the generated uuid', async () => {
+    // buckets_analytics.id defaults to gen_random_uuid(), so it differs between
+    // any two projects. Keying on it would report every bucket as both missing
+    // and extra on every single run.
+    const issues = await new StorageCheck(typedBucketQueryFn(
+      'buckets_analytics',
+      [{ key: 'events', format: 'ICEBERG' }],
+      [{ key: 'events', format: 'ICEBERG' }],
+    )).scan(mockContext())
+    expect(issues).toEqual([])
+  })
+
+  it('ignores typed buckets on a Supabase version without those tables', async () => {
+    const issues = await new StorageCheck(makeQueryFn([makeBucket()], [makeBucket()])).scan(mockContext())
+    expect(issues.filter(i => i.id.includes('buckets_analytics') || i.id.includes('buckets_vectors'))).toEqual([])
+  })
+
+  it('detects a bucket type change — different storage backend, not a setting', async () => {
+    // This exact case reported "no drift detected" before: only id, name,
+    // public, file_size_limit and allowed_mime_types were ever read, so a
+    // bucket switched between STANDARD, ANALYTICS and VECTOR compared equal.
+    const check = new StorageCheck(makeQueryFn(
+      [makeBucket({ type: 'STANDARD' })],
+      [makeBucket({ type: 'VECTOR' })],
+    ))
+    const issues = await check.scan(mockContext())
+    const typeIssue = issues.find(i => i.id === 'storage-type-avatars')
+    expect(typeIssue).toBeDefined()
+    expect(typeIssue!.severity).toBe('critical')
+    expect(typeIssue!.description).toMatch(/STANDARD.*VECTOR/)
+  })
+
+  it('detects an avif_autodetection change', async () => {
+    const check = new StorageCheck(makeQueryFn(
+      [makeBucket({ avif_autodetection: true })],
+      [makeBucket({ avif_autodetection: false })],
+    ))
+    const issues = await check.scan(mockContext())
+    expect(issues.find(i => i.id === 'storage-avif-avatars')?.severity).toBe('warning')
+  })
+
+  it('reports an owner_id difference but never syncs it', async () => {
+    // The owner is an identity local to its own project; copying the value
+    // across would point the bucket at a user that does not exist there.
+    const check = new StorageCheck(makeQueryFn(
+      [makeBucket({ owner_id: 'user-a' })],
+      [makeBucket({ owner_id: 'user-b' })],
+    ))
+    const issues = await check.scan(mockContext())
+    const owner = issues.find(i => i.id === 'storage-owner-avatars')
+    expect(owner?.severity).toBe('info')
+    expect(owner?.sql).toBeUndefined()
+    expect(owner?.action).toBeUndefined()
+  })
+
+  it('ignores columns the Supabase version does not have', async () => {
+    // An older instance has no type/avif/owner_id column at all. Selecting them
+    // would fail the query outright, so they must simply not be compared.
+    const oldColumns = ['id', 'name', 'public', 'file_size_limit', 'allowed_mime_types']
+    const queryFn: QueryFn = async (dbUrl: string, sql: string) => {
+      if (sql.includes("table_name = 'buckets_analytics'")
+        || sql.includes("table_name = 'buckets_vectors'")) {
+      return [{ present: false }] as never
+    }
+    if (sql.includes('AS present')) return [{ present: true }] as never
+      if (sql.includes('information_schema.columns')) {
+        return oldColumns.map(column_name => ({ column_name })) as never
+      }
+      if (sql.includes('storage.buckets')) {
+        expect(sql).not.toMatch(/\btype\b|avif_autodetection|owner_id/)
+        return [makeBucket()] as never
+      }
+      return [] as never
+    }
+    const issues = await new StorageCheck(queryFn).scan(mockContext())
+    expect(issues).toEqual([])
+  })
+
+  it('skips rather than errors when an environment is not a Supabase project', async () => {
+    // Comparing against plain PostgreSQL used to fail the layer with
+    // 'relation "storage.buckets" does not exist', which reports drift as
+    // UNKNOWN — worse than saying there is no storage to compare.
+    const queryFn: QueryFn = async (dbUrl: string, sql: string) => {
+      if (sql.includes('AS present')) {
+        return [{ present: dbUrl.includes('source') }] as never
+      }
+      return [] as never
+    }
+    await expect(new StorageCheck(queryFn).scan(mockContext())).rejects.toThrow(/not a Supabase project/)
+  })
+
   it('returns no issues when buckets match', async () => {
     const bucket = makeBucket()
     const check = new StorageCheck(makeQueryFn([bucket], [bucket]))

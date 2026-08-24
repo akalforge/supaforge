@@ -41,11 +41,11 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 | Data | `@dbdiff/cli --type=data` | ✅ Row-level diff for all public tables (configurable). Checksum-based fast skip for unchanged tables. | SQL (up/down) |
 | RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
 | Edge Functions | Management API, or the functions directory when `functionsPath` is set | ✅ Hosted via API; **self-hosted by comparing the functions directory** | DELETE extras via API (hosted); otherwise guidance to `supabase functions deploy` |
-| Storage | Storage API + `pg_policies` | ✅ Buckets, policies. `--include-files` adds file-level drift detection (checksums for JSON, size/date for binary). | Buckets via API (POST/PUT/DELETE); Policies via SQL |
+| Storage | Storage API + `pg_policies` | ✅ Buckets (`public`, `type`, `file_size_limit`, `allowed_mime_types`, `avif_autodetection`; `owner_id` reported only), analytics and vector buckets, policies. Skipped when either side has no `storage` schema. `--include-files` adds file-level drift detection (checksums for JSON, size/date for binary) — **detection only, files are never transferred**. | Buckets via API (POST/PUT/DELETE); Policies via SQL |
 | Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Self-hosted covers provider flags and signup settings, not `JWT_EXP` / `MFA_ENABLED` | PATCH via API (hosted only) |
 | Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ | SQL when trigger metadata available |
-| Realtime Publications | `pg_publication` + `pg_publication_tables` | ✅ | SQL (CREATE/ALTER PUBLICATION) |
+| Realtime | `pg_publication` + `pg_publication_tables`, and `pg_policies` on `realtime` | ✅ Publications, plus **Realtime Authorization** policies on `realtime.messages` (who may join which channel) | SQL (CREATE/ALTER PUBLICATION; CREATE/DROP POLICY) |
 | Vault Secrets | `vault.secrets` | ✅ | SQL (`vault.create_secret` / `vault.update_secret`) |
 | Postgres Extensions | `pg_extension` | ✅ | SQL (CREATE/DROP EXTENSION) |
 
@@ -447,6 +447,67 @@ Sensitive values (`dbUrl`, `accessToken`) support `$VAR` and `${VAR}` syntax —
 Higher-priority files win for duplicate keys. Existing `process.env` values are never overwritten.
 
 See [`supaforge.config.example.jsonc`](supaforge.config.example.jsonc) and [`.env.example`](.env.example) for fully commented examples.
+
+## What Storage Compares
+
+Bucket **metadata**, not the objects inside them:
+
+| Property | Reported as | Synced |
+|---|---|---|
+| `public` | critical if private→public, else warning | ✅ |
+| `type` (`STANDARD`/`ANALYTICS`/`VECTOR`) | **critical** — a different storage backend, not a setting | ✅ |
+| `file_size_limit`, `allowed_mime_types` | warning | ✅ |
+| `avif_autodetection` | warning | ✅ |
+| `owner_id` | info | ❌ — the owner is an identity local to its own project |
+
+Columns are resolved per connection, so an older Supabase without `type` or
+`owner_id` is compared on what it does have rather than failing.
+
+**Analytics and vector buckets** live in their own tables — `storage.buckets_analytics`
+and `storage.buckets_vectors` — not in `storage.buckets`, so they are compared
+separately. Analytics buckets are matched on `name` rather than `id`: that `id`
+is a `gen_random_uuid()` default and differs between any two projects, so
+keying on it would report every bucket as both missing and extra on every run.
+Soft-deleted analytics buckets (`deleted_at`) are excluded. Both tables are
+probed first, so a Supabase predating them is unaffected.
+
+`created_at` and `updated_at` are ignored: they differ between any two
+environments and mean nothing.
+
+> **Files are never transferred.** `--include-files` lists objects and downloads
+> them to compute checksums so it can *report* drift. There is no upload, copy,
+> move or delete path for storage objects anywhere in SupaForge — syncing a
+> bucket row is cheap and reversible, overwriting user uploads is not.
+
+### Policies inside ignored schemas
+
+Supabase's own schemas are excluded from the RLS layer because their tables are
+product-managed — a difference there means the two projects run different
+Supabase versions, not that anyone changed anything.
+
+Two of them hold policies **you** write, so those are compared anyway, by the
+check that owns them:
+
+| Policy location | Compared by | What it controls |
+|---|---|---|
+| `storage.objects` | Storage | who may read or write which files |
+| `realtime.messages` | Realtime | who may join which channel (Realtime Authorization) |
+
+A missing or altered policy is **critical** — for these schemas it is an access
+rule. An extra policy is **info**: it may be deliberate, and removing it is a
+judgement call rather than a fix to apply blindly.
+
+### Ignored schemas
+
+Supabase-managed schemas are excluded by default, so findings are limited to
+things you can actually change:
+
+`auth`, `storage`, `realtime`, `_realtime`, `vault`, `net`, `graphql_public`,
+`supabase_migrations`, `pgsodium`, `pgtle`, `supabase_functions`, `extensions`
+
+Note `_realtime` (underscore) is a *different* schema from `realtime` — its
+tables are owned by `supabase_admin`, so RLS findings on them are not
+actionable. Override with `ignoreSchemas` in your config.
 
 ## Edge Functions on self-hosted
 

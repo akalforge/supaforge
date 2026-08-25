@@ -46,6 +46,7 @@ const driftedResult: ScanResult = {
     },
   ],
   score: 80,
+  postureScore: null,
   summary: { total: 2, critical: 1, warning: 1, info: 0 },
 }
 
@@ -112,6 +113,7 @@ describe('error rendering', () => {
       { check: 'rls', status: 'clean', issues: [], durationMs: 10 },
     ],
     score: 90,
+    postureScore: null,
     summary: { total: 0, critical: 0, warning: 0, info: 0 },
   }
 
@@ -179,6 +181,7 @@ describe('score color thresholds', () => {
       target: 'prod',
       checks: [],
       score,
+      postureScore: null,
       summary: { total: 0, critical: 0, warning: 0, info: 0 },
     }
   }
@@ -227,6 +230,7 @@ describe('singular and plural nouns', () => {
         durationMs: 10,
       }],
       score: 85,
+      postureScore: null,
       summary: { total: 1, critical: 1, warning: 0, info: 0 },
     }
     const output = renderSummary(result)
@@ -251,6 +255,7 @@ describe('singular and plural nouns', () => {
         durationMs: 10,
       }],
       score: 85,
+      postureScore: null,
       summary: { total: 1, critical: 1, warning: 0, info: 0 },
     }
     const output = renderSummary(result)
@@ -274,6 +279,7 @@ describe('skipped check rendering', () => {
       { check: 'vault', status: 'skipped', issues: [], durationMs: 0 },
     ],
     score: 100,
+    postureScore: null,
     summary: { total: 0, critical: 0, warning: 0, info: 0 },
   }
 
@@ -313,6 +319,7 @@ describe('action display in renderDetailed', () => {
       durationMs: 20,
     }],
     score: 85,
+    postureScore: null,
     summary: { total: 1, critical: 1, warning: 0, info: 0 },
   }
 
@@ -348,6 +355,7 @@ const erroredOnly: ScanResult = {
     { check: 'schema', status: 'error', issues: [], durationMs: 5000, error: 'Schema diff timed out after 5s' },
   ],
   score: 97,
+  postureScore: null,
   summary: { total: 0, critical: 0, warning: 0, info: 0 },
 }
 

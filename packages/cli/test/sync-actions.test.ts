@@ -4,15 +4,18 @@ import type { ScanResult, SyncAction } from '../src/types/drift.js'
 import type { FetchFn } from '../src/promote.js'
 
 function makeScanResult(overrides: Partial<ScanResult> = {}): ScanResult {
-  return {
+  const base: ScanResult = {
     timestamp: new Date().toISOString(),
     source: 'dev',
     target: 'prod',
     checks: [],
     score: 100,
+    postureScore: null,
     summary: { total: 0, critical: 0, warning: 0, info: 0 },
-    ...overrides,
   }
+  // Object.assign rather than a spread: spreading Partial<ScanResult> widens
+  // every property to `| undefined`, which no longer satisfies ScanResult.
+  return Object.assign(base, overrides)
 }
 
 const mockAction: SyncAction = {

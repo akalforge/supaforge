@@ -1,0 +1,20 @@
+{
+  // Type-checking config for the test tree.
+  //
+  // tsconfig.json is the *build* config: it sets rootDir to src so the emitted
+  // dist layout is flat, which necessarily excludes test/. The effect was that
+  // `tsc --noEmit` reported a clean bill of health while type errors sat in
+  // test files, surfacing only when vitest transpiled them — after CI had
+  // already gone green on lint.
+  //
+  // This config checks the same sources plus the tests, and emits nothing.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": ".",
+    "declaration": false,
+    "declarationMap": false
+  },
+  "include": ["src", "test"],
+  "exclude": ["node_modules", "dist"]
+}

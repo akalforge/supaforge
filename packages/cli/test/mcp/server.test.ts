@@ -46,11 +46,12 @@ async function makeClient(cwd: string): Promise<{ client: Client; cleanup: () =>
 }
 
 function makeScanResult(overrides: Partial<ScanResult> = {}): ScanResult {
-  return {
+  const base: ScanResult = {
     timestamp: '2026-06-02T12:00:00.000Z',
     source: 'dev',
     target: 'prod',
     score: 85,
+    postureScore: null,
     summary: { total: 1, critical: 1, warning: 0, info: 0 },
     checks: [
       {
@@ -73,11 +74,28 @@ function makeScanResult(overrides: Partial<ScanResult> = {}): ScanResult {
         ],
       },
     ],
-    ...overrides,
   }
+  // Object.assign rather than a spread: spreading Partial<ScanResult> widens
+  // every property to `| undefined`, which no longer satisfies ScanResult.
+  return Object.assign(base, overrides)
 }
 
 // ── State ─────────────────────────────────────────────────────────────────────
+
+/**
+ * Read the text body of an MCP resource result.
+ *
+ * `contents` entries are a `{ text }` | `{ blob }` union, so the property is
+ * not accessible without narrowing. Every resource under test is textual;
+ * this fails loudly rather than silently yielding undefined if that changes.
+ */
+function resourceText(result: { contents: Array<Record<string, unknown>> }): string {
+  const first = result.contents[0]
+  if (typeof first?.text !== 'string') {
+    throw new Error(`expected a text resource, got ${JSON.stringify(first)}`)
+  }
+  return first.text
+}
 
 describe('mcp/state', () => {
   beforeEach(() => clearLastScanResult())
@@ -258,7 +276,7 @@ describe('MCP resources', () => {
     await createTestConfig(tmpDir)
     ;({ client, cleanup } = await makeClient(tmpDir))
     const result = await client.readResource({ uri: 'supaforge://config' })
-    const text = result.contents[0].text as string
+    const text = resourceText(result)
     const parsed = JSON.parse(text)
     for (const env of Object.values(parsed.environments as Record<string, { dbUrl: string }>)) {
       expect(env.dbUrl).toBe('***')
@@ -268,14 +286,14 @@ describe('MCP resources', () => {
   it('config resource returns error text when file is missing', async () => {
     ;({ client, cleanup } = await makeClient(tmpDir))
     const result = await client.readResource({ uri: 'supaforge://config' })
-    const text = result.contents[0].text as string
+    const text = resourceText(result)
     expect(text).toContain('Error')
   })
 
   it('last-scan resource returns no-scan message initially', async () => {
     ;({ client, cleanup } = await makeClient(tmpDir))
     const result = await client.readResource({ uri: 'supaforge://last-scan' })
-    const text = result.contents[0].text as string
+    const text = resourceText(result)
     const parsed = JSON.parse(text)
     expect(parsed.message).toContain('scan_drift first')
   })
@@ -284,7 +302,7 @@ describe('MCP resources', () => {
     setLastScanResult(makeScanResult())
     ;({ client, cleanup } = await makeClient(tmpDir))
     const result = await client.readResource({ uri: 'supaforge://last-scan' })
-    const text = result.contents[0].text as string
+    const text = resourceText(result)
     const parsed = JSON.parse(text)
     expect(parsed.score).toBe(85)
     expect(parsed.source).toBe('dev')
@@ -293,7 +311,7 @@ describe('MCP resources', () => {
   it('migrations resource returns empty list when directory does not exist', async () => {
     ;({ client, cleanup } = await makeClient(tmpDir))
     const result = await client.readResource({ uri: 'supaforge://migrations' })
-    const text = result.contents[0].text as string
+    const text = resourceText(result)
     const parsed = JSON.parse(text)
     expect(parsed.files).toEqual([])
   })
@@ -305,7 +323,7 @@ describe('MCP resources', () => {
     await writeFile(join(migrationsDir, '20260102_add-rls.json'), '{}')
     ;({ client, cleanup } = await makeClient(tmpDir))
     const result = await client.readResource({ uri: 'supaforge://migrations' })
-    const text = result.contents[0].text as string
+    const text = resourceText(result)
     const parsed = JSON.parse(text)
     expect(parsed.files).toContain('20260101_init.json')
     expect(parsed.files).toContain('20260102_add-rls.json')

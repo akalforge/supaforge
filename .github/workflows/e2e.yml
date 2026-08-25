@@ -24,8 +24,14 @@ jobs:
           cache: npm
           cache-dependency-path: packages/cli/package-lock.json
 
+      # v3 resolves the CLI from the npm registry. v1 resolved it from the
+      # GitHub releases API, which is rate limited to 60 requests an hour per
+      # runner IP for unauthenticated callers — shared across every job on that
+      # runner, so this failed as "rate limit exceeded" for reasons that had
+      # nothing to do with the change under test. The v1 tag no longer exists
+      # upstream either.
       - name: Install Supabase CLI
-        uses: supabase/setup-cli@v1
+        uses: supabase/setup-cli@v3
         with:
           version: latest
 

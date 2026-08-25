@@ -1,0 +1,22 @@
+# The shared conformance data is published on every merge to its own repo, and
+# consumers are meant to track it without anyone thinking about it. `npm ci`
+# installs strictly from the lockfile, so the range in package.json is not
+# enough on its own — something has to move the lockfile. That is this.
+#
+# Scoped deliberately: only @akalforge/pg-conformance is watched here, because
+# it is the one dependency whose updates are ours, tested upstream against
+# PostgreSQL 14-18 before publishing, and auto-merged on the strength of that.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /packages/cli
+    schedule:
+      interval: daily
+    allow:
+      - dependency-name: "@akalforge/pg-conformance"
+    commit-message:
+      prefix: chore
+      include: scope
+    labels:
+      - dependencies
+    open-pull-requests-limit: 3

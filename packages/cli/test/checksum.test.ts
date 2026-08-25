@@ -14,7 +14,7 @@ describe('getTableFingerprint', () => {
   })
 
   it('passes the table name in SQL', async () => {
-    const queryFn = vi.fn(async () => [{ row_count: 0, size_bytes: '0' }])
+    const queryFn = vi.fn(async (_url: string, _sql: string) => [{ row_count: 0, size_bytes: '0' }])
     await getTableFingerprint('postgres://x', 'my_schema.my_table', queryFn)
     expect(queryFn).toHaveBeenCalledOnce()
     const sql = queryFn.mock.calls[0][1]

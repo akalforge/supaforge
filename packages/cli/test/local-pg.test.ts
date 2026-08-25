@@ -183,7 +183,7 @@ describe('stopLocalPg', () => {
       (c: string[]) => c[1]?.[0] === 'rm',
     )
     expect(rmCall).toBeTruthy()
-    expect(rmCall[1]).toContain(CONTAINER_NAME)
+    expect(rmCall?.[1]).toContain(CONTAINER_NAME)
   })
 
   it('does nothing when no runtime is available', async () => {

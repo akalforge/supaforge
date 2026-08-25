@@ -18,6 +18,7 @@
  *    connection string that isn't loopback, so a misconfigured test can't point
  *    destructive operations at a real Supabase project.
  */
+import { fingerprintSql } from '@akalforge/pg-conformance';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { promisify } from 'node:util';
@@ -244,26 +245,16 @@ export class PgHarness {
   }
 
   /** Structural fingerprint used to assert two databases match. */
+  /**
+   * Structural fingerprint of a role's schemas, from @akalforge/pg-conformance.
+   *
+   * This used to be a local query that read columns from information_schema and
+   * compared functions by signature. It could not see a partitioned table, a
+   * partition bound, a view's body, a trigger, a type or a sequence — so an
+   * assertion that two schemas matched was much weaker than it appeared.
+   */
   async schemaFingerprint(role: Role, schemas = ['public']): Promise<string> {
-    const list = schemas.map((s) => `'${s}'`).join(',');
-    return this.sql(role, `
-      SELECT string_agg(line, E'\\n' ORDER BY line) FROM (
-        SELECT format('col %s.%s.%s %s %s %s', table_schema, table_name, column_name,
-                      data_type, is_nullable, coalesce(column_default,'-')) AS line
-          FROM information_schema.columns WHERE table_schema IN (${list})
-        UNION ALL
-        SELECT format('con %s.%s %s', n.nspname, c.conname, pg_get_constraintdef(c.oid))
-          FROM pg_constraint c JOIN pg_namespace n ON n.oid=c.connamespace WHERE n.nspname IN (${list})
-        UNION ALL
-        SELECT format('idx %s.%s %s', schemaname, indexname, indexdef)
-          FROM pg_indexes WHERE schemaname IN (${list})
-        UNION ALL
-        SELECT format('fn %s.%s %s', n.nspname, p.proname, pg_get_function_identity_arguments(p.oid))
-          FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname IN (${list})
-        UNION ALL
-        SELECT format('pol %s.%s.%s %s', schemaname, tablename, policyname, coalesce(qual,'-'))
-          FROM pg_policies WHERE schemaname IN (${list})
-      ) t`);
+    return this.sql(role, fingerprintSql(schemas).replace(/;\s*$/, ''));
   }
 
   // ---- cli ---------------------------------------------------------------

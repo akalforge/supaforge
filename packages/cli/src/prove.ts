@@ -24,6 +24,7 @@
 import { randomBytes } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
+import { fingerprintSql } from '@akalforge/pg-conformance'
 import { pgQuery } from './db'
 import { resolvePgDumpPath, getServerMajorVersion } from './pg-tools'
 import { join, dirname } from 'node:path'
@@ -57,108 +58,30 @@ function withDatabase(dbUrl: string, database: string): string {
 
 
 /**
- * Structural fingerprint of one database.
+ * The structural fingerprint comes from @akalforge/pg-conformance.
  *
- * Deliberately reads the catalog rather than information_schema: relkind is how
- * you tell a partitioned table from an ordinary one, and relpartbound is the
- * only place the partition bound exists. Both were invisible to the
- * information_schema view that let partition flattening go unnoticed.
+ * It used to be defined here, and separately in the e2e harness, and again in
+ * dbdiff's conformance runner. They drifted, and this copy was the one that
+ * compared views, functions and triggers by name alone — so it called two
+ * schemas converged when a view's predicate had been inverted, a function's
+ * body replaced, or a trigger moved from AFTER INSERT to BEFORE UPDATE.
  *
- * Indexes are compared per-relation, so an index created ON ONLY the parent —
- * which never reaches the partitions — shows up as the difference it is.
- *
- * Every object that carries a body is compared *by that body*, not by its name.
- * Comparing names alone made the proof unable to see a view whose WHERE clause
- * had been inverted, a function whose entire implementation had changed, or a
- * trigger that had moved from AFTER INSERT to BEFORE UPDATE — three schemas
- * that differ in the ways most likely to matter, all reported as converged.
- * Where PostgreSQL can render an object canonically (pg_get_viewdef,
- * pg_get_functiondef, pg_get_triggerdef) that rendering is what gets compared,
- * because both sides are then produced by the same server code.
+ * A shared definition of "same schema" is the whole point of the proof, so it
+ * lives in one place that both projects depend on.
  */
-const FINGERPRINT_SQL = (schemas: string[]): string => {
-  const list = schemas.map(s => `'${s}'`).join(',')
-  // Entries are joined with newlines, so any definition that spans lines would
-  // otherwise arrive as several unattributed entries — losing the object name
-  // and making the sort order depend on the body's formatting.
-  const flat = (expr: string) => `btrim(regexp_replace(${expr}, '\\s+', ' ', 'g'))`
-  return `
-    SELECT string_agg(line, E'\\n' ORDER BY line) AS fp FROM (
-      SELECT format('rel %s.%s kind=%s part=%s', n.nspname, c.relname, c.relkind,
-                    COALESCE(pg_get_expr(c.relpartbound, c.oid), '-')) AS line
-        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname IN (${list}) AND c.relkind IN ('r','p','v','m','S','f')
-      UNION ALL
-      SELECT format('col %s.%s.%s %s %s %s ident=%s gen=%s store=%s coll=%s',
-                    n.nspname, c.relname, a.attname,
-                    format_type(a.atttypid, a.atttypmod),
-                    CASE WHEN a.attnotnull THEN 'NO' ELSE 'YES' END,
-                    ${flat(`COALESCE(pg_get_expr(d.adbin, d.adrelid), '-')`)},
-                    a.attidentity, a.attgenerated, a.attstorage,
-                    COALESCE(co.collname, '-'))
-        FROM pg_attribute a
-        JOIN pg_class c ON c.oid = a.attrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-        LEFT JOIN pg_attrdef d ON d.adrelid = a.attrelid AND d.adnum = a.attnum
-        LEFT JOIN pg_collation co ON co.oid = a.attcollation
-       WHERE n.nspname IN (${list}) AND a.attnum > 0 AND NOT a.attisdropped
-         AND c.relkind IN ('r','p','v','m')
-      UNION ALL
-      -- An identity column's sequence options are part of the column: a target
-      -- rebuilt without them starts counting from one again.
-      SELECT format('seq %s.%s start=%s inc=%s min=%s max=%s cycle=%s',
-                    n.nspname, c.relname, s.seqstart, s.seqincrement,
-                    s.seqmin, s.seqmax, s.seqcycle)
-        FROM pg_sequence s
-        JOIN pg_class c ON c.oid = s.seqrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname IN (${list})
-      UNION ALL
-      SELECT format('con %s.%s %s', n.nspname, c.conname, ${flat(`pg_get_constraintdef(c.oid)`)})
-        FROM pg_constraint c JOIN pg_namespace n ON n.oid = c.connamespace
-       WHERE n.nspname IN (${list})
-      UNION ALL
-      SELECT format('idx %s.%s %s', schemaname, indexname, indexdef)
-        FROM pg_indexes WHERE schemaname IN (${list})
-      UNION ALL
-      -- The body, not just the signature. prokind is filtered because
-      -- pg_get_functiondef errors on aggregate and window functions.
-      SELECT format('fn %s.%s(%s) %s', n.nspname, p.proname,
-                    pg_get_function_identity_arguments(p.oid),
-                    ${flat(`pg_get_functiondef(p.oid)`)})
-        FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-       WHERE n.nspname IN (${list}) AND p.prokind IN ('f','p')
-      UNION ALL
-      SELECT format('trg %s.%s.%s %s', n.nspname, c.relname, t.tgname,
-                    ${flat(`pg_get_triggerdef(t.oid)`)})
-        FROM pg_trigger t JOIN pg_class c ON c.oid = t.tgrelid
-        JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname IN (${list}) AND NOT t.tgisinternal AND t.tgparentid = 0
-      UNION ALL
-      -- A view's body is the view. Two views with the same name and columns
-      -- but inverted predicates are not the same schema.
-      SELECT format('view %s.%s %s', n.nspname, c.relname,
-                    ${flat(`pg_get_viewdef(c.oid, true)`)})
-        FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-       WHERE n.nspname IN (${list}) AND c.relkind IN ('v','m')
-      UNION ALL
-      SELECT format('pol %s.%s.%s cmd=%s roles=%s using=%s check=%s',
-                    schemaname, tablename, policyname, cmd,
-                    array_to_string(roles, ','),
-                    ${flat(`COALESCE(qual, '-')`)}, ${flat(`COALESCE(with_check, '-')`)})
-        FROM pg_policies WHERE schemaname IN (${list})
-      UNION ALL
-      SELECT format('typ %s.%s %s', n.nspname, t.typname,
-                    COALESCE((SELECT string_agg(e.enumlabel, ',' ORDER BY e.enumsortorder)
-                              FROM pg_enum e WHERE e.enumtypid = t.oid), '-'))
-        FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-       WHERE n.nspname IN (${list}) AND t.typtype IN ('e','c','d')
-    ) t`
-}
 
 async function fingerprint(dbUrl: string, schemas: string[]): Promise<string> {
-  const rows = await pgQuery(dbUrl, FINGERPRINT_SQL(schemas)) as unknown as Array<{ fp: string | null }>
-  return rows[0]?.fp ?? ''
+  const rows = await pgQuery(dbUrl, fingerprintSql(schemas)) as unknown as
+    Array<{ fingerprint: string | null }>
+
+  // An empty fingerprint would make every comparison succeed, so a schema that
+  // produced nothing is treated as a fault rather than as "no differences".
+  // Reading the wrong column name would fail exactly this way, silently.
+  const value = rows[0]?.fingerprint
+  if (value === undefined) {
+    throw new Error('fingerprint query returned no "fingerprint" column')
+  }
+  return value ?? ''
 }
 
 /**
@@ -213,7 +136,7 @@ export async function proveConvergence(opts: {
     // Copy the target's structure. Data is irrelevant to a schema proof and
     // copying it would make this unusable on anything but a toy database.
     const dumpArgs = [
-      opts.targetUrl, '--schema-only', '--no-owner', '--no-privileges', '--no-comments',
+      opts.targetUrl, '--schema-only', '--no-owner', '--no-privileges',
       ...PROOF_EXCLUDED_SCHEMAS.flatMap(s => ['--exclude-schema', s]),
     ]
     const { stdout: structure } = await exec(pgDump, dumpArgs, {

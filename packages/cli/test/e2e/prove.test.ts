@@ -6,7 +6,7 @@
  * the mock. Each case here supplies a migration whose correctness is decided by
  * PostgreSQL, not by us.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
 import { PgHarness } from '../harness/PgHarness.js'
 import { proveConvergence } from '../../src/prove.js'
 
@@ -23,6 +23,15 @@ describeE2E('convergence proof', () => {
   }, 180_000)
 
   afterAll(async () => { await h?.down() }, 60_000)
+
+  // Each case owns its schema. Without this the databases accumulate every
+  // earlier case's objects, so a proof's residual is dominated by unrelated
+  // leftovers and an assertion can pass for the wrong reason.
+  beforeEach(async () => {
+    for (const role of ['source', 'target'] as const) {
+      await h.applySql(role, 'DROP SCHEMA IF EXISTS public CASCADE; CREATE SCHEMA public;')
+    }
+  }, 60_000)
 
   const prove = (migrationSql: string) => proveConvergence({
     sourceUrl: h.connectionString('source'),
@@ -48,6 +57,58 @@ describeE2E('convergence proof', () => {
     expect(proof.residual.join('\n')).toMatch(/label/)
   }, 300_000)
 
+  // The three below are regressions. The fingerprint used to compare objects
+  // that carry a body by name alone, so each of these pairs — genuinely
+  // different schemas, in the ways most likely to matter — was reported as
+  // converged.
+
+  it('catches a view whose body changed but whose name did not', async () => {
+    await h.applySql('source', `
+      CREATE TABLE readings (id int, n int);
+      CREATE VIEW positive AS SELECT id, n FROM readings WHERE n > 0;
+    `)
+
+    const inverted = `
+      CREATE TABLE readings (id int, n int);
+      CREATE VIEW positive AS SELECT id, n FROM readings WHERE n < 0;
+    `
+    const proof = await prove(inverted)
+
+    expect(proof.converged).toBe(false)
+    expect(proof.residual.join('\n')).toMatch(/positive/)
+  }, 300_000)
+
+  it('catches a function whose implementation changed', async () => {
+    await h.applySql('source', `
+      CREATE FUNCTION answer() RETURNS int LANGUAGE sql IMMUTABLE AS $fn$ SELECT 1 $fn$;
+    `)
+
+    const proof = await prove(
+      `CREATE FUNCTION answer() RETURNS int LANGUAGE sql IMMUTABLE AS $fn$ SELECT 999 $fn$;`,
+    )
+
+    expect(proof.converged).toBe(false)
+    expect(proof.residual.join('\n')).toMatch(/answer/)
+  }, 300_000)
+
+  it('catches a trigger that moved to a different timing and event', async () => {
+    await h.applySql('source', `
+      CREATE TABLE audited (id int);
+      CREATE FUNCTION note() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RETURN NEW; END $fn$;
+      CREATE TRIGGER watch AFTER INSERT ON audited FOR EACH ROW EXECUTE FUNCTION note();
+    `)
+
+    const movedTiming = `
+      CREATE TABLE audited (id int);
+      CREATE FUNCTION note() RETURNS trigger LANGUAGE plpgsql AS $fn$ BEGIN RETURN NEW; END $fn$;
+      CREATE TRIGGER watch BEFORE UPDATE ON audited FOR EACH ROW EXECUTE FUNCTION note();
+    `
+    const proof = await prove(movedTiming)
+
+    expect(proof.converged).toBe(false)
+    expect(proof.residual.join('\n')).toMatch(/watch/)
+  }, 300_000)
+
   it('catches a partition index that never reaches its partitions', async () => {
     // ON ONLY is correct when the index is created before partitions attach —
     // PostgreSQL propagates to partitions added later. It is wrong when the
@@ -67,7 +128,6 @@ describeE2E('convergence proof', () => {
       CREATE TABLE "sales_2026" PARTITION OF "sales"
         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
       CREATE INDEX sales_d_idx ON ONLY public.sales USING btree (d);
-      CREATE TABLE widgets (id bigint PRIMARY KEY, label text NOT NULL);
     `
     const bad = await prove(attachThenIndex)
     expect(bad.converged).toBe(false)
@@ -80,7 +140,6 @@ describeE2E('convergence proof', () => {
       CREATE INDEX sales_d_idx ON ONLY public.sales USING btree (d);
       CREATE TABLE "sales_2026" PARTITION OF "sales"
         FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
-      CREATE TABLE widgets (id bigint PRIMARY KEY, label text NOT NULL);
     `
     const good = await prove(indexThenAttach)
     expect(good.converged).toBe(true)

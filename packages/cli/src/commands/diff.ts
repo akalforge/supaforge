@@ -4,7 +4,7 @@ import { createDefaultRegistry } from '../checks/index.js'
 import { scan } from '../scanner.js'
 import type { ScanProgressEvent } from '../scanner.js'
 import { renderSummary, renderDetailed } from '../render.js'
-import { promote, type PromoteResult } from '../promote.js'
+import { promote, planWork, type PromoteResult } from '../promote.js'
 import type { CheckName } from '../types/drift.js'
 import { CHECK_NAMES, CHECK_META } from '../types/drift.js'
 import { ok, warn, dim, cmd, bold } from '../ui.js'
@@ -14,6 +14,7 @@ import { formatGitHubAnnotations, computeCiExitCode, formatCiSummary, type FailO
 import { resolveTableFilter, isFiltered, describeTableFilter } from '../utils/table-filter.js'
 import { parseFlagList } from '../utils/strings.js'
 import { isCloneDatabase } from '../branch.js'
+import { proveConvergence } from '../prove.js'
 
 /**
  * Glyph and text for a finished check, so the three outcomes are visually
@@ -124,6 +125,12 @@ export default class Diff extends BaseCommand {
     target: Flags.string({ char: 't', description: 'Target environment name' }),
     ci: Flags.boolean({
       description: 'CI mode: emit GitHub Actions annotations and use semantic exit codes (0=clean, 1=drift, 2=error)',
+      default: false,
+    }),
+    prove: Flags.boolean({
+      description:
+        'Before applying, replay the migration on a throwaway clone of the target '
+        + 'and verify it reproduces the source exactly. Refuses to apply if it does not.',
       default: false,
     }),
     'fail-on': Flags.string({
@@ -275,6 +282,45 @@ export default class Diff extends BaseCommand {
 
       const targetEnv = config.environments[config.target!]
       const dryRun = flags['dry-run']
+
+      // Prove before touching the target. A migration that executes without
+      // error can still leave the database in a state that is not the source —
+      // a flattened partition or an index that never reached its partitions
+      // both apply cleanly. Only replaying it and looking at the result catches
+      // that, so when --prove is set a failure blocks the apply rather than
+      // warning after the fact.
+      if (flags.prove && !dryRun) {
+        const sourceEnv = config.environments[config.source!]
+        const planned = planWork(scanResult, {
+          checks, only: parseFlagList(flags.only),
+          allowDestructive: flags['allow-destructive'], tableFilter,
+        })
+        const migrationSql = planned.sqlStatements.map(s => s.sql).join('\n')
+
+        this.log(`\n  ${dim('Proving convergence on a throwaway clone…')}`)
+        const proof = await proveConvergence({
+          sourceUrl: sourceEnv.dbUrl,
+          targetUrl: targetEnv.dbUrl,
+          migrationSql,
+        })
+
+        if (proof.skipped) {
+          // Could not prove is not the same as failed to converge; say which.
+          this.log(`  ${warn('Convergence not proven')}: ${proof.skipped}`)
+          this.log(`  ${dim('Continuing — re-run without --prove to silence this.')}\n`)
+        } else if (!proof.converged) {
+          this.log(`  ${warn('Migration does not reproduce the source.')} Nothing was applied.\n`)
+          for (const line of proof.residual.slice(0, 15)) this.log(`    ${line}`)
+          if (proof.residual.length > 15) {
+            this.log(`    ${dim(`…and ${proof.residual.length - 15} more`)}`)
+          }
+          this.log(`\n  ${dim('These objects would still differ after applying.')}`)
+          this.exit(1)
+        } else {
+          this.log(`  ${ok('Converged')} — the migration reproduces the source exactly.\n`)
+        }
+      }
+
       const result = await promote({
         dbUrl: targetEnv.dbUrl,
         scanResult,

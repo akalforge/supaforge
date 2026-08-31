@@ -24,8 +24,9 @@
 import { randomBytes } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
-import { fingerprintSql } from '@akalforge/pg-conformance'
+import { fingerprintSql, stateSql, type SchemaState } from '@akalforge/pg-conformance'
 import { pgQuery } from './db'
+import { diffState } from './state-diff'
 import { resolvePgDumpPath, getServerMajorVersion } from './pg-tools'
 import { join, dirname } from 'node:path'
 
@@ -82,6 +83,48 @@ async function fingerprint(dbUrl: string, schemas: string[]): Promise<string> {
     throw new Error('fingerprint query returned no "fingerprint" column')
   }
   return value ?? ''
+}
+
+/**
+ * Say what differs, in terms a reader can act on.
+ *
+ * The fingerprint has already decided that something does. This turns the two
+ * schema-state documents into named findings — "column public.orders.total:
+ * storage extended → plain" — rather than two near-identical lines of catalog
+ * shorthand with one field moved somewhere in the middle.
+ *
+ * Falls back to the raw fingerprint lines if the structured diff comes back
+ * empty. That should not happen, but "the schemas differ and I cannot tell you
+ * how" is a far worse answer than an ugly one.
+ */
+async function describeDifference(
+  sourceUrl: string, cloneUrl: string, schemas: string[], want: string, got: string,
+): Promise<string[]> {
+  try {
+    const [before, after] = await Promise.all([
+      schemaState(sourceUrl, schemas),
+      schemaState(cloneUrl, schemas),
+    ])
+    const findings = diffState(before, after)
+    if (findings.length > 0) return findings
+  } catch {
+    // fall through to the fingerprint lines
+  }
+
+  const wanted = new Set(want.split('\n').filter(Boolean))
+  const actual = new Set(got.split('\n').filter(Boolean))
+  return [
+    ...[...wanted].filter(l => !actual.has(l)).map(l => `missing: ${l}`),
+    ...[...actual].filter(l => !wanted.has(l)).map(l => `unexpected: ${l}`),
+  ]
+}
+
+/** The schema-state document for one database. */
+async function schemaState(dbUrl: string, schemas: string[]): Promise<SchemaState> {
+  const rows = await pgQuery(dbUrl, stateSql(schemas)) as unknown as Array<{ state: string | null }>
+  const value = rows[0]?.state
+  if (!value) throw new Error('state query returned no "state" column')
+  return JSON.parse(value) as SchemaState
 }
 
 /**
@@ -152,15 +195,16 @@ export async function proveConvergence(opts: {
       fingerprint(cloneUrl, schemas),
     ])
 
+    // The verdict stays with the fingerprint. It is the comparison already
+    // trusted, and keeping it means the structured diff below can only change
+    // how a difference is *described*, never whether one is detected.
     if (want === got) return { converged: true, residual: [], cloneName }
 
-    const wanted = new Set(want.split('\n').filter(Boolean))
-    const actual = new Set(got.split('\n').filter(Boolean))
-    const residual = [
-      ...[...wanted].filter(l => !actual.has(l)).map(l => `missing: ${l}`),
-      ...[...actual].filter(l => !wanted.has(l)).map(l => `unexpected: ${l}`),
-    ]
-    return { converged: false, residual, cloneName }
+    return {
+      converged: false,
+      residual: await describeDifference(opts.sourceUrl, cloneUrl, schemas, want, got),
+      cloneName,
+    }
   } finally {
     if (created) {
       // Never leave a clone behind, even on failure. Terminating first because

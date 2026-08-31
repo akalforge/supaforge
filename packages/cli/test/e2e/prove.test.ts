@@ -51,10 +51,16 @@ describeE2E('convergence proof', () => {
   it('rejects a migration that runs cleanly but produces something else', async () => {
     // Valid SQL, applies without error, wrong result: the column is nullable
     // and the type differs. Exactly the shape that text comparison misses.
+    //
+    // The source is built explicitly. Without it this compared an empty schema
+    // against one holding a table, which is a migration producing something
+    // *extra* rather than something *else* — a weaker case than the name claims.
+    await h.applySql('source', 'CREATE TABLE widgets (id bigint PRIMARY KEY, label text NOT NULL);')
     const proof = await prove('CREATE TABLE widgets (id bigint PRIMARY KEY, label varchar(10));')
 
     expect(proof.converged).toBe(false)
-    expect(proof.residual.join('\n')).toMatch(/label/)
+    expect(proof.residual.join('\n')).toMatch(/column public\.widgets\.label: type text → character varying\(10\)/)
+    expect(proof.residual.join('\n')).toMatch(/not null yes → no/)
   }, 300_000)
 
   // The three below are regressions. The fingerprint used to compare objects
@@ -148,15 +154,26 @@ describeE2E('convergence proof', () => {
   it('catches a partitioned table rebuilt as an ordinary one', async () => {
     // Applies cleanly, inserts keep working, partitioning silently gone —
     // the failure mode that has no error message at all.
+    //
+    // The source has to actually be partitioned for this to be the stated
+    // case. Against an empty source it only proved the migration created a
+    // table nobody asked for, which any difference at all would have shown.
+    await h.applySql('source', `
+      CREATE TABLE sales (id bigint, d date NOT NULL, PRIMARY KEY (d, id))
+        PARTITION BY RANGE (d);
+      CREATE TABLE sales_2026 PARTITION OF sales
+        FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
+    `)
+
     const flattened = `
       CREATE TABLE "sales" (id bigint, d date NOT NULL, CONSTRAINT sales_pkey PRIMARY KEY (d, id));
-      CREATE TABLE "sales_2026" (id bigint, d date NOT NULL);
-      CREATE INDEX sales_d_idx ON public.sales USING btree (d);
-      CREATE TABLE widgets (id bigint PRIMARY KEY, label text NOT NULL);
     `
     const proof = await prove(flattened)
+
     expect(proof.converged).toBe(false)
-    expect(proof.residual.join('\n')).toMatch(/kind=/)
+    const residual = proof.residual.join('\n')
+    expect(residual).toMatch(/table public\.sales: kind partitioned_table → table/)
+    expect(residual).toMatch(/table public\.sales_2026: missing/)
   }, 300_000)
 
   it('reports a migration that fails to execute, rather than claiming drift', async () => {

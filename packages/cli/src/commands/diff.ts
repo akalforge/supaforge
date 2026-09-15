@@ -133,6 +133,13 @@ export default class Diff extends BaseCommand {
         + 'and verify it reproduces the source exactly. Refuses to apply if it does not.',
       default: false,
     }),
+    'apply-posture': Flags.boolean({
+      description:
+        'With --apply, also apply fixes from checks that judge the target on its own '
+        + '(RLS coverage, migration history). Off by default: those fixes move the target '
+        + 'away from the source and so create drift.',
+      default: false,
+    }),
     'fail-on': Flags.string({
       description: 'Threshold for a non-zero exit in CI mode',
       options: ['critical', 'warning', 'any'],
@@ -294,6 +301,7 @@ export default class Diff extends BaseCommand {
         const planned = planWork(scanResult, {
           checks, only: parseFlagList(flags.only),
           allowDestructive: flags['allow-destructive'], tableFilter,
+          applyPosture: flags['apply-posture'],
         })
         const migrationSql = planned.sqlStatements.map(s => s.sql).join('\n')
 
@@ -329,6 +337,7 @@ export default class Diff extends BaseCommand {
         allowDestructive: flags['allow-destructive'],
         tableFilter,
         only: parseFlagList(flags.only),
+        applyPosture: flags['apply-posture'],
         transactional: !flags['no-transaction'],
       })
 

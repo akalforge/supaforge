@@ -402,6 +402,75 @@ describe('planWork policy de-duplication', () => {
   })
 })
 
+describe('planWork posture fixes', () => {
+  // A posture check judges the target alone and fires identically whichever pair
+  // you diff, so applying its fix moves the target away from the source and
+  // creates drift. Observed as an endless loop: sync enables RLS for coverage,
+  // the next diff calls it "RLS enabled unexpectedly", the next sync disables it,
+  // coverage flags it again.
+  function withPostureAndDrift(): ScanResult {
+    return makeScanResult({
+      checks: [
+        {
+          check: 'schema', status: 'drifted', issues: [{
+            id: 'schema-create-table-1', severity: 'warning', title: 'Table missing: t',
+            sql: { up: 'CREATE TABLE "t" ("id" integer);' },
+          }],
+        },
+        {
+          check: 'rls-coverage', status: 'drifted', issues: [{
+            id: 'rls-coverage-public.customers', severity: 'critical', title: 'RLS not enabled',
+            sql: { up: 'ALTER TABLE "public"."customers" ENABLE ROW LEVEL SECURITY;' },
+          }],
+        },
+      ],
+    } as Partial<ScanResult>)
+  }
+
+  it('applies the drift fix and leaves the posture fix alone', () => {
+    const plan = planWork(withPostureAndDrift())
+    const ids = plan.sqlStatements.map(s => s.issueId)
+
+    expect(ids).toContain('schema-create-table-1')
+    expect(ids).not.toContain('rls-coverage-public.customers')
+  })
+
+  it('says why the posture fix was not applied', () => {
+    const plan = planWork(withPostureAndDrift())
+    const skipped = plan.skipped.find(s => s.issueId === 'rls-coverage-public.customers')
+
+    expect(skipped?.reason).toMatch(/posture/i)
+    expect(skipped?.reason).toMatch(/--apply-posture/)
+  })
+
+  it('applies posture fixes when asked for explicitly', () => {
+    const plan = planWork(withPostureAndDrift(), { applyPosture: true })
+
+    expect(plan.sqlStatements.map(s => s.issueId)).toContain('rls-coverage-public.customers')
+  })
+
+  it('treats naming the check as asking for it', () => {
+    const plan = planWork(withPostureAndDrift(), { checks: ['rls-coverage'] })
+
+    expect(plan.sqlStatements.map(s => s.issueId)).toContain('rls-coverage-public.customers')
+  })
+
+  it('still applies comparison fixes that happen to touch RLS', () => {
+    // The schema check is a comparison check, so its ENABLE ROW LEVEL SECURITY
+    // reconciles the target with the source and must not be caught by this.
+    const plan = planWork(makeScanResult({
+      checks: [{
+        check: 'schema', status: 'drifted', issues: [{
+          id: 'schema-alter-1', severity: 'warning', title: 'Table altered: t',
+          sql: { up: 'ALTER TABLE "t" ENABLE ROW LEVEL SECURITY;' },
+        }],
+      }],
+    } as Partial<ScanResult>))
+
+    expect(plan.sqlStatements.map(s => s.issueId)).toContain('schema-alter-1')
+  })
+})
+
 describe('promote scoping', () => {
   it('skips a dependant of an excluded table instead of attempting and failing', async () => {
     const result = await promote({

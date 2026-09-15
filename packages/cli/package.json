@@ -44,8 +44,8 @@
     "topicSeparator": " "
   },
   "dependencies": {
-    "@akalforge/pg-conformance": "~0.0.3",
-    "@dbdiff/cli": "^3.0.0-rc.9",
+    "@akalforge/pg-conformance": "~0.0.4",
+    "@dbdiff/cli": "^3.0.0-rc.12",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@oclif/core": "^4",
     "@supabase/supabase-js": "^2.103.0",

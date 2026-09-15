@@ -3,7 +3,7 @@ import { pgClientConfig } from './db.js'
 import type { ScanResult, SyncAction } from './types/drift'
 import { errMsg } from './utils/error'
 import { isDestructiveSql } from './dbdiff'
-import { orderStatements, referencedTables } from './sql-deps.js'
+import { orderStatements, referencedTables, createdPolicies, createsOnlyPolicies } from './sql-deps.js'
 import { applyTableFilter, isFiltered, type TableFilter } from './utils/table-filter.js'
 import { matchesGlob } from './utils/strings.js'
 
@@ -178,7 +178,54 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
   }
 
   plan.sqlStatements = orderStatements(plan.sqlStatements, s => s.sql)
+  plan.sqlStatements = dropDuplicatePolicyFixes(plan.sqlStatements, plan.skipped)
   return plan
+}
+
+/**
+ * Remove a policy fix that an earlier statement already performs.
+ *
+ * Since `@dbdiff/cli` 3.0.0-rc.10 the schema check's SQL creates RLS policies
+ * itself, which the rls check has always done too. Both land in one fix set, the
+ * second fails with "policy ... already exists", and because the apply is
+ * transactional that single collision discards every other fix with it — so a
+ * new policy could not be synced at all.
+ *
+ * Run over the statements in execution order, after `orderStatements`, so
+ * "already created" means already created by something that genuinely runs
+ * first rather than merely reported first.
+ *
+ * Only a statement that does nothing but create the policy is dropped. The
+ * schema check bundles its policy with the table and the ENABLE ROW LEVEL
+ * SECURITY beside it, and losing that would be far worse than the collision.
+ */
+function dropDuplicatePolicyFixes(
+  statements: PlannedSql[],
+  skipped: PlannedWork['skipped'],
+): PlannedSql[] {
+  const alreadyCreated = new Set<string>()
+  const kept: PlannedSql[] = []
+
+  for (const statement of statements) {
+    const policies = createdPolicies(statement.sql)
+    const isDuplicate = policies.length > 0
+      && policies.every(p => alreadyCreated.has(p))
+      && createsOnlyPolicies(statement.sql)
+
+    if (isDuplicate) {
+      skipped.push({
+        check: statement.check,
+        issueId: statement.issueId,
+        reason: 'Already created by the schema fix for the same policy',
+      })
+      continue
+    }
+
+    for (const p of policies) alreadyCreated.add(p)
+    kept.push(statement)
+  }
+
+  return kept
 }
 
 /**

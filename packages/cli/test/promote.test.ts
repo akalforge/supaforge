@@ -315,6 +315,93 @@ describe('planWork ordering', () => {
   })
 })
 
+describe('planWork policy de-duplication', () => {
+  // The schema check's SQL comes from @dbdiff/cli, which models RLS policies as
+  // of 3.0.0-rc.10, and the rls check writes its own. Both in one fix set meant
+  // the second failed with "already exists" — and since the apply is
+  // transactional, that one collision discarded every other fix with it.
+  function withDuplicatePolicy(): ScanResult {
+    return makeScanResult({
+      checks: [
+        {
+          check: 'schema', status: 'drifted', issues: [{
+            id: 'schema-create-table-1', severity: 'warning', title: 'Table missing: t',
+            sql: {
+              up: 'CREATE TABLE "t" ("id" integer);\n'
+                + 'ALTER TABLE "t" ENABLE ROW LEVEL SECURITY;\n'
+                + 'CREATE POLICY "t_read" ON "t" FOR SELECT USING (true);',
+            },
+          }],
+        },
+        {
+          check: 'rls', status: 'drifted', issues: [{
+            id: 'rls-missing-public.t.t_read', severity: 'critical', title: 'Missing RLS policy: t_read',
+            sql: { up: 'CREATE POLICY "t_read"\n  ON "public"."t"\n  FOR SELECT\n  USING (true);' },
+          }],
+        },
+      ],
+    } as Partial<ScanResult>)
+  }
+
+  it('drops the rls fix when the schema fix already creates that policy', () => {
+    const plan = planWork(withDuplicatePolicy())
+    const ids = plan.sqlStatements.map(s => s.issueId)
+
+    expect(ids).toContain('schema-create-table-1')
+    expect(ids).not.toContain('rls-missing-public.t.t_read')
+  })
+
+  it('reports the dropped fix rather than discarding it silently', () => {
+    const plan = planWork(withDuplicatePolicy())
+    const skipped = plan.skipped.find(s => s.issueId === 'rls-missing-public.t.t_read')
+
+    expect(skipped?.reason).toMatch(/already created/i)
+  })
+
+  it('keeps the schema statement, which also creates the table and enables RLS', () => {
+    const plan = planWork(withDuplicatePolicy())
+    const schemaSql = plan.sqlStatements.find(s => s.issueId === 'schema-create-table-1')?.sql ?? ''
+
+    expect(schemaSql).toContain('CREATE TABLE')
+    expect(schemaSql).toContain('ENABLE ROW LEVEL SECURITY')
+  })
+
+  it('keeps a policy fix that nothing else covers', () => {
+    const plan = planWork(makeScanResult({
+      checks: [{
+        check: 'rls', status: 'drifted', issues: [{
+          id: 'rls-missing-public.other.other_read', severity: 'critical', title: 'Missing RLS policy',
+          sql: { up: 'CREATE POLICY "other_read" ON "public"."other" FOR SELECT USING (true);' },
+        }],
+      }],
+    } as Partial<ScanResult>))
+
+    expect(plan.sqlStatements.map(s => s.issueId)).toContain('rls-missing-public.other.other_read')
+  })
+
+  it('tells policies on different tables apart', () => {
+    const plan = planWork(makeScanResult({
+      checks: [
+        {
+          check: 'schema', status: 'drifted', issues: [{
+            id: 'schema-1', severity: 'warning', title: 'a',
+            sql: { up: 'CREATE POLICY "p" ON "a" FOR SELECT USING (true);' },
+          }],
+        },
+        {
+          check: 'rls', status: 'drifted', issues: [{
+            id: 'rls-b', severity: 'critical', title: 'b',
+            sql: { up: 'CREATE POLICY "p" ON "public"."b" FOR SELECT USING (true);' },
+          }],
+        },
+      ],
+    } as Partial<ScanResult>))
+
+    // Same policy name, different table: not a duplicate.
+    expect(plan.sqlStatements.map(s => s.issueId)).toContain('rls-b')
+  })
+})
+
 describe('promote scoping', () => {
   it('skips a dependant of an excluded table instead of attempting and failing', async () => {
     const result = await promote({

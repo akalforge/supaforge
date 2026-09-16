@@ -3,8 +3,9 @@ import { pgClientConfig } from './db.js'
 import type { ScanResult, SyncAction } from './types/drift'
 import { errMsg } from './utils/error'
 import { isDestructiveSql } from './dbdiff'
-import { orderStatements, referencedTables } from './sql-deps.js'
+import { orderStatements, referencedTables, createdPolicies, createsOnlyPolicies } from './sql-deps.js'
 import { applyTableFilter, isFiltered, type TableFilter } from './utils/table-filter.js'
+import { isComparisonCheck } from './types/drift.js'
 import { matchesGlob } from './utils/strings.js'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
@@ -16,6 +17,8 @@ export interface PromoteOptions {
   scanResult: ScanResult
   /** Only promote specific checks */
   checks?: string[]
+  /** Also apply posture fixes; off by default — see planWork */
+  applyPosture?: boolean
   /** Dry-run mode — print SQL without executing */
   dryRun?: boolean
   /**
@@ -84,6 +87,11 @@ interface PlannedWork {
 /** What `planWork` needs to know beyond the scan result itself. */
 export interface PlanOptions {
   checks?: string[]
+  /**
+   * Also apply fixes from the checks that judge the target on its own rather
+   * than comparing it to the source. Off by default — see planWork.
+   */
+  applyPosture?: boolean
   allowDestructive?: boolean
   tableFilter?: TableFilter
   only?: string[]
@@ -167,6 +175,30 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
   )
 
   for (const checkResult of relevant) {
+    // A posture check judges the target on its own and fires identically
+    // whichever pair you diff, so its fix is not a reconciliation — applying it
+    // changes the target away from the source and *creates* drift. Enabling RLS
+    // on a table the source leaves open is the clear case: the next diff reports
+    // "RLS enabled unexpectedly", the next sync switches it back off, and the
+    // coverage check flags it again, forever. Worse, RLS enabled without the
+    // policies to go with it denies every row to non-owners, so a posture fix
+    // applied to a working table can take it offline.
+    //
+    // Naming the check explicitly (--check=rls-coverage) or passing
+    // --apply-posture is taken as asking for it on purpose.
+    const askedForExplicitly = options.checks?.includes(checkResult.check) ?? false
+    if (!isComparisonCheck(checkResult.check) && !options.applyPosture && !askedForExplicitly) {
+      for (const issue of checkResult.issues) {
+        plan.skipped.push({
+          check: checkResult.check,
+          issueId: issue.id,
+          reason: 'Posture finding about the target, not drift from the source — '
+            + 'applying it would create drift. Use --apply-posture to apply anyway.',
+        })
+      }
+      continue
+    }
+
     for (const issue of checkResult.issues) {
       const at = { check: checkResult.check, issueId: issue.id }
       const outcome = classifyIssue(issue, options)
@@ -178,7 +210,54 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
   }
 
   plan.sqlStatements = orderStatements(plan.sqlStatements, s => s.sql)
+  plan.sqlStatements = dropDuplicatePolicyFixes(plan.sqlStatements, plan.skipped)
   return plan
+}
+
+/**
+ * Remove a policy fix that an earlier statement already performs.
+ *
+ * Since `@dbdiff/cli` 3.0.0-rc.10 the schema check's SQL creates RLS policies
+ * itself, which the rls check has always done too. Both land in one fix set, the
+ * second fails with "policy ... already exists", and because the apply is
+ * transactional that single collision discards every other fix with it — so a
+ * new policy could not be synced at all.
+ *
+ * Run over the statements in execution order, after `orderStatements`, so
+ * "already created" means already created by something that genuinely runs
+ * first rather than merely reported first.
+ *
+ * Only a statement that does nothing but create the policy is dropped. The
+ * schema check bundles its policy with the table and the ENABLE ROW LEVEL
+ * SECURITY beside it, and losing that would be far worse than the collision.
+ */
+function dropDuplicatePolicyFixes(
+  statements: PlannedSql[],
+  skipped: PlannedWork['skipped'],
+): PlannedSql[] {
+  const alreadyCreated = new Set<string>()
+  const kept: PlannedSql[] = []
+
+  for (const statement of statements) {
+    const policies = createdPolicies(statement.sql)
+    const isDuplicate = policies.length > 0
+      && policies.every(p => alreadyCreated.has(p))
+      && createsOnlyPolicies(statement.sql)
+
+    if (isDuplicate) {
+      skipped.push({
+        check: statement.check,
+        issueId: statement.issueId,
+        reason: 'Already created by the schema fix for the same policy',
+      })
+      continue
+    }
+
+    for (const p of policies) alreadyCreated.add(p)
+    kept.push(statement)
+  }
+
+  return kept
 }
 
 /**

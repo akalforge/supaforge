@@ -204,6 +204,46 @@ const NOT_A_TABLE = new Set([
  * is the safer direction — a false negative is a statement that runs and fails
  * (issue #48).
  */
+/**
+ * The policies a statement creates, as `table.policy` in lower case.
+ *
+ * Two layers can now legitimately produce the same `CREATE POLICY`. The schema
+ * check gets its SQL from `@dbdiff/cli`, which models RLS policies as of
+ * 3.0.0-rc.10, and the rls check has always written its own. Applied together
+ * the second fails with "policy ... already exists" and takes the whole
+ * transaction with it, so the duplicate has to be recognised before it runs.
+ *
+ * Matched on the pair that identifies a policy in Postgres — its name and its
+ * table — because the two layers spell the same policy differently: one emits
+ * `ON "t"`, the other `ON "public"."t"` across several lines. The schema
+ * qualifier is dropped for the same reason `referencedTables` drops it.
+ */
+export function createdPolicies(sql: string): string[] {
+  const out: string[] = []
+  const re = /CREATE\s+POLICY\s+("[^"]+"|[A-Za-z_][\w$]*)\s+ON\s+((?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))?)/gi
+  for (const m of sqlSkeleton(sql).matchAll(re)) {
+    out.push(`${bareName(m[2])}.${bareName(m[1])}`)
+  }
+  return out
+}
+
+/**
+ * True when creating policies is all this statement does.
+ *
+ * The schema check bundles its policy alongside the table and the ENABLE ROW
+ * LEVEL SECURITY that makes it mean anything, so that statement must never be
+ * dropped as a duplicate — only a statement whose sole purpose is the policy can
+ * be. Anything left once the CREATE POLICY statements are removed counts, which
+ * errs towards keeping a statement rather than losing DDL.
+ */
+export function createsOnlyPolicies(sql: string): boolean {
+  if (createdPolicies(sql).length === 0) return false
+  const withoutPolicies = sqlSkeleton(sql)
+    .replace(/CREATE\s+POLICY[\s\S]*?(?=;|$)/gi, '')
+    .replace(/DROP\s+POLICY[\s\S]*?(?=;|$)/gi, '')
+  return !/[A-Za-z]/.test(withoutPolicies)
+}
+
 export function referencedTables(sql: string): string[] {
   const names = new Set<string>()
   for (const pattern of [BODY_TABLE_REF, ON_TABLE_REF, TARGET_TABLE_REF]) {

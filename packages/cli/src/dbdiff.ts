@@ -415,7 +415,7 @@ export function sqlToIssues(
         id: `${check}-alter-function-${i + 1}`,
         check,
         severity: 'warning' as const,
-        title: `Function modified: ${modifiedRoutine}`,
+        title: `Function modified: ${qualifySchemaName(modifiedRoutine)}`,
         description: 'Function body differs between source and target.',
         sql: { up: upSql, down: downSql },
       }
@@ -753,6 +753,37 @@ const AFTER = {
 const named = (head: RegExp) => (sql: string) => extractQualifiedName(sql, head)
 
 /**
+ * The schema @dbdiff/cli compares.
+ *
+ * Its Postgres adapter is scoped to `public` throughout — every catalogue query
+ * filters on `schemaname = 'public'` — so a name it emits without a qualifier is
+ * a `public` object, not an object of unknown schema. Restoring the qualifier is
+ * recovering information the SQL dropped, not guessing at it.
+ */
+const DBDIFF_SCHEMA = 'public'
+
+/**
+ * Put every schema finding's name in the same form: `schema.name`.
+ *
+ * Whether a name arrived qualified depended on which statement dbdiff happened
+ * to emit — `CREATE INDEX ... ON public.orders` carries a schema, `DROP TABLE
+ * "legacy_notes"` does not — so titles for one run were a mix of both, split by
+ * object type rather than by anything a reader could predict, and the mix did
+ * not even hold within a type (issue #70). A long list then neither sorted nor
+ * aligned.
+ *
+ * Splits at the first `(` so a routine's argument list cannot be mistaken for a
+ * qualifier: `dist(numeric(10,2))` contains dots that are not schema separators.
+ */
+function qualifySchemaName(name: string): string {
+  if (name === UNKNOWN_NAME) return name
+  const paren = name.indexOf('(')
+  const head = paren === -1 ? name : name.slice(0, paren)
+  if (head.includes('.')) return name
+  return `${DBDIFF_SCHEMA}.${name}`
+}
+
+/**
  * Qualify an index with the schema of the table it is on.
  *
  * Postgres puts an index in its table's schema and its grammar does not let
@@ -823,10 +854,16 @@ export function summariseStatement(sql: string, check: 'schema' | 'data', downSq
   if (check === 'data') return summariseDataStatement(sql)
 
   for (const rule of SCHEMA_RULES) {
-    if (rule.match.test(sql)) return `${rule.label}: ${rule.name(sql, downSql)}`
+    if (rule.match.test(sql)) {
+      return `${rule.label}: ${qualifySchemaName(rule.name(sql, downSql))}`
+    }
   }
 
-  return `Schema change in ${extractQualifiedName(sql, /\b(?:TABLE|INTO|FROM|UPDATE)\s+(?:ONLY\s+)?/i)}`
+  // Same `<finding>: <schema>.<name>` shape as every rule above, so an
+  // unclassified change lines up with the rest of the list too.
+  return `Schema change: ${qualifySchemaName(
+    extractQualifiedName(sql, /\b(?:TABLE|INTO|FROM|UPDATE)\s+(?:ONLY\s+)?/i),
+  )}`
 }
 
 /**

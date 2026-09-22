@@ -16,6 +16,7 @@ import { parseFlagList } from '../utils/strings.js'
 import { isCloneDatabase } from '../branch.js'
 import { proveConvergence } from '../prove.js'
 import { summarizeByKind } from '../scoring.js'
+import { CLONE_SKIP_FLAGS } from '../defaults.js'
 
 /**
  * Glyph and text for a finished check, so the three outcomes are visually
@@ -55,7 +56,11 @@ export default class Diff extends BaseCommand {
     '<%= config.bin %> diff --tables=orders,order_items',
     "<%= config.bin %> diff --tables='billing_*' --exclude-tables='*_audit'",
     '<%= config.bin %> diff --tables=orders --detail',
-    '<%= config.bin %> diff --skip=auth --skip=edge-functions --skip=realtime',
+    // Built from the same constant the tips and the post-clone output use, so
+    // the advice cannot fall behind the check list again: this example predated
+    // Layer 14 and omitted `roles`, which on a real clone → remote diff is 227
+    // of the findings someone following it was left to puzzle over (issue #70).
+    `<%= config.bin %> diff ${CLONE_SKIP_FLAGS}`,
     '<%= config.bin %> diff --ci',
     '<%= config.bin %> diff --ci --fail-on=warning',
   ]

@@ -147,13 +147,16 @@ export async function proveConvergence(opts: {
 
   let pgDump: string
   let psql: string
+  let serverMajor: number
+  let clientMajor: number
   try {
-    const major = await getServerMajorVersion(opts.targetUrl)
-    const resolved = await resolvePgDumpPath(major)
+    serverMajor = await getServerMajorVersion(opts.targetUrl)
+    const resolved = await resolvePgDumpPath(serverMajor)
     if (!resolved) {
       return { converged: false, residual: [], cloneName, skipped: 'pg_dump not available' }
     }
     pgDump = resolved.path
+    clientMajor = resolved.major
     psql = psqlBeside(pgDump)
   } catch (err) {
     return {
@@ -185,7 +188,26 @@ export async function proveConvergence(opts: {
     const { stdout: structure } = await exec(pgDump, dumpArgs, {
       maxBuffer: 256 * 1024 * 1024, timeout: 300_000,
     })
-    await runSql(psql, cloneUrl, structure)
+
+    // pg_dump writes its preamble for its own version, so a newer client can
+    // hand an older server a parameter that does not exist there (issue #72).
+    const { sql: replayable } = dropUnsupportedSetStatements(
+      structure, await knownParameters(cloneUrl),
+    )
+
+    try {
+      await runSql(psql, cloneUrl, replayable)
+    } catch (err) {
+      // Rethrown, not returned as `skipped`: a caller treats `skipped` as
+      // "could not check, carry on and apply", and this is a case where we do
+      // not know what the migration would do. Blocking the apply is the
+      // behaviour that was already right (issue #72 confirmed nothing was
+      // written and no clone was left behind) — only the message needed to say
+      // what the cause actually is.
+      throw new Error(
+        explainStructureFailure((err as Error).message, clientMajor, serverMajor),
+      )
+    }
 
     // The migration under test.
     await runSql(psql, cloneUrl, opts.migrationSql)
@@ -252,4 +274,91 @@ function runSql(psqlPath: string, dbUrl: string, sql: string): Promise<void> {
 /** psql ships alongside pg_dump; reuse the version-matched directory. */
 function psqlBeside(pgDumpPath: string): string {
   return pgDumpPath === 'pg_dump' ? 'psql' : join(dirname(pgDumpPath), 'psql')
+}
+
+/**
+ * Lines pg_dump emits before the first real object, in the order it emits them.
+ *
+ * `\restrict` is a psql meta-command recent versions wrap the script in;
+ * `SET` and `SELECT pg_catalog.set_config(...)` configure the session. Nothing
+ * here creates anything, which is what makes the preamble safe to rewrite.
+ */
+const PREAMBLE_LINE =
+  /^\s*(?:--|$|\\(?:un)?restrict\b|SET\s+[\w.]+\s*=|SELECT\s+pg_catalog\.set_config\s*\()/i
+
+/** A top-level `SET some.guc = value;`, capturing the parameter name. */
+const SET_STATEMENT = /^\s*SET\s+([\w.]+)\s*=/i
+
+/**
+ * Drop `SET` statements from a dump's preamble that the destination server
+ * would reject.
+ *
+ * pg_dump writes its preamble for the version of pg_dump, not the version of
+ * the server the SQL will be replayed into: pg_dump 17 added an unconditional
+ * `SET transaction_timeout = 0;`, and a PostgreSQL 15 or 16 server answers that
+ * with `unrecognized configuration parameter`. A PostgreSQL 18 client against a
+ * Supabase still on 15 is the common case rather than an exotic one, and it made
+ * `--prove` unusable there — it aborted before replaying anything (issue #72).
+ *
+ * The filter asks the destination which parameters it actually has rather than
+ * carrying a list of version-specific names, so the next parameter a future
+ * pg_dump adds to the preamble needs no change here.
+ *
+ * Deliberately narrow in two ways. It only rewrites the leading run of
+ * preamble lines, so a `SET` inside a function body — which lives after the
+ * first `CREATE` — is never touched. And it only removes statements naming a
+ * parameter the destination does not have, so a `SET` that fails for any other
+ * reason still fails the proof loudly: `ON_ERROR_STOP` stays on, and no error
+ * from the replay is ignored. Tolerating errors instead (as `pg_restore` does,
+ * which is why `clone` never noticed this) would let an incomplete clone be
+ * reported as converged.
+ */
+export function dropUnsupportedSetStatements(
+  sql: string, knownParameters: ReadonlySet<string>,
+): { sql: string; dropped: string[] } {
+  const lines = sql.split('\n')
+  const dropped: string[] = []
+  const kept: string[] = []
+
+  let inPreamble = true
+  for (const line of lines) {
+    if (inPreamble && !PREAMBLE_LINE.test(line)) inPreamble = false
+
+    if (inPreamble) {
+      const name = SET_STATEMENT.exec(line)?.[1]
+      if (name && !knownParameters.has(name.toLowerCase())) {
+        dropped.push(name.toLowerCase())
+        continue
+      }
+    }
+    kept.push(line)
+  }
+
+  return { sql: kept.join('\n'), dropped }
+}
+
+/** Configuration parameter names this server recognises. */
+async function knownParameters(dbUrl: string): Promise<Set<string>> {
+  const rows = await pgQuery(dbUrl, 'SELECT name FROM pg_settings') as unknown as
+    Array<{ name: string }>
+  return new Set(rows.map(r => r.name.toLowerCase()))
+}
+
+/**
+ * Explain a failure to replay the target's own structure.
+ *
+ * The raw psql error names a parameter or a syntax element, with nothing to
+ * connect it to the real cause — a client newer than the server. Someone
+ * reading `unrecognized configuration parameter` goes looking at their schema,
+ * which is the one place the problem is not (issue #72).
+ */
+export function explainStructureFailure(
+  message: string, clientMajor: number, serverMajor: number,
+): string {
+  const versionGap = clientMajor > serverMajor
+    ? ` The local client is PostgreSQL ${clientMajor} and the target server is `
+      + `${serverMajor}; pg_dump ${clientMajor} can emit SQL that a ${serverMajor} `
+      + `server rejects. Installing postgresql-client-${serverMajor} removes the gap.`
+    : ''
+  return `could not replay the target's structure onto the clone: ${message}${versionGap}`
 }

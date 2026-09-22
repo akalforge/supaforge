@@ -15,6 +15,7 @@ import { resolveTableFilter, isFiltered, describeTableFilter } from '../utils/ta
 import { parseFlagList } from '../utils/strings.js'
 import { isCloneDatabase } from '../branch.js'
 import { proveConvergence } from '../prove.js'
+import { summarizeByKind } from '../scoring.js'
 
 /**
  * Glyph and text for a finished check, so the three outcomes are visually
@@ -145,6 +146,13 @@ export default class Diff extends BaseCommand {
       options: ['critical', 'warning', 'any'],
       default: 'critical',
     }),
+    'fail-on-posture': Flags.boolean({
+      description:
+        'Let findings from the target-only checks (RLS coverage, migration history) '
+        + 'affect the exit code too. Off by default: they fire identically whichever '
+        + 'pair you diff, so they cannot indicate that the environments have diverged.',
+      default: false,
+    }),
   }
 
   /**
@@ -203,6 +211,7 @@ export default class Diff extends BaseCommand {
 
   async run(): Promise<void> {
     const { flags } = await this.parse(Diff)
+
 
     const config = await this.loadConfigOrFail()
     this.validateDualEnvConfig(config, flags.source, flags.target)
@@ -395,7 +404,9 @@ export default class Diff extends BaseCommand {
       }
       const summary = formatCiSummary(result)
       process.stdout.write(JSON.stringify(summary, null, 2) + '\n')
-      const exitCode = computeCiExitCode(result, failOn)
+      const exitCode = computeCiExitCode(result, failOn, {
+        failOnPosture: flags['fail-on-posture'],
+      })
       if (exitCode !== 0) {
         this.exit(exitCode)
       }
@@ -441,7 +452,23 @@ export default class Diff extends BaseCommand {
     // (0=clean, 1=drift, 2=error). Making plain `diff` exit non-zero here
     // would break every non-CI caller for a signal that already has a
     // supported home. The misleading *output* is fixed above instead.
-    if (result.summary.critical > 0) {
+    //
+    // Only drift decides the code. A critical posture finding — RLS disabled on
+    // a table, a migration file with no tracking row — is true of the target
+    // whichever pair you diff, so letting it exit 1 meant a perfectly
+    // synchronised pair failed a sync check forever (issue #66).
+    const { drift, posture } = summarizeByKind(result.checks)
+
+    // Said once, where it changes what the reader should conclude: the report
+    // above shows critical findings and the command is about to succeed.
+    if (drift.critical === 0 && posture.critical > 0 && !flags.json) {
+      this.log(
+        `  ${dim('Posture findings do not affect the exit code — they describe the target, '
+        + 'not drift from the source. Add')} ${cmd('--fail-on-posture')} ${dim('to gate on them.')}\n`,
+      )
+    }
+
+    if (drift.critical > 0 || (flags['fail-on-posture'] && posture.critical > 0)) {
       this.exit(1)
     }
   }

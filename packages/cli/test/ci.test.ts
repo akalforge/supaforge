@@ -15,6 +15,33 @@ function makeResult(overrides: Partial<ScanResult> = {}): ScanResult {
   }
 }
 
+/**
+ * A result carrying real findings on a real check.
+ *
+ * The exit code is derived from `checks` — which findings, on which kind of
+ * check — rather than from the aggregate `summary`, because a threshold that
+ * cannot see the difference between drift and posture cannot express issue #66.
+ * So these tests have to supply the findings, not just a count of them.
+ */
+function resultWith(
+  check: 'schema' | 'rls' | 'rls-coverage' | 'migrations',
+  severities: Array<DriftIssue['severity']>,
+): ScanResult {
+  const issues = severities.map((severity, i) => makeIssue({
+    id: `${check}-${i}`, check, severity,
+  }))
+  const summary = {
+    total: issues.length,
+    critical: issues.filter(i => i.severity === 'critical').length,
+    warning: issues.filter(i => i.severity === 'warning').length,
+    info: issues.filter(i => i.severity === 'info').length,
+  }
+  return makeResult({
+    checks: [{ check, status: issues.length > 0 ? 'drifted' : 'clean', issues, durationMs: 1 }],
+    summary,
+  })
+}
+
 function makeIssue(overrides: Partial<DriftIssue> = {}): DriftIssue {
   return {
     id: 'rls-missing-public.users.users_read',
@@ -148,30 +175,23 @@ describe('computeCiExitCode', () => {
 
   describe('fail-on=critical', () => {
     it('returns 1 only when critical issues exist', () => {
-      const withCritical = makeResult({ summary: { total: 1, critical: 1, warning: 0, info: 0 } })
-      const withWarning  = makeResult({ summary: { total: 1, critical: 0, warning: 1, info: 0 } })
-      const withInfo     = makeResult({ summary: { total: 1, critical: 0, warning: 0, info: 1 } })
-      expect(computeCiExitCode(withCritical, 'critical')).toBe(1)
-      expect(computeCiExitCode(withWarning,  'critical')).toBe(0)
-      expect(computeCiExitCode(withInfo,     'critical')).toBe(0)
+      expect(computeCiExitCode(resultWith('schema', ['critical']), 'critical')).toBe(1)
+      expect(computeCiExitCode(resultWith('schema', ['warning']),  'critical')).toBe(0)
+      expect(computeCiExitCode(resultWith('schema', ['info']),     'critical')).toBe(0)
     })
   })
 
   describe('fail-on=warning', () => {
     it('returns 1 on critical or warning, 0 on info only', () => {
-      const withCritical = makeResult({ summary: { total: 1, critical: 1, warning: 0, info: 0 } })
-      const withWarning  = makeResult({ summary: { total: 1, critical: 0, warning: 1, info: 0 } })
-      const withInfo     = makeResult({ summary: { total: 1, critical: 0, warning: 0, info: 1 } })
-      expect(computeCiExitCode(withCritical, 'warning')).toBe(1)
-      expect(computeCiExitCode(withWarning,  'warning')).toBe(1)
-      expect(computeCiExitCode(withInfo,     'warning')).toBe(0)
+      expect(computeCiExitCode(resultWith('schema', ['critical']), 'warning')).toBe(1)
+      expect(computeCiExitCode(resultWith('schema', ['warning']),  'warning')).toBe(1)
+      expect(computeCiExitCode(resultWith('schema', ['info']),     'warning')).toBe(0)
     })
   })
 
   describe('fail-on=any', () => {
     it('returns 1 for any issue including info', () => {
-      const withInfo = makeResult({ summary: { total: 1, critical: 0, warning: 0, info: 1 } })
-      expect(computeCiExitCode(withInfo, 'any')).toBe(1)
+      expect(computeCiExitCode(resultWith('schema', ['info']), 'any')).toBe(1)
     })
 
     it('returns 0 for zero issues', () => {
@@ -385,15 +405,63 @@ describe('formatCiSummary carries the posture score (issue #40)', () => {
     expect(formatCiSummary(r).postureScore).toBeNull()
   })
 
-  it('a critical posture finding still fails CI', () => {
-    // Excluding posture from the *score* must not weaken the security gate:
-    // an RLS gap is still something a pipeline should refuse to merge past.
-    const r: ScanResult = {
-      timestamp: 't', source: 'a', target: 'a',
-      checks: [{ check: 'rls-coverage', status: 'drifted', durationMs: 1, issues: [{ id: 'x', check: 'rls-coverage', severity: 'critical', title: 'RLS disabled', description: 'd' }] }],
-      score: 100, postureScore: 85,
-      summary: { total: 1, critical: 1, warning: 0, info: 0 },
-    }
-    expect(computeCiExitCode(r, 'critical')).toBe(1)
+  it('a critical posture finding is still reported in full', () => {
+    // Scope changes the exit code, never the report: the finding keeps its
+    // severity and appears in criticalIssues for the pipeline to read.
+    const r = resultWith('rls-coverage', ['critical'])
+    const out = formatCiSummary(r)
+    expect(out.criticalIssues).toHaveLength(1)
+    expect(out.criticalIssues[0].check).toBe('rls-coverage')
+  })
+})
+
+/**
+ * The exit code has to distinguish "the environments differ" from "the target
+ * has a pre-existing gap".
+ *
+ * Gating on the combined critical count meant a diff of an environment against
+ * *itself* exited 1 forever — RLS Coverage and Migration History report on the
+ * target alone and fire identically whichever pair you diff, so a long-standing
+ * RLS gap failed every sync check. `--fail-on` is a severity threshold and could
+ * not express this, because the distinction is one of scope (issue #66).
+ */
+describe('computeCiExitCode — drift and posture are different scopes (issue #66)', () => {
+  it('exits 0 when only the target-only checks found anything', () => {
+    expect(computeCiExitCode(resultWith('rls-coverage', ['critical']), 'critical')).toBe(0)
+    expect(computeCiExitCode(resultWith('migrations', ['critical']), 'critical')).toBe(0)
+  })
+
+  it('exits 1 for the same severity on a comparison check', () => {
+    expect(computeCiExitCode(resultWith('rls', ['critical']), 'critical')).toBe(1)
+  })
+
+  it('exits 1 on posture findings when asked to', () => {
+    const r = resultWith('rls-coverage', ['critical'])
+    expect(computeCiExitCode(r, 'critical', { failOnPosture: true })).toBe(1)
+  })
+
+  it('applies the severity threshold within the posture scope too', () => {
+    const warningOnly = resultWith('rls-coverage', ['warning'])
+    expect(computeCiExitCode(warningOnly, 'critical', { failOnPosture: true })).toBe(0)
+    expect(computeCiExitCode(warningOnly, 'warning', { failOnPosture: true })).toBe(1)
+  })
+
+  it('still exits 2 for an errored check, whichever scope it is in', () => {
+    const r = makeResult({
+      checks: [{ check: 'rls-coverage', status: 'error', issues: [], error: 'boom', durationMs: 1 }],
+    })
+    expect(computeCiExitCode(r, 'critical')).toBe(2)
+    expect(computeCiExitCode(r, 'critical', { failOnPosture: true })).toBe(2)
+  })
+
+  it('a mixed scan exits 1 on the drift, not on the posture', () => {
+    const mixed = makeResult({
+      checks: [
+        { check: 'schema', status: 'drifted', durationMs: 1, issues: [makeIssue({ id: 's1', check: 'schema', severity: 'critical' })] },
+        { check: 'rls-coverage', status: 'drifted', durationMs: 1, issues: [makeIssue({ id: 'p1', check: 'rls-coverage', severity: 'critical' })] },
+      ],
+      summary: { total: 2, critical: 2, warning: 0, info: 0 },
+    })
+    expect(computeCiExitCode(mixed, 'critical')).toBe(1)
   })
 })

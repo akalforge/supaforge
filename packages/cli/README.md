@@ -139,10 +139,36 @@ Drift score: 100/100
 Posture score: 0/100 (target only — RLS coverage, migration history)
 ```
 
-The findings are not discarded or downgraded — they keep their severity, appear
-in `--detail`, and a critical one **still fails CI**. Only the drift score
-changes, so `no drift detected` becomes a trustworthy synchronisation signal.
-`--ci` output carries `postureScore` alongside `score`.
+The findings are not discarded or downgraded — they keep their severity and
+appear in `--detail`, in `--ci`'s `criticalIssues`, and in the GitHub
+annotations. Only the drift score changes, so `no drift detected` becomes a
+trustworthy synchronisation signal. `--ci` output carries `postureScore`
+alongside `score`.
+
+#### They do not decide the exit code
+
+The scope that keeps them out of the drift score keeps them out of the exit code
+too. Gating on the combined critical count meant a diff of an environment
+against *itself* exited 1 forever: these checks fire identically whichever pair
+you diff, so a long-standing RLS gap failed every sync check while the report
+directly above it said `no drift detected`. `--fail-on` could not express the
+difference, because the difference is one of scope, not severity.
+
+```bash
+supaforge diff                      # exits 0: environments agree
+supaforge diff --fail-on-posture    # exits 1: gate on posture findings too
+```
+
+`--fail-on-posture` works in `--ci` as well, and the `--fail-on` threshold
+applies within that scope — `--fail-on=warning --fail-on-posture` fails on a
+posture warning, plain `--fail-on-posture` only on a critical one.
+
+A run that would have exited 1 before and now exits 0 says so, once:
+
+```
+  Posture findings do not affect the exit code — they describe the target,
+  not drift from the source. Add --fail-on-posture to gate on them.
+```
 
 ### Self-hosted Supabase
 
@@ -228,7 +254,7 @@ supaforge init --force                  Overwrite existing config file
 supaforge diff                          Summary: what's drifted? (score + pass/fail)
 supaforge diff --detail                 Show detailed SQL diffs
 supaforge diff --apply                  Apply SQL + API fixes to the target environment
-supaforge diff --apply --dry-run        Print the fixes in execution order, run nothing
+supaforge diff --dry-run                Print the fixes in execution order, run nothing
 supaforge diff --apply --allow-destructive  Also apply fixes that drop tables/columns
 supaforge diff --apply --no-transaction Apply statement by statement, keeping partial progress
 supaforge diff --apply --only=<id,...>  Apply only these issue ids (globs allowed)
@@ -237,6 +263,7 @@ supaforge diff --check=rls --apply      Fix only one check
 supaforge diff --skip=storage           Skip a specific check
 supaforge diff --skip=auth --skip=vault Skip multiple checks (flag is repeatable)
 supaforge diff --include-files          Include file-level storage drift detection
+supaforge diff --fail-on-posture        Let target-only findings set the exit code
 supaforge diff --json                   Output as JSON
 supaforge hukam                         Alias for diff 🙏
 
@@ -306,8 +333,27 @@ applying that order directly failed on sets that were perfectly valid. Preview
 the order without running anything:
 
 ```bash
-supaforge diff --apply --dry-run
+supaforge diff --dry-run
 ```
+
+`--dry-run` needs no `--apply`: previewing should not require typing the flag
+that writes. It plans the fix set, prints it in execution order, and touches
+nothing. The flags that shape *what* would be applied — `--only`,
+`--allow-destructive`, `--apply-posture` — take effect under it, so a scoped
+plan can be reviewed before it is run:
+
+```bash
+supaforge diff --dry-run --only='schema-create-*'
+```
+
+The flags that only mean something while executing — `--prove`,
+`--no-transaction` — say so rather than doing nothing quietly:
+
+```
+  --prove has no effect without --apply. Add --apply for it to take effect.
+```
+
+That warning goes to stderr, so `--json` and `--ci` stdout stay parseable.
 
 ```
 Would apply 3 fix(es), in this order:
@@ -588,14 +634,27 @@ The target is never touched when the proof fails — it exits 1 having applied
 nothing. On success it reports `Converged` and proceeds.
 
 The clone is created on the target's own server (no extra credentials), holds
-structure only (no data is copied), and is dropped even if the proof throws.
-Supabase-managed schemas are excluded, so the clone costs seconds rather than
-minutes.
+structure only (no data is copied), and is dropped even if the proof throws. It
+receives only the schemas being compared — `public` unless you say otherwise —
+so it costs seconds rather than minutes, and the extensions those schemas
+reference are installed first, since a column default calling
+`extensions.uuid_generate_v4()` cannot be created without them.
+
+**A client newer than the server is fine.** `pg_dump` writes its preamble for
+its own version, so a PostgreSQL 17+ client dumping a 15 or 16 server emits
+`SET transaction_timeout = 0;`, which that server rejects. The preamble is
+filtered against the destination's own `pg_settings` before replay, which makes
+the common pairing — a Homebrew or distro client on 17/18, Supabase on 15 —
+work without installing anything. Nothing else about the replay is relaxed:
+`ON_ERROR_STOP` stays on, so a genuine failure still fails the proof rather than
+being skipped past.
 
 If the proof cannot run at all — no `pg_dump`, or the role lacks `CREATEDB` —
 that is reported as *not proven* and the apply continues. Not being able to
 check is a different thing from checking and failing, and conflating them would
-either block legitimate work or hide real failures.
+either block legitimate work or hide real failures. A clone that *can* be made
+but cannot be built — the structure would not replay — is neither: it blocks the
+apply, because what the migration would do is then unknown.
 
 > Order matters more than it looks. `CREATE INDEX … ON ONLY parent` is correct
 > when the index is created *before* partitions attach, because PostgreSQL
@@ -629,7 +688,14 @@ threshold under your control:
 supaforge diff --ci                      # 1 only on CRITICAL drift (default)
 supaforge diff --ci --fail-on=warning    # 1 on CRITICAL or WARNING
 supaforge diff --ci --fail-on=any        # 1 on any issue at all
+supaforge diff --ci --fail-on-posture    # also gate on the target-only checks
 ```
+
+**Drift, not posture.** The threshold applies to the twelve checks that compare
+the two environments. RLS Coverage and Migration History report on the target
+alone, so they are reported but do not set the exit code unless
+`--fail-on-posture` asks them to — see
+[Drift score vs posture score](#drift-score-vs-posture-score).
 
 In `--ci` mode a check that **could not complete** exits `2` rather than `0`,
 because unmeasured is not the same as clean. Outside `--ci` those commands
@@ -717,6 +783,23 @@ Or lock the exclusions in config so you never have to repeat them:
 ```
 
 Both mechanisms merge — `--skip` on the CLI is unioned with `checks.exclude` from config.
+
+**Which way you are diffing changes what `--apply` means.** From a clone, it
+reshapes the remote to match a vanilla-PostgreSQL copy — dropping the roles,
+grants and policies the clone never had. So in that direction the closing advice
+is a warning rather than a suggestion:
+
+```
+  → --apply would push this clone's shape onto the target, absences included —
+    preview it first with --apply --dry-run
+```
+
+This no longer depends on the clone being one SupaForge recorded: the local
+clone manifest is per-directory and keyed by exact database name, so a clone
+diffed from elsewhere used to read as an ordinary environment. SupaForge now
+also asks the databases directly — a target carrying Supabase's schemas against
+a source carrying none is the situation the warning is about, however that
+source came to exist.
 
 ### Single-DB: Snapshot, Clone, Restore (Local ↔ Remote)
 

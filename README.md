@@ -126,8 +126,9 @@ supaforge init                            Create config interactively
 supaforge diff                            Summary: what's drifted?
 supaforge diff --detail                   Show detailed SQL diffs
 supaforge diff --apply                    Fix the drift
-supaforge diff --apply --dry-run          Preview the fixes, in execution order
+supaforge diff --dry-run                  Preview the fixes, in execution order
 supaforge diff --apply --only=schema-alter-2   Apply one reviewed issue by id
+supaforge diff --fail-on-posture          Let target-only findings set the exit code
 supaforge diff --check=rls                Limit to a specific check
 supaforge diff --skip=storage             Skip a specific check
 supaforge diff --skip=auth --skip=vault   Skip multiple checks (repeatable)
@@ -177,12 +178,18 @@ the source nor its own previous self. Those fixes are reported under
 in the target.
 
 ```bash
-supaforge diff --apply --dry-run        # print the plan, in execution order, and stop
+supaforge diff --dry-run                # print the plan, in execution order, and stop
 supaforge diff --apply                  # all-or-nothing
 supaforge diff --apply --no-transaction # statement at a time, keeping partial progress
 ```
 
 `--continue-on-error` is an alias for `--no-transaction`.
+
+`--dry-run` does not need `--apply` — previewing should not require typing the
+flag that writes — and the flags that shape the plan (`--only`,
+`--allow-destructive`, `--apply-posture`) apply under it. The ones that only
+matter while executing (`--prove`, `--no-transaction`) warn on stderr that they
+had no effect, rather than being silently ignored.
 
 **Scope.** With `--tables` active, a fix that depends on a table the filter
 excluded is skipped with a reason naming that table, rather than attempted and
@@ -327,7 +334,12 @@ RLS Coverage and Migration History are not source↔target comparisons — they
 report on the target alone and fire identically whichever pair you diff. They
 are scored separately as a **posture score**, so a genuinely synchronised pair
 reaches `Drift score: 100/100` even when it carries pre-existing findings on
-both sides. The findings keep their severity and a critical one still fails CI.
+both sides. The findings keep their severity and are reported in full.
+
+They do not decide the exit code either, for the same reason: a pre-existing RLS
+gap is true of the target whichever pair you diff, so letting it exit 1 meant a
+perfectly synchronised pair failed a sync check forever. Add `--fail-on-posture`
+to gate on them as well.
 
 ### Scoping a diff to specific tables
 

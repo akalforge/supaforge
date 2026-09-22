@@ -79,14 +79,17 @@ supaforge snapshot --env=prod --migration
 | Schema | `@dbdiff/cli` | ✅ Ready |
 | Data | `@dbdiff/cli --type=data` | ✅ Ready |
 | RLS Policies | `pg_policies` view | ✅ Ready |
-| Edge Functions | Management API | ✅ Ready — hosted only, skipped on self-hosted |
+| Edge Functions | Management API (hosted), Studio's functions API or the functions directory (self-hosted) | ✅ Ready |
 | Storage | Storage API | ✅ Ready |
 | Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Ready |
 | Cron Jobs | `cron.job` table | ✅ Ready |
 | Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ Ready |
-| Realtime Publications | `pg_publication` + `pg_publication_tables` | ✅ Ready |
+| Realtime | `pg_publication` + `pg_publication_tables`, and `pg_policies` on `realtime` | ✅ Ready — publications and Realtime Authorization policies |
 | Vault Secrets | `vault.secrets` | ✅ Ready |
 | Postgres Extensions | `pg_extension` | ✅ Ready |
+| RLS Coverage | `pg_class.relrowsecurity` | ✅ Ready — target only, scored as posture |
+| Migration History | `supabase_migrations.schema_migrations` | ✅ Ready — target only, scored as posture |
+| Postgres Roles & Grants | `pg_roles` + `information_schema` grants | ✅ Ready |
 
 ## Supabase Feature Coverage
 
@@ -94,22 +97,23 @@ How SupaForge maps to every standard Supabase module (see [Supabase Features](ht
 
 | Supabase Module | Feature | SupaForge Check | Notes |
 |---|---|---|---|
-| **Database** | Postgres schema | ✅ Schema | Tables, columns, indexes, constraints, views, triggers, functions, sequences, enum types |
+| **Database** | Postgres schema | ✅ Schema | Tables, columns, indexes, constraints, views, triggers, functions, standalone sequences, enum and composite types, domains, materialized views |
 | | Reference / seed data | ✅ Data | Row-level diff for all public tables (configurable) |
 | | Database webhooks | ✅ Webhooks | `supabase_functions.hooks` + `pg_net` extension |
 | | Postgres extensions | ✅ Extensions | Enabled/disabled detection via `pg_extension` |
 | | Vault / Secrets | ✅ Vault | Secret name/description drift; values are environment-specific |
-| | Postgres roles | 🔜 Planned | Custom roles and grants |
+| | Postgres roles | ✅ Roles | Custom role attributes and table grants. Supabase's own service roles are excluded |
 | | Realtime publications | ✅ Realtime | Which tables are published for Realtime |
 | | PostgREST config | ⬜ Not planned | Managed by Supabase platform; not user-configurable per environment |
 | | Replication | ⬜ Not planned | Private alpha; not accessible via standard APIs |
 | **Auth** | Auth config | ✅ Auth | 20+ settings via Management API (providers, JWT, MFA, CAPTCHA) |
 | | RLS policies | ✅ RLS | Full policy diffing with UP/DOWN SQL generation |
-| **Storage** | Buckets | ✅ Storage | Bucket metadata (name, public/private, size limits, MIME types) |
+| **Storage** | Buckets | ✅ Storage | Bucket metadata (name, public/private, size limits, MIME types), including analytics and vector buckets. Objects are never transferred |
 | | Storage RLS policies | ✅ Storage | `storage` schema policy diffing |
-| **Edge Functions** | Function metadata | ✅ Edge Functions | Slug, version, status (source code requires manual deploy) |
+| **Edge Functions** | Function metadata | ✅ Edge Functions | Inventory plus a hash per function, so changed module contents are detected. Deploying is still manual — each issue carries the command |
 | **Cron** | `pg_cron` jobs | ✅ Cron | Schedule, command, active status with SQL generation |
 | **Realtime** | Publications | ✅ Realtime | `pg_publication` + `pg_publication_tables` |
+| | Realtime Authorization | ✅ Realtime | Policies on `realtime.messages` — who may join which channel |
 | | Broadcast / Presence | ⬜ N/A | Runtime features, not environment config |
 | **Platform** | Network restrictions | ⬜ N/A | Platform-level (not diffable via SQL or Management API) |
 | | SSL enforcement | ⬜ N/A | Platform-level |
@@ -132,6 +136,11 @@ supaforge diff --fail-on-posture          Let target-only findings set the exit 
 supaforge diff --check=rls                Limit to a specific check
 supaforge diff --skip=storage             Skip a specific check
 supaforge diff --skip=auth --skip=vault   Skip multiple checks (repeatable)
+supaforge diff --apply --prove            Prove the migration on a throwaway clone first
+supaforge diff --apply --apply-posture    Also apply target-only (posture) fixes
+supaforge diff --ci                       CI mode: annotations + semantic exit codes
+supaforge diff --ci --fail-on=warning     Fail on WARNING as well as CRITICAL
+supaforge sync                            Alias for diff --apply
 supaforge hukam                           Alias for diff 🙏
 
 supaforge snapshot                        Capture full 9-layer snapshot
@@ -149,14 +158,30 @@ supaforge clone --delete=<name> --apply   Remove a clone
 supaforge restore --env=local --from-snapshot=latest --apply   Restore from snapshot
 supaforge restore --env=local --from-migrations --apply        Replay migrations
 
+supaforge migrate create --name=add_orders   Generate a migration file from schema drift
+supaforge migrate list                    List local migrations, applied and pending
+supaforge migrate run --dry-run           Preview which migrations would run
+supaforge migrate run                     Execute pending migrations
+supaforge migrate baseline                Mark local migrations applied without running them
+
+supaforge report                          Show recent command history from the local run log
+supaforge report --send                   Choose entries to send as anonymous bug reports
+
 supaforge mcp                             Start MCP stdio server for AI agents
 ```
 
-> All commands that modify state preview by default. Add `--apply` to execute.
+> `diff`, `clone`, `restore` and `snapshot` preview by default — add `--apply`
+> to execute. The `migrate` family is the exception: `migrate run`
+> executes unless you pass `--dry-run`, and `migrate baseline` only writes
+> tracking rows, so it has no preview mode.
 >
 > Fixes that destroy rows — dropping a table or a column — are always reported
 > but never applied by `--apply` alone. They are listed as skipped unless you
 > also pass `--allow-destructive`.
+>
+> `report` reads a local run log and prints it. Only `report --send` leaves the
+> machine, and only for the entries you pick: it shows exactly what would be
+> transmitted and asks first. No SQL, table names or schema content is included.
 
 ### How `--apply` executes
 
@@ -190,6 +215,30 @@ flag that writes — and the flags that shape the plan (`--only`,
 `--allow-destructive`, `--apply-posture`) apply under it. The ones that only
 matter while executing (`--prove`, `--no-transaction`) warn on stderr that they
 had no effect, rather than being silently ignored.
+
+**Proof.** A migration that executes without error can still leave the target
+looking nothing like the source — a partitioned table rebuilt as an ordinary
+one, an index that never reached its partitions. The SQL is valid, so no amount
+of reading it catches that. `--prove` replays the fix set on a throwaway clone
+of the target and compares the result against the source, refusing to apply if
+they differ:
+
+```bash
+supaforge diff --apply --prove
+```
+
+The clone holds structure only, is made on the target's own server, and is
+dropped even if the proof throws. A failed proof exits 1 having applied nothing.
+A proof that *cannot run* — no `pg_dump`, or no `CREATEDB` — is reported as not
+proven and the apply continues, because being unable to check is not the same as
+checking and failing; a clone that can be made but whose structure will not
+replay is neither, and blocks the apply. See
+[Proving a migration before you run it](packages/cli/README.md#proving-a-migration-before-you-run-it).
+
+**Posture.** Two checks judge the target on its own rather than comparing it to
+the source, so their fixes would *introduce* drift. `--apply` skips them and
+says so; `--apply-posture` applies them anyway. See
+[Drift score vs posture score](#drift-score-vs-posture-score).
 
 **Scope.** With `--tables` active, a fix that depends on a table the filter
 excluded is skipped with a reason naming that table, rather than attempted and
@@ -341,6 +390,42 @@ gap is true of the target whichever pair you diff, so letting it exit 1 meant a
 perfectly synchronised pair failed a sync check forever. Add `--fail-on-posture`
 to gate on them as well.
 
+Their *fixes* are also held back by `--apply`, for the same reason they are
+scored apart: enabling RLS on a target whose source has it disabled moves the
+target away from the source, so the next diff reports schema drift and the next
+sync undoes it. Each one is reported as skipped with that reason, and
+`--apply-posture` applies them anyway when the posture is what you are actually
+fixing:
+
+```
+○ [rls-coverage] rls-coverage-public.customers: Posture finding about the target,
+  not drift from the source — applying it would create drift.
+  Use --apply-posture to apply anyway.
+```
+
+Naming the check explicitly (`--check=rls-coverage --apply`) counts as asking,
+so a deliberate RLS rollout does not need the extra flag.
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Did what was asked — including when there was nothing to do |
+| `1` | Ran, but declined to act, found drift above the threshold, or an operation failed |
+| `2` | Could not run: a usage error, or (in `--ci`) a check that could not complete |
+
+A command that refuses to act is not a success, so `restore … --apply &&
+./deploy.sh` will not deploy when the restore declined. `--ci` gives `diff`,
+`sync` and `hukam` a stricter contract with the threshold under your control —
+`--fail-on=critical` (the default), `warning`, or `any` — and turns a check that
+could not complete into exit `2`, because unmeasured is not the same as clean.
+
+The threshold applies to the twelve checks that compare the two environments.
+RLS Coverage and Migration History describe the target alone, so they are
+reported in full but do not set the exit code unless `--fail-on-posture` asks
+them to — otherwise a pre-existing RLS gap would fail a sync check against an
+identical target, forever.
+
 ### Scoping a diff to specific tables
 
 `--check` / `--skip` select whole layers; `--tables` / `--exclude-tables` scope
@@ -406,22 +491,27 @@ const result = await scan(registry, { config }, bus)
 ```
 packages/cli/
 ├── src/
-│   ├── commands/        # CLI commands (diff, snapshot, clone, restore)
-│   ├── checks/          # Drift detection checks
+│   ├── commands/        # init, diff, sync, hukam, snapshot, clone, restore,
+│   │                    #   migrate/, report, mcp
+│   ├── checks/          # The 14 drift checks
 │   │   ├── base.ts      # Abstract Check class
 │   │   ├── registry.ts  # CheckRegistry
 │   │   ├── rls.ts       # RLS policy diffing
 │   │   ├── cron.ts      # Cron job diffing
-│   │   └── ...          # edge-functions, storage, auth, webhooks, schema, data
+│   │   └── ...          # schema, data, rls-coverage, edge-functions, storage,
+│   │                    #   auth, webhooks, realtime, vault, extensions,
+│   │                    #   migrations, roles
 │   ├── types/           # TypeScript interfaces
 │   ├── utils/           # Shared utilities (error handling)
 │   ├── constants.ts     # Centralised config values, timeouts, paths
 │   ├── config.ts        # Config loader + validator
 │   ├── hooks.ts         # HookBus (actions + filters)
 │   ├── scanner.ts       # Scan orchestrator
-│   ├── scoring.ts       # Health score (0–100)
+│   ├── promote.ts       # Apply decisions: order, atomicity, scope, posture
+│   ├── prove.ts         # Replay a fix set on a throwaway clone
+│   ├── scoring.ts       # Drift and posture scores (0–100)
 │   └── render.ts        # Terminal output
-└── test/                # 434 tests across 35 files
+└── test/                # 1311 tests across 62 files
 ```
 
 ## Development
@@ -430,7 +520,7 @@ packages/cli/
 git clone https://github.com/akalforge/supaforge.git
 cd supaforge/packages/cli
 npm install
-npm test       # Run all tests (434 across 35 files)
+npm test       # Run all tests (1311 across 62 files)
 npm run lint   # Type-check
 npm run build  # Build with tsup
 

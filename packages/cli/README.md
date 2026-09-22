@@ -37,7 +37,7 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 
 | Check | Source | Detection | Fix |
 |-------|--------|-----------|-----|
-| Schema | `@dbdiff/cli` | ✅ Tables, views, triggers, functions, enum types | SQL (up/down) |
+| Schema | `@dbdiff/cli` | ✅ Tables, columns, indexes, constraints, views, triggers, functions, standalone sequences, enum and composite types, domains, materialized views | SQL (up/down) |
 | Data | `@dbdiff/cli --type=data` | ✅ Row-level diff for all public tables (configurable). Checksum-based fast skip for unchanged tables. | SQL (up/down) |
 | RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
 | Edge Functions | Management API (hosted), Studio's `/api/v1/projects/{ref}/functions` (self-hosted), or the functions directory | ✅ Hosted and **self-hosted**, comparing module contents | DELETE extras via API (hosted); otherwise guidance to `supabase functions deploy` |
@@ -48,7 +48,14 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 | Realtime | `pg_publication` + `pg_publication_tables`, and `pg_policies` on `realtime` | ✅ Publications, plus **Realtime Authorization** policies on `realtime.messages` (who may join which channel) | SQL (CREATE/ALTER PUBLICATION; CREATE/DROP POLICY) |
 | Vault Secrets | `vault.secrets` | ✅ | SQL (`vault.create_secret` / `vault.update_secret`) |
 | Postgres Extensions | `pg_extension` | ✅ | SQL (CREATE/DROP EXTENSION) |
+| Postgres Roles & Grants | `pg_roles` + `information_schema` grants | ✅ Custom role attributes and table grants. Supabase's own service roles (`anon`, `authenticated`, `service_role`, `supabase_*`, `pg_*`) are excluded | SQL (CREATE/ALTER ROLE, GRANT/REVOKE) |
+| RLS Coverage | `pg_class.relrowsecurity` | ✅ Tables with RLS disabled — **reads the target only** | SQL, held back unless `--apply-posture` |
+| Migration History | `supabase_migrations.schema_migrations` | ✅ Local migration files with no tracking row — **reads the target only** | SQL (records the file as applied without running it), held back unless `--apply-posture` |
 
+The last two compare nothing: they judge the target on its own and fire
+identically whichever pair you diff, so they are scored apart and their fixes
+are not applied by default. See
+[Drift score vs posture score](#drift-score-vs-posture-score).
 
 ### Scoping a diff to specific tables
 
@@ -170,6 +177,30 @@ A run that would have exited 1 before and now exits 0 says so, once:
   not drift from the source. Add --fail-on-posture to gate on them.
 ```
 
+#### Their fixes are held back too
+
+`--apply` skips posture fixes, for the same reason they are scored apart: they
+change the target without reference to the source, so applying one *creates*
+drift. Enabling RLS on a target whose source has it disabled means the next
+diff reports schema drift and the next sync turns it back off — the pair
+oscillates and never converges.
+
+```
+Skipped 2 issue(s):
+  ○ [rls-coverage] rls-coverage-public.customers: Posture finding about the target,
+    not drift from the source — applying it would create drift.
+    Use --apply-posture to apply anyway.
+```
+
+```bash
+supaforge sync --apply-posture              # enable RLS, record migrations, deliberately
+supaforge diff --check=rls-coverage --apply # naming the check counts as asking
+```
+
+Asking for the check by name is treated as intent, so an RLS rollout does not
+need the extra flag. What `--apply-posture` prevents is a *general* sync quietly
+reaching for fixes that undo themselves.
+
 ### Self-hosted Supabase
 
 Set `apiUrl` on an environment and every API-backed check targets that gateway
@@ -189,12 +220,15 @@ path segment on a hosted URL that will not be called.
 }
 ```
 
-Thirteen of the fourteen checks run against self-hosted. **Edge Functions is
-hosted-only**: self-hosted Supabase exposes no equivalent "list functions"
-management endpoint, so the check reports
+All fourteen checks run against self-hosted. Edge Functions needs one extra
+piece of config: self-hosted Supabase exposes no "list functions" *management*
+endpoint, so point `studioUrl` at Studio (which serves the same shape) or
+`functionsPath` at the mounted directory — see
+[Edge Functions on self-hosted](#edge-functions-on-self-hosted). With neither
+set, the check reports
 
 ```
-  ○ Layer 4 (Edge Functions):           skipped — Edge Functions comparison requires hosted Supabase — self-hosted exposes no management endpoint
+  ○ Layer 4 (Edge Functions):           skipped — Edge Functions comparison needs a source to read from on self-hosted. Set "studioUrl" on both environments…
 ```
 
 rather than attempting a call that can only return `Unauthorized`. Add it to
@@ -262,9 +296,16 @@ supaforge diff --check=rls              Limit to a specific check
 supaforge diff --check=rls --apply      Fix only one check
 supaforge diff --skip=storage           Skip a specific check
 supaforge diff --skip=auth --skip=vault Skip multiple checks (flag is repeatable)
+supaforge diff --tables=orders,items    Scope the schema and data checks to these tables
+supaforge diff --exclude-tables='*_log' Exclude tables from those checks (repeatable)
 supaforge diff --include-files          Include file-level storage drift detection
+supaforge diff --apply --prove          Replay on a throwaway clone before applying
+supaforge diff --apply --apply-posture  Also apply target-only (posture) fixes
+supaforge diff --ci                     CI mode: annotations + semantic exit codes
+supaforge diff --ci --fail-on=warning   Fail on WARNING as well as CRITICAL
 supaforge diff --fail-on-posture        Let target-only findings set the exit code
 supaforge diff --json                   Output as JSON
+supaforge sync                          Alias for diff --apply
 supaforge hukam                         Alias for diff 🙏
 
 supaforge snapshot                      Capture a full environment snapshot (9 layers)
@@ -274,12 +315,15 @@ supaforge snapshot --list               List all snapshots
 supaforge snapshot --prune              Preview old snapshot cleanup (keeps last 7)
 supaforge snapshot --prune --apply      Delete old snapshots
 supaforge snapshot --prune --keep=5     Keep last 5 instead of 7
+supaforge snapshot --output=<dir>       Write snapshots somewhere other than .supaforge
 
 supaforge clone --env=prod              Preflight checks (validates connectivity)
 supaforge clone --env=prod --apply      Clone remote to local (snapshot + baseline)
 supaforge clone --env=prod --force      Force re-clone (drop existing DB)
 supaforge clone --env=prod --start-local  Auto-start a local PostgreSQL container
 supaforge clone --schema-only --apply   Clone schema only, no data
+supaforge clone --local-url=<url>       Point at a local server other than :5432
+supaforge clone --local-db=<name>       Name the local database (default supaforge_local)
 supaforge clone --list                  List existing clones
 supaforge clone --delete=<name>         Preview clone deletion
 supaforge clone --delete=<name> --apply Drop database and remove tracking
@@ -287,11 +331,34 @@ supaforge clone --delete=<name> --apply Drop database and remove tracking
 supaforge restore --env=local --from-snapshot=latest          Preview snapshot restore
 supaforge restore --env=local --from-snapshot=latest --apply  Apply snapshot to target
 supaforge restore --env=local --from-migrations --apply       Replay migration history
+
+supaforge migrate create --name=add_orders  Generate a migration from schema drift
+supaforge migrate list                  List local migrations, applied and pending
+supaforge migrate list --offline        List without querying the target
+supaforge migrate run --dry-run         Preview which migrations would run
+supaforge migrate run                   Execute pending migrations
+supaforge migrate run --up-to=003       Stop after a given migration
+supaforge migrate baseline              Mark local migrations applied without running them
+
+supaforge report                        Recent command history from the local run log
+supaforge report --last=20              Show more entries
+supaforge report --send                 Choose entries to send as anonymous bug reports
+
+supaforge mcp                           Start the MCP stdio server for AI agents
 ```
+
+Two notes on the shape of that list. `migrate run` and `migrate baseline` are
+the only state-changing commands that do **not** take `--apply`: `run` executes
+unless given `--dry-run`, and `baseline` writes tracking rows only, so it has no
+preview mode. And `report` is local — it reads `~/.supaforge/run-log.jsonl` and
+prints it. Only `report --send` leaves the machine, only for the entries you
+select, and it shows exactly what would be transmitted before asking. No SQL,
+table names or schema content is ever included.
 
 ### Safe by Default
 
-Commands that modify databases preview what they would do first. Add `--apply` to execute:
+Commands that modify databases preview what they would do first — the `migrate`
+family noted above being the exception. Add `--apply` to execute:
 
 ```bash
 # Preview only (default)
@@ -336,11 +403,22 @@ the order without running anything:
 supaforge diff --dry-run
 ```
 
+```
+Would apply 3 fix(es), in this order:
+  1. [schema] schema-alter-2
+     ALTER TABLE "orders" ADD COLUMN "status" text DEFAULT 'pending'::text;
+  2. [schema] schema-create-function-7
+     CREATE OR REPLACE FUNCTION public.touch_updated() RETURNS trigger ...
+  3. [schema] schema-create-trigger-6
+     CREATE TRIGGER trg_orders_touch BEFORE UPDATE ON public.orders ...
+
+  Nothing was executed. Drop --dry-run to apply.
+```
+
 `--dry-run` needs no `--apply`: previewing should not require typing the flag
-that writes. It plans the fix set, prints it in execution order, and touches
-nothing. The flags that shape *what* would be applied — `--only`,
-`--allow-destructive`, `--apply-posture` — take effect under it, so a scoped
-plan can be reviewed before it is run:
+that writes. The flags that shape *what* would be applied — `--only`,
+`--allow-destructive`, `--apply-posture` — take effect under it, so a scoped plan
+can be reviewed before it is run:
 
 ```bash
 supaforge diff --dry-run --only='schema-create-*'
@@ -354,18 +432,6 @@ The flags that only mean something while executing — `--prove`,
 ```
 
 That warning goes to stderr, so `--json` and `--ci` stdout stay parseable.
-
-```
-Would apply 3 fix(es), in this order:
-  1. [schema] schema-alter-2
-     ALTER TABLE "orders" ADD COLUMN "status" text DEFAULT 'pending'::text;
-  2. [schema] schema-create-function-7
-     CREATE OR REPLACE FUNCTION public.touch_updated() RETURNS trigger ...
-  3. [schema] schema-create-trigger-6
-     CREATE TRIGGER trg_orders_touch BEFORE UPDATE ON public.orders ...
-
-  Nothing was executed. Drop --dry-run to apply.
-```
 
 **An apply is all-or-nothing.** PostgreSQL supports transactional DDL, so the
 SQL fix set runs in one transaction: if any statement fails, every statement is
@@ -618,7 +684,8 @@ SQL can catch that, because the SQL is valid.
 the result against the source:
 
 ```bash
-supaforge sync --apply --prove
+supaforge sync --prove          # sync already implies --apply
+supaforge diff --apply --prove  # same thing, spelled out
 ```
 
 ```
@@ -854,10 +921,19 @@ supaforge restore --env=local --from-snapshot=latest --apply
     DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
     PROD_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
     SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
-  run: npx supaforge diff --check
+  run: npx supaforge diff --ci
 ```
 
-The `--check` flag exits with code 1 when drift is detected, failing the pipeline.
+`--ci` emits GitHub Actions annotations and exits 1 on CRITICAL drift, failing
+the pipeline. Raise or lower the bar with `--fail-on=warning` / `--fail-on=any`,
+and see [Exit Codes](#exit-codes) for the full contract — notably that a check
+which could not complete exits 2 rather than passing quietly, and that the
+target-only checks are reported but do not fail the build unless you add
+`--fail-on-posture`. That last part is what keeps a long-standing RLS gap from
+failing every drift check you run.
+
+Note `--check` is a different flag: it takes a check *name* (`--check=rls`) and
+limits the run to that layer.
 
 ## Extending with Hooks
 
@@ -969,6 +1045,23 @@ supaforge diff                # schema + data checks active out of the box
 ```
 
 The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.
+
+**What the schema layer reaches.** `3.0.0-rc.12`, the pinned version, models
+composite types, domains, materialized views (and their indexes), standalone
+sequences and RLS policies — five kinds that earlier releases did not read at
+all, and therefore reported as no drift whether they matched or not. A schema
+that SupaForge has synced can now be diffed again and come back clean, which is
+what makes `--prove` meaningful.
+
+One consequence is visible in output: a missing policy is found by both the
+schema layer and the RLS layer, so the plan would carry two `CREATE POLICY`
+statements for it and the second would fail the whole transaction. The RLS one is
+dropped, keeping the schema fix because it carries the definition dbdiff
+extracted:
+
+```
+○ [rls] rls-missing-public.invoices.read_own: Already created by the schema fix for the same policy
+```
 
 **Overloaded functions.** Postgres lets several functions share a name with
 different argument types. Each overload is compared and reported separately, and

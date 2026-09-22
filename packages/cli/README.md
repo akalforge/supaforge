@@ -403,11 +403,22 @@ the order without running anything:
 supaforge diff --dry-run
 ```
 
+```
+Would apply 3 fix(es), in this order:
+  1. [schema] schema-alter-2
+     ALTER TABLE "orders" ADD COLUMN "status" text DEFAULT 'pending'::text;
+  2. [schema] schema-create-function-7
+     CREATE OR REPLACE FUNCTION public.touch_updated() RETURNS trigger ...
+  3. [schema] schema-create-trigger-6
+     CREATE TRIGGER trg_orders_touch BEFORE UPDATE ON public.orders ...
+
+  Nothing was executed. Drop --dry-run to apply.
+```
+
 `--dry-run` needs no `--apply`: previewing should not require typing the flag
-that writes. It plans the fix set, prints it in execution order, and touches
-nothing. The flags that shape *what* would be applied — `--only`,
-`--allow-destructive`, `--apply-posture` — take effect under it, so a scoped
-plan can be reviewed before it is run:
+that writes. The flags that shape *what* would be applied — `--only`,
+`--allow-destructive`, `--apply-posture` — take effect under it, so a scoped plan
+can be reviewed before it is run:
 
 ```bash
 supaforge diff --dry-run --only='schema-create-*'
@@ -421,18 +432,6 @@ The flags that only mean something while executing — `--prove`,
 ```
 
 That warning goes to stderr, so `--json` and `--ci` stdout stay parseable.
-
-```
-Would apply 3 fix(es), in this order:
-  1. [schema] schema-alter-2
-     ALTER TABLE "orders" ADD COLUMN "status" text DEFAULT 'pending'::text;
-  2. [schema] schema-create-function-7
-     CREATE OR REPLACE FUNCTION public.touch_updated() RETURNS trigger ...
-  3. [schema] schema-create-trigger-6
-     CREATE TRIGGER trg_orders_touch BEFORE UPDATE ON public.orders ...
-
-  Nothing was executed. Drop --dry-run to apply.
-```
 
 **An apply is all-or-nothing.** PostgreSQL supports transactional DDL, so the
 SQL fix set runs in one transaction: if any statement fails, every statement is
@@ -685,7 +684,8 @@ SQL can catch that, because the SQL is valid.
 the result against the source:
 
 ```bash
-supaforge sync --apply --prove
+supaforge sync --prove          # sync already implies --apply
+supaforge diff --apply --prove  # same thing, spelled out
 ```
 
 ```
@@ -927,7 +927,10 @@ supaforge restore --env=local --from-snapshot=latest --apply
 `--ci` emits GitHub Actions annotations and exits 1 on CRITICAL drift, failing
 the pipeline. Raise or lower the bar with `--fail-on=warning` / `--fail-on=any`,
 and see [Exit Codes](#exit-codes) for the full contract — notably that a check
-which could not complete exits 2 rather than passing quietly.
+which could not complete exits 2 rather than passing quietly, and that the
+target-only checks are reported but do not fail the build unless you add
+`--fail-on-posture`. That last part is what keeps a long-standing RLS gap from
+failing every drift check you run.
 
 Note `--check` is a different flag: it takes a check *name* (`--check=rls`) and
 limits the run to that layer.

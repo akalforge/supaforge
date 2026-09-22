@@ -420,6 +420,12 @@ A command that refuses to act is not a success, so `restore … --apply &&
 `--fail-on=critical` (the default), `warning`, or `any` — and turns a check that
 could not complete into exit `2`, because unmeasured is not the same as clean.
 
+The threshold applies to the twelve checks that compare the two environments.
+RLS Coverage and Migration History describe the target alone, so they are
+reported in full but do not set the exit code unless `--fail-on-posture` asks
+them to — otherwise a pre-existing RLS gap would fail a sync check against an
+identical target, forever.
+
 ### Scoping a diff to specific tables
 
 `--check` / `--skip` select whole layers; `--tables` / `--exclude-tables` scope
@@ -505,7 +511,7 @@ packages/cli/
 │   ├── prove.ts         # Replay a fix set on a throwaway clone
 │   ├── scoring.ts       # Drift and posture scores (0–100)
 │   └── render.ts        # Terminal output
-└── test/                # 1235 tests across 59 files
+└── test/                # 1311 tests across 62 files
 ```
 
 ## Development
@@ -514,7 +520,7 @@ packages/cli/
 git clone https://github.com/akalforge/supaforge.git
 cd supaforge/packages/cli
 npm install
-npm test       # Run all tests (1235 across 59 files)
+npm test       # Run all tests (1311 across 62 files)
 npm run lint   # Type-check
 npm run build  # Build with tsup
 

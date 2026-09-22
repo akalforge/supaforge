@@ -25,19 +25,30 @@ import { randomBytes } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fingerprintSql, stateSql, type SchemaState } from '@akalforge/pg-conformance'
-import { pgQuery } from './db'
+import { pgQuery, type QueryFn } from './db'
 import { diffState } from './state-diff'
 import { resolvePgDumpPath, getServerMajorVersion } from './pg-tools'
 import { join, dirname } from 'node:path'
 
 const exec = promisify(execFile)
 
-/** Schemas Supabase manages; cloning them adds minutes and proves nothing. */
-const PROOF_EXCLUDED_SCHEMAS = [
-  'auth', 'storage', 'realtime', '_realtime', 'vault', 'extensions',
-  'graphql', 'graphql_public', 'supabase_migrations', 'supabase_functions',
-  'pgsodium', 'pgsodium_masks', 'net', 'cron', '_analytics', '_supavisor',
-]
+/**
+ * Extensions on the target, and the schema each is installed into.
+ *
+ * The clone holds only the schemas being proved, so anything those schemas
+ * reference from outside has to be put there first — and in practice that means
+ * extensions: a Supabase column default calling `extensions.uuid_generate_v4()`
+ * cannot be created without the extension that owns the function.
+ *
+ * plpgsql is excluded because every database already has it.
+ */
+const TARGET_EXTENSIONS_SQL = `
+  SELECT e.extname AS name, n.nspname AS schema
+    FROM pg_extension e
+    JOIN pg_namespace n ON n.oid = e.extnamespace
+   WHERE e.extname <> 'plpgsql'
+   ORDER BY e.extname
+`
 
 export interface ProofResult {
   /** True when the clone matched the source after applying. */
@@ -179,11 +190,21 @@ export async function proveConvergence(opts: {
       }
     }
 
+    // Prepare the clone to receive the proved schemas, and nothing else.
+    await prepareClone(cloneUrl, opts.targetUrl, schemas)
+
     // Copy the target's structure. Data is irrelevant to a schema proof and
     // copying it would make this unusable on anything but a toy database.
+    //
+    // Only the schemas being proved. Listing Supabase's schemas as exclusions
+    // instead left the dump carrying everything that *references* them — a
+    // `CREATE EXTENSION ... WITH SCHEMA extensions`, an event trigger calling
+    // `extensions.set_graphql_placeholder()` — none of which could be replayed
+    // into a clone that deliberately has no such schema. `--prove` therefore
+    // failed on every real Supabase project, whatever the client version.
     const dumpArgs = [
       opts.targetUrl, '--schema-only', '--no-owner', '--no-privileges',
-      ...PROOF_EXCLUDED_SCHEMAS.flatMap(s => ['--exclude-schema', s]),
+      ...schemas.map(s => `--schema=${s}`),
     ]
     const { stdout: structure } = await exec(pgDump, dumpArgs, {
       maxBuffer: 256 * 1024 * 1024, timeout: 300_000,
@@ -337,6 +358,43 @@ export function dropUnsupportedSetStatements(
   return { sql: kept.join('\n'), dropped }
 }
 
+/**
+ * Make a fresh clone ready to receive a dump of just the proved schemas.
+ *
+ * Two steps, in this order.
+ *
+ * The proved schemas are dropped, because the dump recreates them itself —
+ * pg_dump emits `CREATE SCHEMA public` for an explicitly selected schema, which
+ * a database that already has one rejects.
+ *
+ * Then the target's extensions are installed, except any living in a proved
+ * schema: those belong to the dump, which carries them and would collide.
+ * Without this, a table whose column default calls an extension function — the
+ * `extensions.uuid_generate_v4()` pattern all over Supabase — cannot be created,
+ * because a default is resolved when the table is created, not when it is used.
+ */
+export async function prepareClone(
+  cloneUrl: string, targetUrl: string, schemas: string[], queryFn: QueryFn = pgQuery,
+): Promise<void> {
+  for (const schema of schemas) {
+    await queryFn(cloneUrl, `DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+  }
+
+  const extensions = await queryFn(targetUrl, TARGET_EXTENSIONS_SQL) as unknown as
+    Array<{ name: string; schema: string }>
+
+  for (const ext of extensions) {
+    if (schemas.includes(ext.schema)) continue
+    await queryFn(cloneUrl, `CREATE SCHEMA IF NOT EXISTS "${ext.schema}"`)
+    // Best-effort: an extension the server cannot offer this database is not a
+    // reason to abandon the proof. If the schema genuinely needed it, the replay
+    // fails next and says so.
+    await queryFn(cloneUrl,
+      `CREATE EXTENSION IF NOT EXISTS "${ext.name}" WITH SCHEMA "${ext.schema}"`,
+    ).catch(() => undefined)
+  }
+}
+
 /** Configuration parameter names this server recognises. */
 async function knownParameters(dbUrl: string): Promise<Set<string>> {
   const rows = await pgQuery(dbUrl, 'SELECT name FROM pg_settings') as unknown as
@@ -355,7 +413,13 @@ async function knownParameters(dbUrl: string): Promise<Set<string>> {
 export function explainStructureFailure(
   message: string, clientMajor: number, serverMajor: number,
 ): string {
-  const versionGap = clientMajor > serverMajor
+  // Only when the error actually looks like one — a newer client emitting SQL
+  // the server has no concept of. Appending it to every failure would send
+  // someone chasing a version gap that has nothing to do with, say, a missing
+  // schema, which is the same species of misdirection this message exists to
+  // undo.
+  const looksLikeVersionGap = /unrecognized configuration parameter|syntax error/i.test(message)
+  const versionGap = clientMajor > serverMajor && looksLikeVersionGap
     ? ` The local client is PostgreSQL ${clientMajor} and the target server is `
       + `${serverMajor}; pg_dump ${clientMajor} can emit SQL that a ${serverMajor} `
       + `server rejects. Installing postgresql-client-${serverMajor} removes the gap.`

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { dropUnsupportedSetStatements, explainStructureFailure } from '../src/prove.js'
+import { dropUnsupportedSetStatements, explainStructureFailure, prepareClone } from '../src/prove.js'
 
 /**
  * The real preamble `pg_dump` 18.6 writes when dumping a PostgreSQL 15 server,
@@ -142,5 +142,107 @@ describe('explainStructureFailure (issue #72)', () => {
 
   it('always says which step failed', () => {
     expect(explainStructureFailure('boom', 15, 15)).toContain("replay the target's structure")
+  })
+
+  it('does not blame the version gap for an unrelated failure', () => {
+    // A missing schema has nothing to do with client versions. Appending the
+    // hint anyway would send the reader chasing the wrong cause — the same
+    // misdirection this message exists to undo.
+    const unrelated = 'psql:<stdin>:25: ERROR:  schema "extensions" does not exist'
+    const msg = explainStructureFailure(unrelated, 18, 15)
+    expect(msg).toContain(unrelated)
+    expect(msg).not.toContain('client is PostgreSQL')
+  })
+
+  it('still explains a syntax error a newer client could have produced', () => {
+    const msg = explainStructureFailure('ERROR:  syntax error at or near "NOT"', 18, 15)
+    expect(msg).toContain('client is PostgreSQL 18')
+  })
+})
+
+/**
+ * Listing Supabase's schemas as `--exclude-schema` left the dump carrying
+ * everything that *references* them: `CREATE EXTENSION ... WITH SCHEMA
+ * extensions`, an event trigger calling `extensions.set_graphql_placeholder()`.
+ * None of it could be replayed into a clone that deliberately has no such
+ * schema, so `--prove` failed on every real Supabase project regardless of
+ * client version — the version gap in #72 was hiding a second wall behind it.
+ *
+ * The clone now receives only the schemas being proved, plus the extensions
+ * those schemas might reference.
+ */
+describe('prepareClone (issue #72)', () => {
+  type Call = { url: string; sql: string }
+
+  function recorder(extensions: Array<{ name: string; schema: string }>) {
+    const calls: Call[] = []
+    const queryFn = async (url: string, sql: string) => {
+      calls.push({ url, sql })
+      return sql.includes('pg_extension') ? extensions : []
+    }
+    return { calls, queryFn: queryFn as unknown as Parameters<typeof prepareClone>[3] }
+  }
+
+  it('drops the proved schemas so the dump can recreate them', async () => {
+    // pg_dump emits `CREATE SCHEMA public` for an explicitly selected schema,
+    // which a database that already has one rejects.
+    const { calls, queryFn } = recorder([])
+    await prepareClone('postgres://clone/db', 'postgres://target/db', ['public'], queryFn)
+    expect(calls[0]).toEqual({
+      url: 'postgres://clone/db', sql: 'DROP SCHEMA IF EXISTS "public" CASCADE',
+    })
+  })
+
+  it('installs the target extensions into the clone', async () => {
+    const { calls, queryFn } = recorder([
+      { name: 'uuid-ossp', schema: 'extensions' },
+      { name: 'pg_graphql', schema: 'graphql' },
+    ])
+    await prepareClone('postgres://clone/db', 'postgres://target/db', ['public'], queryFn)
+
+    const sql = calls.map(c => c.sql)
+    expect(sql).toContain('CREATE SCHEMA IF NOT EXISTS "extensions"')
+    expect(sql).toContain('CREATE EXTENSION IF NOT EXISTS "uuid-ossp" WITH SCHEMA "extensions"')
+    expect(sql).toContain('CREATE EXTENSION IF NOT EXISTS "pg_graphql" WITH SCHEMA "graphql"')
+  })
+
+  it('leaves an extension living in a proved schema to the dump', async () => {
+    // The dump carries it, so creating it first would collide.
+    const { calls, queryFn } = recorder([{ name: 'pgcrypto', schema: 'public' }])
+    await prepareClone('postgres://clone/db', 'postgres://target/db', ['public'], queryFn)
+    expect(calls.map(c => c.sql).join('\n')).not.toContain('pgcrypto')
+  })
+
+  it('reads the extension list from the target, not the clone', async () => {
+    const { calls, queryFn } = recorder([])
+    await prepareClone('postgres://clone/db', 'postgres://target/db', ['public'], queryFn)
+    const lookup = calls.find(c => c.sql.includes('pg_extension'))
+    expect(lookup?.url).toBe('postgres://target/db')
+  })
+
+  it('carries on when an extension cannot be created', async () => {
+    // Unavailable on this server is not a reason to abandon the proof; if the
+    // schema genuinely needed it, the replay fails next and says so.
+    const calls: string[] = []
+    const queryFn = (async (_url: string, sql: string) => {
+      calls.push(sql)
+      if (sql.startsWith('CREATE EXTENSION')) throw new Error('not available')
+      return sql.includes('pg_extension') ? [{ name: 'postgis', schema: 'gis' }] : []
+    }) as unknown as Parameters<typeof prepareClone>[3]
+
+    await expect(
+      prepareClone('postgres://clone/db', 'postgres://target/db', ['public'], queryFn),
+    ).resolves.toBeUndefined()
+    expect(calls.some(s => s.startsWith('CREATE EXTENSION'))).toBe(true)
+  })
+
+  it('handles more than one proved schema', async () => {
+    const { calls, queryFn } = recorder([])
+    await prepareClone('postgres://clone/db', 'postgres://target/db', ['public', 'billing'], queryFn)
+    const drops = calls.filter(c => c.sql.startsWith('DROP SCHEMA')).map(c => c.sql)
+    expect(drops).toEqual([
+      'DROP SCHEMA IF EXISTS "public" CASCADE',
+      'DROP SCHEMA IF EXISTS "billing" CASCADE',
+    ])
   })
 })

@@ -14,7 +14,7 @@ Supabase projects running in multiple environments (dev, staging, production) si
 
 **CVE-2025-48757** found 170+ apps with fully exposed databases due to RLS policies that were never promoted to production. SupaForge catches this on the first scan.
 
-Built by **[Akal Forge](https://github.com/akalforge)** — precision developer tools, forged to last.
+Built by **[Akal](https://github.com/akalforge)** — precision developer tools, built to last.
 
 ## Quick Start
 
@@ -568,4 +568,4 @@ To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## License
 
-[MIT](LICENSE) — Copyright (c) 2026 Akal Forge
+[MIT](LICENSE) — Copyright (c) 2026 Akal Software Ltd

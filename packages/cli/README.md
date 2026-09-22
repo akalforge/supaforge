@@ -2,7 +2,7 @@
 
 > Diff and sync your Supabase environments.
 
-Built by [Akal Forge](https://github.com/akalforge).
+Built by [Akal](https://github.com/akalforge).
 
 ## Quick Start
 

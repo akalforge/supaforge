@@ -35,8 +35,8 @@ const BANNER = `
   ███████║╚██████╔╝██║     ██║  ██║██║     ╚██████╔╝██║  ██║╚██████╔╝███████╗
   ╚══════╝ ╚═════╝ ╚═╝     ╚═╝  ╚═╝╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝`
 
-const TAGLINE = '  precision developer tools, forged to last'
-const CREDIT = 'by Akal Forge'
+const TAGLINE = '  precision developer tools, built to last'
+const CREDIT = 'by Akal'
 
 /** Minimum terminal width needed to render the full ASCII banner without wrapping. */
 const BANNER_MIN_WIDTH = 80

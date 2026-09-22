@@ -374,15 +374,22 @@ export async function promote(options: PromoteOptions): Promise<PromoteResult> {
     allowDestructive = false,
     tableFilter,
     only,
+    applyPosture = false,
     transactional = true,
     fetchFn = globalThis.fetch.bind(globalThis),
   } = options
 
+  // applyPosture was accepted by PromoteOptions and then dropped on the floor
+  // here, so `--apply-posture` was a no-op through this path — the only caller
+  // that honoured it was `--prove`, which calls planWork directly. The unit
+  // tests covering the flag tested planWork rather than promote, which is
+  // exactly why the gap survived them.
   const { sqlStatements, apiActions, skipped } = planWork(scanResult, {
     checks,
     allowDestructive,
     tableFilter,
     only,
+    applyPosture,
   })
   const result: PromoteResult = { applied: [], skipped, errors: [] }
 

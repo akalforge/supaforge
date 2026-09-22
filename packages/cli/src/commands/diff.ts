@@ -13,7 +13,7 @@ import { renderTip } from '../tips.js'
 import { formatGitHubAnnotations, computeCiExitCode, formatCiSummary, type FailOn } from '../ci.js'
 import { resolveTableFilter, isFiltered, describeTableFilter } from '../utils/table-filter.js'
 import { parseFlagList } from '../utils/strings.js'
-import { isCloneDatabase } from '../branch.js'
+import { isCloneDatabase, sourceLooksLikeCloneOf } from '../branch.js'
 import { proveConvergence } from '../prove.js'
 import { summarizeByKind } from '../scoring.js'
 import { CLONE_SKIP_FLAGS } from '../defaults.js'
@@ -32,6 +32,43 @@ function describeCheckOutcome(
     return { glyph: dim('○'), text: dim(`skipped — ${skipReason ?? 'no reason given'}`) }
   }
   return { glyph: ok('✓'), text: `${issueCount} issues` }
+}
+
+/**
+ * Flags that only mean something when fixes are being planned or executed.
+ *
+ * Passed on their own they used to be inert *and silent* — the run printed
+ * byte-identical output to one with no flag at all. Worst for the two that read
+ * as safety measures: someone reaching for `--prove` or `--dry-run` alone, the
+ * natural instinct for "don't actually do it", got an ordinary diff and no sign
+ * they had neither previewed nor proved anything (issue #71).
+ *
+ * `--dry-run` is deliberately absent: it now selects the planning path by
+ * itself, so previewing never requires typing the flag that writes. Flags that
+ * shape the *plan* rather than the execution are honoured under `--dry-run`, so
+ * they are only inert when neither flag is present.
+ */
+const APPLY_ONLY_FLAGS: ReadonlyArray<{ flag: string; shapesThePlan: boolean }> = [
+  { flag: 'prove', shapesThePlan: false },
+  { flag: 'no-transaction', shapesThePlan: false },
+  { flag: 'only', shapesThePlan: true },
+  { flag: 'apply-posture', shapesThePlan: true },
+  { flag: 'allow-destructive', shapesThePlan: true },
+]
+
+/** Which apply-only flags this invocation will silently ignore. */
+export function inertApplyFlags(
+  flags: Record<string, unknown>,
+): ReadonlyArray<{ flag: string; shapesThePlan: boolean }> {
+  if (flags['apply']) return []
+  const dryRun = Boolean(flags['dry-run'])
+
+  return APPLY_ONLY_FLAGS.filter(({ flag, shapesThePlan }) => {
+    const given = flags[flag]
+    const passed = Array.isArray(given) ? given.length > 0 : Boolean(given)
+    if (!passed) return false
+    return !(dryRun && shapesThePlan)
+  })
 }
 
 /**
@@ -217,6 +254,14 @@ export default class Diff extends BaseCommand {
   async run(): Promise<void> {
     const { flags } = await this.parse(Diff)
 
+    // On stderr, so a --json or --ci consumer still gets clean stdout while a
+    // human is told the flag did nothing.
+    for (const { flag, shapesThePlan } of inertApplyFlags(flags as unknown as Record<string, unknown>)) {
+      const suggestion = shapesThePlan
+        ? `Add ${cmd('--apply')} (or ${cmd('--dry-run')} to preview) for it to take effect.`
+        : `Add ${cmd('--apply')} for it to take effect.`
+      process.stderr.write(`  ${warn(`--${flag} has no effect without --apply.`)} ${suggestion}\n`)
+    }
 
     const config = await this.loadConfigOrFail()
     this.validateDualEnvConfig(config, flags.source, flags.target)
@@ -284,7 +329,10 @@ export default class Diff extends BaseCommand {
     }
 
     // ── Apply mode (was: promote) ───────────────────────────────────────────────
-    if (flags.apply) {
+    // `--dry-run` enters here without `--apply`: it plans, prints the execution
+    // order, and writes nothing. Previewing an apply should not require typing
+    // the flag that performs one (issue #71).
+    if (flags.apply || flags['dry-run']) {
       const onProgress = makeProgress()
       const scanResult = await scan(registry, { config, checks, skip, tableFilter, onProgress, onDetail: makeDetail() })
       this.setCheckSummaries(scanResult.checks.map(c => ({
@@ -388,7 +436,16 @@ export default class Diff extends BaseCommand {
 
     // Whether the source is a local clone changes what `--apply` means, and so
     // changes what the closing tip should say about it (issue #48).
-    const sourceIsClone = await isCloneDatabase(config.environments[config.source!]?.dbUrl)
+    //
+    // Two signals, because the bookkeeping one is local and exact: a clone
+    // diffed from another directory, or renamed, answered "not a clone" and got
+    // the unqualified "add --apply" advice in the most destructive direction
+    // (issue #71). The second signal asks the databases whether the source is
+    // missing the Supabase substrate the target has, which is the property that
+    // makes the advice wrong.
+    const sourceUrl = config.environments[config.source!]?.dbUrl
+    const sourceIsClone = await isCloneDatabase(sourceUrl)
+      || await sourceLooksLikeCloneOf(sourceUrl, config.environments[config.target!]?.dbUrl)
 
     const driftedChecks = result.checks.filter(c => c.status === 'drifted').map(c => c.check)
     const skippedChecks = result.checks.filter(c => c.status === 'skipped').map(c => c.check)
@@ -437,7 +494,16 @@ export default class Diff extends BaseCommand {
 
       if (result.summary.total > 0) {
         this.log(`  → Run with ${cmd('--detail')} to see SQL diffs`)
-        this.log(`  → Run with ${cmd('--apply')} to fix drift\n`)
+        // Direction matters here, not just in the tip below. From a clone this
+        // line was recommending the command that reshapes a shared remote to
+        // match a vanilla-PostgreSQL copy — dropping the roles, grants and
+        // policies the clone never had (issue #71).
+        this.log(
+          sourceIsClone
+            ? `  → ${cmd('--apply')} would push this clone's shape onto the target, `
+              + `absences included — preview it first with ${cmd('--apply --dry-run')}\n`
+            : `  → Run with ${cmd('--apply')} to fix drift\n`,
+        )
       }
 
       this.log(renderTip({

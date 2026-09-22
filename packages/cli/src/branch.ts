@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process'
 import { readFile, writeFile, mkdir } from 'node:fs/promises'
 import { resolve, dirname } from 'node:path'
 import pg from 'pg'
-import { pgClientConfig } from './db.js'
+import { pgClientConfig, pgQuery, type QueryFn } from './db.js'
 import { captureSnapshot, type SnapshotResult } from './snapshot'
 import type { EnvironmentConfig, SupaForgeConfig } from './types/config'
 import { checkPgDumpCompat } from './pg-tools'
@@ -649,6 +649,53 @@ export async function isCloneDatabase(dbUrl: string | undefined, cwd = process.c
   try {
     const manifest = await loadManifest(cwd)
     return manifest.branches.some(b => b.dbName === dbName)
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Schemas every Supabase project has and a vanilla-PostgreSQL copy of one does
+ * not. `auth` is the safest single signal: it exists on every Supabase project
+ * including a bare one, and `supaforge clone` only stubs the few tables that
+ * FKs point at rather than recreating the schema.
+ */
+const SUPABASE_SUBSTRATE_SCHEMAS = ['auth', 'storage'] as const
+
+/**
+ * Does the source look like a vanilla-PostgreSQL copy of the target?
+ *
+ * The manifest answer above is the reliable one when it applies, but it is
+ * local, gitignored, and keyed on an exact database name — so a clone made in
+ * another checkout, renamed, or diffed from a different working directory reads
+ * as an ordinary environment, and the advice reverts to recommending `--apply`
+ * in the one direction where it is most destructive (issue #71).
+ *
+ * This asks the databases instead of the bookkeeping: if the target carries
+ * Supabase's own schemas and the source carries none of them, then whatever the
+ * source is, pushing it onto the target would drop everything Supabase put
+ * there. That is the property the warning is actually about, so it is the
+ * property worth testing.
+ *
+ * Best-effort: any failure answers "no", because this only words a hint.
+ */
+export async function sourceLooksLikeCloneOf(
+  sourceUrl: string | undefined, targetUrl: string | undefined,
+  queryFn: QueryFn = pgQuery,
+): Promise<boolean> {
+  if (!sourceUrl || !targetUrl) return false
+
+  const query = `SELECT count(*)::int AS n FROM information_schema.schemata
+                  WHERE schema_name = ANY($1::text[])`
+  try {
+    const [source, target] = await Promise.all([
+      queryFn(sourceUrl, query, [[...SUPABASE_SUBSTRATE_SCHEMAS]]),
+      queryFn(targetUrl, query, [[...SUPABASE_SUBSTRATE_SCHEMAS]]),
+    ]) as unknown as Array<Array<{ n: number }>>
+
+    const sourceHas = source[0]?.n ?? 0
+    const targetHas = target[0]?.n ?? 0
+    return targetHas > 0 && sourceHas === 0
   } catch {
     return false
   }

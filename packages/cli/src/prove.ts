@@ -25,19 +25,30 @@ import { randomBytes } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fingerprintSql, stateSql, type SchemaState } from '@akalforge/pg-conformance'
-import { pgQuery } from './db'
+import { pgQuery, type QueryFn } from './db'
 import { diffState } from './state-diff'
 import { resolvePgDumpPath, getServerMajorVersion } from './pg-tools'
 import { join, dirname } from 'node:path'
 
 const exec = promisify(execFile)
 
-/** Schemas Supabase manages; cloning them adds minutes and proves nothing. */
-const PROOF_EXCLUDED_SCHEMAS = [
-  'auth', 'storage', 'realtime', '_realtime', 'vault', 'extensions',
-  'graphql', 'graphql_public', 'supabase_migrations', 'supabase_functions',
-  'pgsodium', 'pgsodium_masks', 'net', 'cron', '_analytics', '_supavisor',
-]
+/**
+ * Extensions on the target, and the schema each is installed into.
+ *
+ * The clone holds only the schemas being proved, so anything those schemas
+ * reference from outside has to be put there first — and in practice that means
+ * extensions: a Supabase column default calling `extensions.uuid_generate_v4()`
+ * cannot be created without the extension that owns the function.
+ *
+ * plpgsql is excluded because every database already has it.
+ */
+const TARGET_EXTENSIONS_SQL = `
+  SELECT e.extname AS name, n.nspname AS schema
+    FROM pg_extension e
+    JOIN pg_namespace n ON n.oid = e.extnamespace
+   WHERE e.extname <> 'plpgsql'
+   ORDER BY e.extname
+`
 
 export interface ProofResult {
   /** True when the clone matched the source after applying. */
@@ -147,13 +158,16 @@ export async function proveConvergence(opts: {
 
   let pgDump: string
   let psql: string
+  let serverMajor: number
+  let clientMajor: number
   try {
-    const major = await getServerMajorVersion(opts.targetUrl)
-    const resolved = await resolvePgDumpPath(major)
+    serverMajor = await getServerMajorVersion(opts.targetUrl)
+    const resolved = await resolvePgDumpPath(serverMajor)
     if (!resolved) {
       return { converged: false, residual: [], cloneName, skipped: 'pg_dump not available' }
     }
     pgDump = resolved.path
+    clientMajor = resolved.major
     psql = psqlBeside(pgDump)
   } catch (err) {
     return {
@@ -176,16 +190,45 @@ export async function proveConvergence(opts: {
       }
     }
 
+    // Prepare the clone to receive the proved schemas, and nothing else.
+    await prepareClone(cloneUrl, opts.targetUrl, schemas)
+
     // Copy the target's structure. Data is irrelevant to a schema proof and
     // copying it would make this unusable on anything but a toy database.
+    //
+    // Only the schemas being proved. Listing Supabase's schemas as exclusions
+    // instead left the dump carrying everything that *references* them — a
+    // `CREATE EXTENSION ... WITH SCHEMA extensions`, an event trigger calling
+    // `extensions.set_graphql_placeholder()` — none of which could be replayed
+    // into a clone that deliberately has no such schema. `--prove` therefore
+    // failed on every real Supabase project, whatever the client version.
     const dumpArgs = [
       opts.targetUrl, '--schema-only', '--no-owner', '--no-privileges',
-      ...PROOF_EXCLUDED_SCHEMAS.flatMap(s => ['--exclude-schema', s]),
+      ...schemas.map(s => `--schema=${s}`),
     ]
     const { stdout: structure } = await exec(pgDump, dumpArgs, {
       maxBuffer: 256 * 1024 * 1024, timeout: 300_000,
     })
-    await runSql(psql, cloneUrl, structure)
+
+    // pg_dump writes its preamble for its own version, so a newer client can
+    // hand an older server a parameter that does not exist there (issue #72).
+    const { sql: replayable } = dropUnsupportedSetStatements(
+      structure, await knownParameters(cloneUrl),
+    )
+
+    try {
+      await runSql(psql, cloneUrl, replayable)
+    } catch (err) {
+      // Rethrown, not returned as `skipped`: a caller treats `skipped` as
+      // "could not check, carry on and apply", and this is a case where we do
+      // not know what the migration would do. Blocking the apply is the
+      // behaviour that was already right (issue #72 confirmed nothing was
+      // written and no clone was left behind) — only the message needed to say
+      // what the cause actually is.
+      throw new Error(
+        explainStructureFailure((err as Error).message, clientMajor, serverMajor),
+      )
+    }
 
     // The migration under test.
     await runSql(psql, cloneUrl, opts.migrationSql)
@@ -252,4 +295,134 @@ function runSql(psqlPath: string, dbUrl: string, sql: string): Promise<void> {
 /** psql ships alongside pg_dump; reuse the version-matched directory. */
 function psqlBeside(pgDumpPath: string): string {
   return pgDumpPath === 'pg_dump' ? 'psql' : join(dirname(pgDumpPath), 'psql')
+}
+
+/**
+ * Lines pg_dump emits before the first real object, in the order it emits them.
+ *
+ * `\restrict` is a psql meta-command recent versions wrap the script in;
+ * `SET` and `SELECT pg_catalog.set_config(...)` configure the session. Nothing
+ * here creates anything, which is what makes the preamble safe to rewrite.
+ */
+const PREAMBLE_LINE =
+  /^\s*(?:--|$|\\(?:un)?restrict\b|SET\s+[\w.]+\s*=|SELECT\s+pg_catalog\.set_config\s*\()/i
+
+/** A top-level `SET some.guc = value;`, capturing the parameter name. */
+const SET_STATEMENT = /^\s*SET\s+([\w.]+)\s*=/i
+
+/**
+ * Drop `SET` statements from a dump's preamble that the destination server
+ * would reject.
+ *
+ * pg_dump writes its preamble for the version of pg_dump, not the version of
+ * the server the SQL will be replayed into: pg_dump 17 added an unconditional
+ * `SET transaction_timeout = 0;`, and a PostgreSQL 15 or 16 server answers that
+ * with `unrecognized configuration parameter`. A PostgreSQL 18 client against a
+ * Supabase still on 15 is the common case rather than an exotic one, and it made
+ * `--prove` unusable there — it aborted before replaying anything (issue #72).
+ *
+ * The filter asks the destination which parameters it actually has rather than
+ * carrying a list of version-specific names, so the next parameter a future
+ * pg_dump adds to the preamble needs no change here.
+ *
+ * Deliberately narrow in two ways. It only rewrites the leading run of
+ * preamble lines, so a `SET` inside a function body — which lives after the
+ * first `CREATE` — is never touched. And it only removes statements naming a
+ * parameter the destination does not have, so a `SET` that fails for any other
+ * reason still fails the proof loudly: `ON_ERROR_STOP` stays on, and no error
+ * from the replay is ignored. Tolerating errors instead (as `pg_restore` does,
+ * which is why `clone` never noticed this) would let an incomplete clone be
+ * reported as converged.
+ */
+export function dropUnsupportedSetStatements(
+  sql: string, knownParameters: ReadonlySet<string>,
+): { sql: string; dropped: string[] } {
+  const lines = sql.split('\n')
+  const dropped: string[] = []
+  const kept: string[] = []
+
+  let inPreamble = true
+  for (const line of lines) {
+    if (inPreamble && !PREAMBLE_LINE.test(line)) inPreamble = false
+
+    if (inPreamble) {
+      const name = SET_STATEMENT.exec(line)?.[1]
+      if (name && !knownParameters.has(name.toLowerCase())) {
+        dropped.push(name.toLowerCase())
+        continue
+      }
+    }
+    kept.push(line)
+  }
+
+  return { sql: kept.join('\n'), dropped }
+}
+
+/**
+ * Make a fresh clone ready to receive a dump of just the proved schemas.
+ *
+ * Two steps, in this order.
+ *
+ * The proved schemas are dropped, because the dump recreates them itself —
+ * pg_dump emits `CREATE SCHEMA public` for an explicitly selected schema, which
+ * a database that already has one rejects.
+ *
+ * Then the target's extensions are installed, except any living in a proved
+ * schema: those belong to the dump, which carries them and would collide.
+ * Without this, a table whose column default calls an extension function — the
+ * `extensions.uuid_generate_v4()` pattern all over Supabase — cannot be created,
+ * because a default is resolved when the table is created, not when it is used.
+ */
+export async function prepareClone(
+  cloneUrl: string, targetUrl: string, schemas: string[], queryFn: QueryFn = pgQuery,
+): Promise<void> {
+  for (const schema of schemas) {
+    await queryFn(cloneUrl, `DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+  }
+
+  const extensions = await queryFn(targetUrl, TARGET_EXTENSIONS_SQL) as unknown as
+    Array<{ name: string; schema: string }>
+
+  for (const ext of extensions) {
+    if (schemas.includes(ext.schema)) continue
+    await queryFn(cloneUrl, `CREATE SCHEMA IF NOT EXISTS "${ext.schema}"`)
+    // Best-effort: an extension the server cannot offer this database is not a
+    // reason to abandon the proof. If the schema genuinely needed it, the replay
+    // fails next and says so.
+    await queryFn(cloneUrl,
+      `CREATE EXTENSION IF NOT EXISTS "${ext.name}" WITH SCHEMA "${ext.schema}"`,
+    ).catch(() => undefined)
+  }
+}
+
+/** Configuration parameter names this server recognises. */
+async function knownParameters(dbUrl: string): Promise<Set<string>> {
+  const rows = await pgQuery(dbUrl, 'SELECT name FROM pg_settings') as unknown as
+    Array<{ name: string }>
+  return new Set(rows.map(r => r.name.toLowerCase()))
+}
+
+/**
+ * Explain a failure to replay the target's own structure.
+ *
+ * The raw psql error names a parameter or a syntax element, with nothing to
+ * connect it to the real cause — a client newer than the server. Someone
+ * reading `unrecognized configuration parameter` goes looking at their schema,
+ * which is the one place the problem is not (issue #72).
+ */
+export function explainStructureFailure(
+  message: string, clientMajor: number, serverMajor: number,
+): string {
+  // Only when the error actually looks like one — a newer client emitting SQL
+  // the server has no concept of. Appending it to every failure would send
+  // someone chasing a version gap that has nothing to do with, say, a missing
+  // schema, which is the same species of misdirection this message exists to
+  // undo.
+  const looksLikeVersionGap = /unrecognized configuration parameter|syntax error/i.test(message)
+  const versionGap = clientMajor > serverMajor && looksLikeVersionGap
+    ? ` The local client is PostgreSQL ${clientMajor} and the target server is `
+      + `${serverMajor}; pg_dump ${clientMajor} can emit SQL that a ${serverMajor} `
+      + `server rejects. Installing postgresql-client-${serverMajor} removes the gap.`
+    : ''
+  return `could not replay the target's structure onto the clone: ${message}${versionGap}`
 }

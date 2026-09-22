@@ -1,5 +1,6 @@
 import type { ScanResult, DriftIssue } from './types/drift.js'
 import { coverage } from './render.js'
+import { summarizeByKind } from './scoring.js'
 
 export type FailOn = 'critical' | 'warning' | 'any'
 
@@ -50,20 +51,41 @@ export function formatGitHubAnnotations(result: ScanResult): string[] {
   return lines
 }
 
+/** Does this set of counts cross the threshold? */
+function exceeds(counts: { critical: number; warning: number; total: number }, failOn: FailOn): boolean {
+  if (failOn === 'critical') return counts.critical > 0
+  if (failOn === 'warning') return counts.critical > 0 || counts.warning > 0
+  return counts.total > 0
+}
+
 /**
  * Determine the exit code for CI.
  *
  * 0 = no drift above threshold
  * 1 = drift exceeds threshold
  * 2 = scan error (connection failure, etc.)
+ *
+ * Only the comparison checks count. RLS Coverage and Migration History judge
+ * the target on its own and fire identically whichever pair you diff, so
+ * including them made the exit code unable to distinguish "the environments
+ * have diverged" from "the target has a pre-existing gap" — a sync check failed
+ * permanently against an identical target (issue #66). `--fail-on` is a
+ * *severity* threshold and could not express the difference, because the
+ * difference is one of scope.
+ *
+ * Pass `failOnPosture` to gate on those findings too. They are never silenced:
+ * they keep their severity, appear in the report and the annotations, and are
+ * scored as `postureScore`.
  */
-export function computeCiExitCode(result: ScanResult, failOn: FailOn = 'critical'): number {
+export function computeCiExitCode(
+  result: ScanResult, failOn: FailOn = 'critical', opts: { failOnPosture?: boolean } = {},
+): number {
   const hasError = result.checks.some(c => c.status === 'error')
   if (hasError) return 2
 
-  if (failOn === 'critical' && result.summary.critical > 0) return 1
-  if (failOn === 'warning' && (result.summary.critical > 0 || result.summary.warning > 0)) return 1
-  if (failOn === 'any' && result.summary.total > 0) return 1
+  const { drift, posture } = summarizeByKind(result.checks)
+  if (exceeds(drift, failOn)) return 1
+  if (opts.failOnPosture && exceeds(posture, failOn)) return 1
 
   return 0
 }

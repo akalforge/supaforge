@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { computeScore, computePostureScore, summarize } from '../src/scoring.js'
+import { computeScore, computePostureScore, summarize, summarizeByKind } from '../src/scoring.js'
 import { isComparisonCheck, CHECK_NAMES } from '../src/types/drift.js'
 import { SCORE_PENALTY_CRITICAL, SCORE_PENALTY_ERROR } from '../src/constants.js'
 import type { CheckResult, CheckName, DriftIssue } from '../src/types/drift.js'
@@ -209,5 +209,49 @@ describe('isComparisonCheck', () => {
   it('classifies every other check as a comparison', () => {
     const posture = CHECK_NAMES.filter(n => !isComparisonCheck(n))
     expect(posture).toEqual(['rls-coverage', 'migrations'])
+  })
+})
+
+/**
+ * The exit code needs the same drift/posture split the scores already had.
+ *
+ * `summarize` totals everything, which is right for "how much did this scan
+ * find" and wrong for "have these environments diverged" — and the exit code is
+ * the second question (issue #66).
+ */
+describe('summarizeByKind (issue #66)', () => {
+  it('counts comparison and target-only findings separately', () => {
+    const results: CheckResult[] = [
+      { check: 'schema', status: 'drifted', issues: issues('schema', 2, 'warning'), durationMs: 1 },
+      { check: 'rls', status: 'drifted', issues: issues('rls', 1, 'critical'), durationMs: 1 },
+      { check: 'rls-coverage', status: 'drifted', issues: issues('rls-coverage', 3, 'critical'), durationMs: 1 },
+      { check: 'migrations', status: 'drifted', issues: issues('migrations', 1, 'info'), durationMs: 1 },
+    ]
+
+    const { drift, posture } = summarizeByKind(results)
+    expect(drift).toEqual({ total: 3, critical: 1, warning: 2, info: 0 })
+    expect(posture).toEqual({ total: 4, critical: 3, warning: 0, info: 1 })
+  })
+
+  it('adds up to the same totals as summarize', () => {
+    const results: CheckResult[] = [
+      { check: 'storage', status: 'drifted', issues: issues('storage', 2, 'critical'), durationMs: 1 },
+      { check: 'rls-coverage', status: 'drifted', issues: issues('rls-coverage', 5, 'warning'), durationMs: 1 },
+    ]
+
+    const all = summarize(results)
+    const { drift, posture } = summarizeByKind(results)
+    expect(drift.total + posture.total).toBe(all.total)
+    expect(drift.critical + posture.critical).toBe(all.critical)
+    expect(drift.warning + posture.warning).toBe(all.warning)
+  })
+
+  it('reports zeroes for a scope with no findings', () => {
+    const results: CheckResult[] = [
+      { check: 'rls-coverage', status: 'drifted', issues: issues('rls-coverage', 1, 'critical'), durationMs: 1 },
+    ]
+    const { drift, posture } = summarizeByKind(results)
+    expect(drift).toEqual({ total: 0, critical: 0, warning: 0, info: 0 })
+    expect(posture.critical).toBe(1)
   })
 })

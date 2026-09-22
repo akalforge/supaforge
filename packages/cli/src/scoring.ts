@@ -20,6 +20,28 @@ export function summarize(results: CheckResult[]): { total: number; critical: nu
   return { total, critical, warning, info }
 }
 
+/**
+ * Severity counts split by what the finding is *about*.
+ *
+ * `summarize` totals everything, which is right for "how much did this scan
+ * find" and wrong for any decision that depends on whether the environments
+ * have diverged. The exit code is such a decision: gating on the combined
+ * critical count meant two byte-identical environments still exited 1 whenever
+ * the target carried a pre-existing RLS gap, so "these environments differ" and
+ * "something about the target is imperfect" were indistinguishable to a script
+ * (issue #66). The scores were separated for the same reason (issue #40); this
+ * gives the exit code the same split.
+ */
+export function summarizeByKind(results: CheckResult[]): {
+  drift: ReturnType<typeof summarize>
+  posture: ReturnType<typeof summarize>
+} {
+  return {
+    drift: summarize(results.filter(r => isComparisonCheck(r.check))),
+    posture: summarize(results.filter(r => !isComparisonCheck(r.check))),
+  }
+}
+
 /** Score a set of results on the shared penalty scale. */
 function scoreOf(results: CheckResult[]): number {
   const { total, critical, warning } = summarize(results)

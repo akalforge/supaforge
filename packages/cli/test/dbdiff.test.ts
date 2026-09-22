@@ -409,31 +409,31 @@ describe('classifyStatement', () => {
 
 describe('summariseStatement', () => {
   it.each([
-    ['CREATE VIEW "v_active_users" AS SELECT * FROM users;', 'schema', 'View missing: v_active_users'],
-    ['DROP VIEW "v_active_users";', 'schema', 'Extra view: v_active_users'],
-    ['ALTER VIEW "v_active_users" RENAME TO "v_old";', 'schema', 'View altered: v_active_users'],
+    ['CREATE VIEW "v_active_users" AS SELECT * FROM users;', 'schema', 'View missing: public.v_active_users'],
+    ['DROP VIEW "v_active_users";', 'schema', 'Extra view: public.v_active_users'],
+    ['ALTER VIEW "v_active_users" RENAME TO "v_old";', 'schema', 'View altered: public.v_active_users'],
     // Titles carry the argument signature so overloads are distinguishable
     // (issue #40); a zero-argument routine therefore renders as `name()`.
-    ['CREATE FUNCTION calculate_total() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;', 'schema', 'Function missing: calculate_total()'],
-    ['DROP FUNCTION calculate_total();', 'schema', 'Extra function: calculate_total()'],
-    ['ALTER FUNCTION calculate_total() OWNER TO admin;', 'schema', 'Function altered: calculate_total()'],
-    ['CREATE TRIGGER trg_audit AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION fn();', 'schema', 'Trigger missing: trg_audit'],
-    ['DROP TRIGGER trg_audit ON users;', 'schema', 'Extra trigger: trg_audit'],
-    ['ALTER TRIGGER trg_audit ON users RENAME TO trg_v2;', 'schema', 'Trigger altered: trg_audit'],
-    ['CREATE TYPE mood AS ENUM (\'happy\', \'sad\');', 'schema', 'Type missing: mood'],
-    ['ALTER TYPE mood ADD VALUE \'neutral\';', 'schema', 'Type altered: mood'],
-    ['DROP TYPE mood;', 'schema', 'Extra type: mood'],
-    ['CREATE DOMAIN email AS text;', 'schema', 'Domain missing: email'],
-    ['DROP DOMAIN email;', 'schema', 'Extra domain: email'],
-    ['CREATE SEQUENCE orders_seq;', 'schema', 'Sequence missing: orders_seq'],
-    ['ALTER SEQUENCE orders_seq RESTART;', 'schema', 'Sequence altered: orders_seq'],
-    ['DROP SEQUENCE orders_seq;', 'schema', 'Extra sequence: orders_seq'],
-    ['ALTER TABLE "users" ADD COLUMN "bio" text;', 'schema', 'Table altered: users'],
-    ['CREATE TABLE "posts" (id int);', 'schema', 'Table missing: posts'],
-    ['DROP TABLE "posts";', 'schema', 'Extra table: posts'],
+    ['CREATE FUNCTION calculate_total() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;', 'schema', 'Function missing: public.calculate_total()'],
+    ['DROP FUNCTION calculate_total();', 'schema', 'Extra function: public.calculate_total()'],
+    ['ALTER FUNCTION calculate_total() OWNER TO admin;', 'schema', 'Function altered: public.calculate_total()'],
+    ['CREATE TRIGGER trg_audit AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION fn();', 'schema', 'Trigger missing: public.trg_audit'],
+    ['DROP TRIGGER trg_audit ON users;', 'schema', 'Extra trigger: public.trg_audit'],
+    ['ALTER TRIGGER trg_audit ON users RENAME TO trg_v2;', 'schema', 'Trigger altered: public.trg_audit'],
+    ['CREATE TYPE mood AS ENUM (\'happy\', \'sad\');', 'schema', 'Type missing: public.mood'],
+    ['ALTER TYPE mood ADD VALUE \'neutral\';', 'schema', 'Type altered: public.mood'],
+    ['DROP TYPE mood;', 'schema', 'Extra type: public.mood'],
+    ['CREATE DOMAIN email AS text;', 'schema', 'Domain missing: public.email'],
+    ['DROP DOMAIN email;', 'schema', 'Extra domain: public.email'],
+    ['CREATE SEQUENCE orders_seq;', 'schema', 'Sequence missing: public.orders_seq'],
+    ['ALTER SEQUENCE orders_seq RESTART;', 'schema', 'Sequence altered: public.orders_seq'],
+    ['DROP SEQUENCE orders_seq;', 'schema', 'Extra sequence: public.orders_seq'],
+    ['ALTER TABLE "users" ADD COLUMN "bio" text;', 'schema', 'Table altered: public.users'],
+    ['CREATE TABLE "posts" (id int);', 'schema', 'Table missing: public.posts'],
+    ['DROP TABLE "posts";', 'schema', 'Extra table: public.posts'],
     // Named by the index, not the table it is on, and not the schema (issue #47).
-    ['CREATE INDEX idx_bio ON users(bio);', 'schema', 'Index missing: idx_bio'],
-    ['DROP INDEX idx_bio;', 'schema', 'Extra index: idx_bio'],
+    ['CREATE INDEX idx_bio ON users(bio);', 'schema', 'Index missing: public.idx_bio'],
+    ['DROP INDEX idx_bio;', 'schema', 'Extra index: public.idx_bio'],
   ] as const)('summarises %j (%s) → %s', (sql, check, expected) => {
     expect(summariseStatement(sql, check)).toBe(expected)
   })
@@ -455,7 +455,7 @@ describe('sqlToIssues — programmable objects', () => {
     }, 'schema')
     expect(issues[0].severity).toBe('critical')
     expect(issues[0].id).toBe('schema-drop-view-1')
-    expect(issues[0].title).toBe('Extra view: v_active_users')
+    expect(issues[0].title).toBe('Extra view: public.v_active_users')
   })
 
   it('classifies DROP FUNCTION as critical', () => {
@@ -492,7 +492,7 @@ describe('sqlToIssues — programmable objects', () => {
     }, 'schema')
     expect(issues[0].severity).toBe('warning')
     expect(issues[0].id).toBe('schema-create-view-1')
-    expect(issues[0].title).toBe('View missing: v_active')
+    expect(issues[0].title).toBe('View missing: public.v_active')
   })
 
   it('classifies CREATE FUNCTION as warning', () => {
@@ -686,7 +686,7 @@ describe('extractRoutineName (issue #35)', () => {
 describe('routine titles name the routine (issue #35)', () => {
   it('no longer reports the IF keyword as the function name', () => {
     const title = summariseStatement('DROP FUNCTION IF EXISTS "example_fn";', 'schema')
-    expect(title).toBe('Extra function: example_fn')
+    expect(title).toBe('Extra function: public.example_fn')
     expect(title).not.toContain('IF')
   })
 
@@ -866,7 +866,7 @@ describe('sqlToIssues routine reporting (issue #35)', () => {
     const issues = sqlToIssues({ up: 'DROP FUNCTION IF EXISTS "gone_fn";', down: '' }, 'schema')
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('critical')
-    expect(issues[0].title).toBe('Extra function: gone_fn')
+    expect(issues[0].title).toBe('Extra function: public.gone_fn')
   })
 })
 
@@ -915,7 +915,7 @@ describe('routine titles carry the signature (issue #40)', () => {
   it('names which overload an Extra function refers to', () => {
     // The generated SQL was already signature-aware; only the title lost it.
     expect(summariseStatement('DROP FUNCTION IF EXISTS "example_fn"(uuid,integer);', 'schema'))
-      .toBe('Extra function: example_fn(uuid,integer)')
+      .toBe('Extra function: public.example_fn(uuid,integer)')
   })
 
   it('gives two target-only overloads of one name different titles', () => {
@@ -931,12 +931,12 @@ describe('routine titles carry the signature (issue #40)', () => {
       + extractRoutineArgs('DROP FUNCTION IF EXISTS "dist"(text,text);')
     expect(modified).toBe('public.dist(text,text)')
     expect(summariseStatement('DROP FUNCTION IF EXISTS "dist"(text,text);', 'schema'))
-      .toBe('Extra function: dist(text,text)')
+      .toBe('Extra function: public.dist(text,text)')
   })
 
   it('covers procedures too', () => {
     expect(summariseStatement('DROP PROCEDURE IF EXISTS "do_thing"(integer);', 'schema'))
-      .toBe('Extra procedure: do_thing(integer)')
+      .toBe('Extra procedure: public.do_thing(integer)')
   })
 
   it('keeps the schema qualifier when the statement has one', () => {
@@ -944,11 +944,20 @@ describe('routine titles carry the signature (issue #40)', () => {
       .toBe('Function missing: public.fn(a int)')
   })
 
-  it('adds no schema qualifier when the statement lacks one', () => {
-    // dbdiff emits the DROP unqualified. Inventing `public.` would be wrong
-    // for a routine that lives anywhere else.
+  it('qualifies a routine the statement left bare', () => {
+    // dbdiff emits the DROP unqualified, and its Postgres adapter reads only
+    // the `public` schema — every catalogue query filters on
+    // `schemaname = 'public'` — so the qualifier is recovered, not invented,
+    // and "Extra function" now matches "Function missing" (issue #70).
     expect(summariseStatement('DROP FUNCTION IF EXISTS "fn"(int);', 'schema'))
-      .not.toContain('public.')
+      .toBe('Extra function: public.fn(int)')
+  })
+
+  it('does not mistake a routine argument list for a qualifier', () => {
+    // `numeric(10,2)` contains a dot that is not a schema separator; splitting
+    // on the first `(` is what keeps this from reading as already-qualified.
+    expect(summariseStatement('DROP FUNCTION IF EXISTS "rate"(numeric(10,2));', 'schema'))
+      .toBe('Extra function: public.rate(numeric(10,2))')
   })
 })
 
@@ -981,7 +990,7 @@ describe('schema titles are one schema-qualified format (issue #47)', () => {
   })
 
   it('leaves an index bare when its table carries no schema either', () => {
-    expect(summariseStatement('CREATE INDEX idx_bio ON users (bio);', 'schema')).toBe('Index missing: idx_bio')
+    expect(summariseStatement('CREATE INDEX idx_bio ON users (bio);', 'schema')).toBe('Index missing: public.idx_bio')
   })
 
   it('handles a quoted, qualified table in the ON clause', () => {
@@ -1007,12 +1016,12 @@ describe('schema titles are one schema-qualified format (issue #47)', () => {
   it('never borrows a schema from a counterpart naming a different routine', () => {
     const up = 'DROP FUNCTION IF EXISTS "example_fn"(uuid);'
     const down = 'CREATE OR REPLACE FUNCTION billing.other_fn(a uuid) RETURNS void AS $$ $$;'
-    expect(summariseStatement(up, 'schema', down)).toBe('Extra function: example_fn(uuid)')
+    expect(summariseStatement(up, 'schema', down)).toBe('Extra function: public.example_fn(uuid)')
   })
 
   it('stays unqualified when nothing reports a schema', () => {
     expect(summariseStatement('DROP FUNCTION IF EXISTS "example_fn"(uuid);', 'schema')).toBe(
-      'Extra function: example_fn(uuid)',
+      'Extra function: public.example_fn(uuid)',
     )
   })
 
@@ -1048,7 +1057,7 @@ describe('schema titles are one schema-qualified format (issue #47)', () => {
 
   it('reads a trigger as a trigger even though it executes a function', () => {
     const sql = 'CREATE TRIGGER trg_orders_touch BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION touch_updated();'
-    expect(summariseStatement(sql, 'schema')).toBe('Trigger missing: trg_orders_touch')
+    expect(summariseStatement(sql, 'schema')).toBe('Trigger missing: public.trg_orders_touch')
   })
 
   it('carries the recovered schema through sqlToIssues', () => {
@@ -1060,6 +1069,69 @@ describe('schema titles are one schema-qualified format (issue #47)', () => {
       'schema',
     )
     expect(issues[0].title).toBe('Extra function: public.example_fn(uuid)')
+  })
+})
+
+/**
+ * The property issue #70 is actually about.
+ *
+ * Every individual title was defensible; the complaint was that a single run
+ * mixed both forms, split by object type rather than by anything a reader could
+ * predict — and the split did not even hold within one type, since `Extra index`
+ * was bare while `Index missing` was qualified. No per-statement assertion
+ * catches that, because each one passes in isolation. This asserts the shape of
+ * the whole set: one format, `<finding>: <schema>.<name>`, for every kind.
+ */
+describe('every schema finding uses one title format (issue #70)', () => {
+  const ONE_RUN = [
+    'CREATE TABLE "orders" (id int);',
+    'DROP TABLE "legacy_notes";',
+    'ALTER TABLE "orders" ADD COLUMN "status" text;',
+    'CREATE VIEW "active_orders" AS SELECT 1;',
+    'DROP VIEW "old_orders";',
+    'CREATE TRIGGER trg_orders_touch BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION touch();',
+    'DROP TRIGGER trg_legacy ON legacy_notes;',
+    'CREATE INDEX idx_orders_status ON public.orders USING btree (status);',
+    'DROP INDEX idx_legacy_body;',
+    'CREATE FUNCTION public.touch_updated() RETURNS trigger AS $$ BEGIN END $$ LANGUAGE plpgsql;',
+    'DROP FUNCTION IF EXISTS "example_fn"(uuid,integer);',
+    'CREATE SEQUENCE orders_seq;',
+    'CREATE TYPE mood AS ENUM (\'a\');',
+    'CREATE DOMAIN email AS text;',
+    'GRANT SELECT ON TABLE "orders" TO "anon";',
+  ]
+
+  const titles = ONE_RUN.map(sql => summariseStatement(sql, 'schema'))
+
+  it.each(titles)('%s is <finding>: <schema>.<name>', (title) => {
+    const name = title.slice(title.indexOf(': ') + 2)
+    // The part before any argument list must carry exactly one dot.
+    const head = name.includes('(') ? name.slice(0, name.indexOf('(')) : name
+    expect(head.split('.')).toHaveLength(2)
+  })
+
+  it('qualifies both directions of every object type identically', () => {
+    // The asymmetry that made the inconsistency indefensible: a missing object
+    // and an extra one of the same type were titled differently.
+    const pairs: Array<[string, string]> = [
+      ['CREATE TABLE "t" (id int);', 'DROP TABLE "t";'],
+      ['CREATE VIEW "v" AS SELECT 1;', 'DROP VIEW "v";'],
+      ['CREATE INDEX i ON public.t (a);', 'DROP INDEX i;'],
+      ['CREATE SEQUENCE s;', 'DROP SEQUENCE s;'],
+      ['CREATE TYPE ty AS ENUM (\'a\');', 'DROP TYPE ty;'],
+    ]
+    for (const [up, down] of pairs) {
+      const nameOf = (sql: string) => {
+        const t = summariseStatement(sql, 'schema')
+        return t.slice(t.indexOf(': ') + 2)
+      }
+      expect(nameOf(up)).toBe(nameOf(down))
+    }
+  })
+
+  it('leaves an unclassified change in the same shape', () => {
+    expect(summariseStatement('COMMENT ON TABLE "orders" IS \'x\';', 'schema'))
+      .toBe('Schema change: public.orders')
   })
 })
 

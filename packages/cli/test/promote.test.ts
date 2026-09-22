@@ -469,6 +469,38 @@ describe('planWork posture fixes', () => {
 
     expect(plan.sqlStatements.map(s => s.issueId)).toContain('schema-alter-1')
   })
+
+  /**
+   * Every test above calls planWork directly — and that is exactly how
+   * `--apply-posture` shipped broken.
+   *
+   * `promote()` accepted `applyPosture` in its options type and never passed it
+   * on, so the flag was a no-op through the CLI's own apply path while the unit
+   * tests stayed green. These go through promote() for that reason: the option
+   * has to be honoured by the function the command actually calls.
+   */
+  it('promote() honours applyPosture, not just planWork', async () => {
+    const result = await promote({
+      dbUrl: 'postgres://unused',
+      scanResult: withPostureAndDrift(),
+      dryRun: true,
+      applyPosture: true,
+    })
+
+    expect(result.applied.map(a => a.issueId)).toContain('rls-coverage-public.customers')
+  })
+
+  it('promote() defaults to leaving posture fixes alone', async () => {
+    const result = await promote({
+      dbUrl: 'postgres://unused',
+      scanResult: withPostureAndDrift(),
+      dryRun: true,
+    })
+
+    expect(result.applied.map(a => a.issueId)).not.toContain('rls-coverage-public.customers')
+    expect(result.skipped.find(s => s.issueId === 'rls-coverage-public.customers')?.reason)
+      .toMatch(/--apply-posture/)
+  })
 })
 
 describe('promote scoping', () => {

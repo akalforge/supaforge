@@ -3,7 +3,11 @@ import { pgClientConfig } from './db.js'
 import type { ScanResult, SyncAction } from './types/drift'
 import { errMsg } from './utils/error'
 import { isDestructiveSql } from './dbdiff'
-import { orderStatements, referencedTables, createdPolicies, createsOnlyPolicies } from './sql-deps.js'
+import {
+  orderStatements, referencedTables,
+  createdPolicies, createsOnlyPolicies,
+  createdTriggers, createsOnlyTriggers,
+} from './sql-deps.js'
 import { applyTableFilter, isFiltered, type TableFilter } from './utils/table-filter.js'
 import { isComparisonCheck } from './types/drift.js'
 import { matchesGlob } from './utils/strings.js'
@@ -210,50 +214,61 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
   }
 
   plan.sqlStatements = orderStatements(plan.sqlStatements, s => s.sql)
-  plan.sqlStatements = dropDuplicatePolicyFixes(plan.sqlStatements, plan.skipped)
+  plan.sqlStatements = dropDuplicateObjectFixes(plan.sqlStatements, plan.skipped)
   return plan
 }
 
 /**
- * Remove a policy fix that an earlier statement already performs.
+ * Remove a fix that an earlier statement in the same set already performs.
  *
- * Since `@dbdiff/cli` 3.0.0-rc.10 the schema check's SQL creates RLS policies
- * itself, which the rls check has always done too. Both land in one fix set, the
- * second fails with "policy ... already exists", and because the apply is
- * transactional that single collision discards every other fix with it — so a
- * new policy could not be synced at all.
+ * Two layers can legitimately produce the same object. The schema check's SQL
+ * comes from `@dbdiff/cli`, which models RLS policies as of 3.0.0-rc.10 and has
+ * always modelled triggers; the rls check writes its own policies, and since
+ * issue #77 the webhooks check writes its own triggers. Applied together the
+ * second fails — `policy ... already exists`, `trigger ... already exists` —
+ * and because the apply is transactional that single collision discards every
+ * other fix with it. Reported twice now: a new policy that could not be synced
+ * at all (#67), and a full apply rolling back six correct schema fixes (#77).
  *
  * Run over the statements in execution order, after `orderStatements`, so
- * "already created" means already created by something that genuinely runs
- * first rather than merely reported first.
+ * "already created" means created by something that genuinely runs first rather
+ * than merely reported first.
  *
- * Only a statement that does nothing but create the policy is dropped. The
- * schema check bundles its policy with the table and the ENABLE ROW LEVEL
- * SECURITY beside it, and losing that would be far worse than the collision.
+ * Only a statement that does nothing else is dropped. The schema check bundles
+ * its policy with the table and the ENABLE ROW LEVEL SECURITY beside it, and its
+ * trigger with the function the trigger calls; losing either would be far worse
+ * than the collision.
  */
-function dropDuplicatePolicyFixes(
+function dropDuplicateObjectFixes(
   statements: PlannedSql[],
   skipped: PlannedWork['skipped'],
 ): PlannedSql[] {
-  const alreadyCreated = new Set<string>()
+  const kinds = [
+    { what: 'policy',  created: createdPolicies, onlyThis: createsOnlyPolicies, seen: new Set<string>() },
+    { what: 'trigger', created: createdTriggers, onlyThis: createsOnlyTriggers, seen: new Set<string>() },
+  ]
   const kept: PlannedSql[] = []
 
   for (const statement of statements) {
-    const policies = createdPolicies(statement.sql)
-    const isDuplicate = policies.length > 0
-      && policies.every(p => alreadyCreated.has(p))
-      && createsOnlyPolicies(statement.sql)
+    const duplicate = kinds.find((kind) => {
+      const names = kind.created(statement.sql)
+      return names.length > 0
+        && names.every(n => kind.seen.has(n))
+        && kind.onlyThis(statement.sql)
+    })
 
-    if (isDuplicate) {
+    if (duplicate) {
       skipped.push({
         check: statement.check,
         issueId: statement.issueId,
-        reason: 'Already created by the schema fix for the same policy',
+        reason: `Already created by the schema fix for the same ${duplicate.what}`,
       })
       continue
     }
 
-    for (const p of policies) alreadyCreated.add(p)
+    for (const kind of kinds) {
+      for (const name of kind.created(statement.sql)) kind.seen.add(name)
+    }
     kept.push(statement)
   }
 

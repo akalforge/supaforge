@@ -106,6 +106,10 @@ const DOLLAR_BODY = /\$([A-Za-z0-9_]*)\$[\s\S]*?\$\1\$/g
  */
 const STRING_LITERAL = /'[^']*(?:''[^']*)*'/g
 
+/** `-- to end of line`, and `/* ... *\/` across lines. */
+const LINE_COMMENT = /--[^\n]*/g
+const BLOCK_COMMENT = /\/\*[\s\S]*?\*\//g
+
 /**
  * A statement with its literals and routine bodies blanked out.
  *
@@ -114,7 +118,16 @@ const STRING_LITERAL = /'[^']*(?:''[^']*)*'/g
  * for the statement's own kind.
  */
 export function sqlSkeleton(sql: string): string {
-  return sql.replace(DOLLAR_BODY, ' ').replace(STRING_LITERAL, " '' ")
+  return sql
+    .replace(DOLLAR_BODY, ' ')
+    .replace(STRING_LITERAL, " '' ")
+    // Comments last, so a `--` inside a literal has already been blanked and
+    // cannot swallow the rest of the line. dbdiff's own migrations are full of
+    // `-- Recreate trigger` lines, and a commented-out CREATE would otherwise
+    // read as a real one: enough to make the duplicate-fix check believe an
+    // object exists and drop the statement that genuinely creates it.
+    .replace(LINE_COMMENT, ' ')
+    .replace(BLOCK_COMMENT, ' ')
 }
 
 // ─── Identifiers ─────────────────────────────────────────────────────────────
@@ -242,6 +255,48 @@ export function createsOnlyPolicies(sql: string): boolean {
     .replace(/CREATE\s+POLICY[\s\S]*?(?=;|$)/gi, '')
     .replace(/DROP\s+POLICY[\s\S]*?(?=;|$)/gi, '')
   return !/[A-Za-z]/.test(withoutPolicies)
+}
+
+/**
+ * The triggers a statement creates, keyed the way Postgres identifies one.
+ *
+ * Same collision as policies, one layer along. The schema check's SQL creates
+ * webhook triggers — they are ordinary triggers as far as dbdiff is concerned —
+ * and since issue #77 the webhooks check emits the server's own
+ * `pg_get_triggerdef()` for the same trigger. Applied together the second fails
+ * with `trigger "x" for relation "y" already exists`, and the transactional
+ * apply discards every other fix with it: the reported symptom was a full
+ * `diff --apply` rolling back six correct schema fixes.
+ *
+ * A trigger name is unique per table, not per schema, so the table belongs in
+ * the key — which is also why the webhooks check now keys its own entries that
+ * way. The schema qualifier is dropped for the same reason `referencedTables`
+ * drops it: the two layers spell the same table differently.
+ */
+export function createdTriggers(sql: string): string[] {
+  const out: string[] = []
+  const re = /CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\s+("[^"]+"|[A-Za-z_][\w$]*)[\s\S]*?\sON\s+((?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))?)/gi
+  for (const m of sqlSkeleton(sql).matchAll(re)) {
+    out.push(`${bareName(m[2])}.${bareName(m[1])}`)
+  }
+  return out
+}
+
+/**
+ * True when creating triggers is all this statement does.
+ *
+ * The same guard as `createsOnlyPolicies`: the schema check bundles a trigger
+ * with the table and function it needs, and dropping that as a duplicate would
+ * lose the DDL around it. A leading DROP TRIGGER is expected — the webhooks
+ * check emits one before recreating a modified webhook — so it does not count
+ * as doing something else.
+ */
+export function createsOnlyTriggers(sql: string): boolean {
+  if (createdTriggers(sql).length === 0) return false
+  const withoutTriggers = sqlSkeleton(sql)
+    .replace(/CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER[\s\S]*?(?=;|$)/gi, '')
+    .replace(/DROP\s+TRIGGER[\s\S]*?(?=;|$)/gi, '')
+  return !/[A-Za-z]/.test(withoutTriggers)
 }
 
 export function referencedTables(sql: string): string[] {

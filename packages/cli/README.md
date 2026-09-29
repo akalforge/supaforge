@@ -28,10 +28,13 @@ Working with one Supabase project? Choose "single" mode during `supaforge init` 
 
 ```bash
 supaforge init                                       # Choose "single" mode
-supaforge snapshot --env=prod                        # Capture current state
+supaforge snapshot --env=prod --apply                # Capture current state
 supaforge clone --env=prod --apply                   # Clone remote to local
-supaforge snapshot --env=prod --migration            # Incremental backup with migration
+supaforge snapshot --env=prod --migration --apply    # Capture + incremental migration
 ```
+
+`snapshot` previews by default like everything else here, so leaving `--apply`
+off prints what it *would* capture and writes no snapshot.
 
 ## Comprehensive Checks
 
@@ -308,9 +311,10 @@ supaforge diff --json                   Output as JSON
 supaforge sync                          Alias for diff --apply
 supaforge hukam                         Alias for diff 🙏
 
-supaforge snapshot                      Capture a full environment snapshot (9 layers)
-supaforge snapshot --env=prod           Snapshot a specific environment
-supaforge snapshot --migration          Capture + generate incremental migration diff
+supaforge snapshot                      Preview what a 9-layer snapshot would capture
+supaforge snapshot --apply              Capture it
+supaforge snapshot --env=prod --apply   Snapshot a specific environment
+supaforge snapshot --migration --apply  Capture + generate incremental migration diff
 supaforge snapshot --list               List all snapshots
 supaforge snapshot --prune              Preview old snapshot cleanup (keeps last 7)
 supaforge snapshot --prune --apply      Delete old snapshots
@@ -399,6 +403,14 @@ on. `@dbdiff/cli` emits statements in the order it walks the catalogue, and
 applying that order directly failed on sets that were perfectly valid. Preview
 the order without running anything:
 
+> **Known limitation.** Sending drops to the end is the wrong call when a drop
+> and a create are two halves of replacing *the same object*. An enum whose
+> values changed arrives as `DROP TYPE` + `CREATE TYPE`, and the create is
+> currently ordered first, so `--apply` fails with `type … already exists` and
+> rolls back ([#81](https://github.com/akalforge/supaforge/issues/81)). Routine
+> replacement is handled correctly, and `supaforge migrate create` writes the
+> same fix set in a working order, which is the way through for now.
+
 ```bash
 supaforge diff --dry-run
 ```
@@ -458,10 +470,10 @@ batch rolls back.
 
 ```bash
 # Capture a full snapshot of your remote Supabase (9 layers)
-supaforge snapshot --env=prod
+supaforge snapshot --env=prod --apply
 
 # With incremental migration diff (compares against previous snapshot)
-supaforge snapshot --env=prod --migration --description="before-deploy"
+supaforge snapshot --env=prod --migration --description="before-deploy" --apply
 
 # Clone remote to local for development
 supaforge clone --env=prod --apply
@@ -478,6 +490,14 @@ supaforge restore --env=local --from-migrations --apply
 ```
 
 **Snapshots capture 9 layers**: schema, RLS policies, cron jobs, webhooks, extensions, storage (buckets + policies), auth config, edge functions, and reference data.
+
+**What `restore --from-snapshot` puts back.** The SQL layers — RLS policies,
+cron jobs, webhooks, extensions, storage policies. The schema layer is captured
+as `schema.json`, an introspection document meant for diffing rather than
+replayable DDL, so restore does **not** recreate tables
+([#80](https://github.com/akalforge/supaforge/issues/80)). Restore into a
+database that already has the structure; use `supaforge clone` to create one
+that does, or `restore --from-migrations` to replay migrations that build it.
 
 **Snapshot pruning**: Use `--prune` to delete old snapshots, keeping the most recent 7 (configurable with `--keep`). Preview mode by default — add `--apply` to execute.
 
@@ -877,10 +897,10 @@ Working with a single Supabase environment — no source/target pair needed:
 supaforge init            # Choose "single" mode
 
 # 2. Capture a full 9-layer snapshot
-supaforge snapshot --env=prod
+supaforge snapshot --env=prod --apply
 
 # 3. Track changes over time with incremental migrations
-supaforge snapshot --env=prod --migration --description="before-deploy"
+supaforge snapshot --env=prod --migration --description="before-deploy" --apply
 
 # 4. Clone remote to local for development (requires supabase start)
 supaforge clone --env=prod --apply

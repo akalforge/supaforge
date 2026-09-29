@@ -406,3 +406,71 @@ describe('summarizeStatement', () => {
     expect(summarizeStatement('-- only a comment')).toBe('-- only a comment')
   })
 })
+
+/**
+ * Where restore tracks what it applied (issue #93).
+ *
+ * It created `public._supaforge_migrations`, unqualified. On Supabase a table
+ * in `public` receives the project's default grants to `anon` and
+ * `authenticated`, and this one was created with RLS off — so anyone holding
+ * the public anon key could read it, insert into it and delete from it through
+ * the Data API, and so decide which migrations a later restore believed were
+ * already applied. It was also a second, disagreeing record of the same thing
+ * that `migrate run` tracks.
+ */
+describe('restore: the migration tracking table', () => {
+  it('lives in a schema the Data API does not expose', async () => {
+    const { MIGRATIONS_TABLE, MIGRATIONS_SCHEMA } = await import('../src/constants.js')
+
+    expect(MIGRATIONS_SCHEMA).toBe('supabase_migrations')
+    expect(MIGRATIONS_TABLE).toBe('supabase_migrations.schema_migrations')
+  })
+
+  it('is not in public, and is not restore\'s own', async () => {
+    // Stated as the two properties that were wrong, so a change back to either
+    // fails here rather than in a security report.
+    const { MIGRATIONS_TABLE } = await import('../src/constants.js')
+
+    expect(MIGRATIONS_TABLE).not.toMatch(/^public\./)
+    expect(MIGRATIONS_TABLE).not.toContain('_supaforge_migrations')
+  })
+
+  it('is the same table migrate uses', async () => {
+    const constants = await import('../src/constants.js')
+    const migrate = await import('../src/migrate.js')
+
+    // `migrate run` and `restore --from-migrations` recording into different
+    // tables meant each thought the other's work had not happened.
+    expect(migrate.BOOTSTRAP_SQL).toContain(constants.MIGRATIONS_TABLE)
+    expect(migrate.BOOTSTRAP_SQL).toContain(constants.MIGRATIONS_SCHEMA)
+  })
+})
+
+/**
+ * A migration that applies nothing is not applied (issue #93).
+ *
+ * `snapshot --migration` writes files whose schema layer is the comment
+ * `-- Schema changed. Use @dbdiff/cli to generate migration SQL.`, and the
+ * baseline `clone` writes has no statements at all. Recording those as done
+ * meant a restore into an empty database built nothing, reported success, and
+ * left the tracking table asserting the schema was in place.
+ */
+describe('restore: recognising a migration with nothing in it', () => {
+  it('treats the snapshot marker comment as no SQL', async () => {
+    const { isCommentOnly } = await import('../src/utils/sql-split.js')
+
+    expect(isCommentOnly('-- Schema changed. Use @dbdiff/cli to generate migration SQL.')).toBe(true)
+  })
+
+  it('treats a multi-line comment block as no SQL', async () => {
+    const { isCommentOnly } = await import('../src/utils/sql-split.js')
+
+    expect(isCommentOnly('-- nothing\n--\n-- here either')).toBe(true)
+  })
+
+  it('does not mistake real SQL under a comment for nothing', async () => {
+    const { isCommentOnly } = await import('../src/utils/sql-split.js')
+
+    expect(isCommentOnly('-- add the column\nALTER TABLE t ADD COLUMN c text;')).toBe(false)
+  })
+})

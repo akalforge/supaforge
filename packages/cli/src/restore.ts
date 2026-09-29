@@ -4,7 +4,9 @@ import { join } from 'node:path'
 import pg from 'pg'
 import { pgClientConfig } from './db.js'
 import type { MigrationFile, SnapshotManifest } from './types/config'
-import { MIGRATIONS_TABLE, loadMigrations } from './migration'
+import { loadMigrations } from './migration'
+import { MIGRATIONS_TABLE } from './constants.js'
+import { ensureMigrationsTable, getAppliedVersions } from './migrate.js'
 import { loadSnapshot } from './snapshot'
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
@@ -211,17 +213,30 @@ export async function restoreFromMigrations(options: RestoreOptions): Promise<Re
   await client.connect()
 
   try {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE} (
-        version TEXT PRIMARY KEY,
-        description TEXT,
-        applied_at TIMESTAMPTZ DEFAULT NOW()
-      )
-    `)
+    // Tracked in `supabase_migrations.schema_migrations` — the same table
+    // `migrate run` uses, in a schema the Data API does not expose.
+    //
+    // It used to be `public._supaforge_migrations`, created unqualified. On
+    // Supabase a table in `public` receives the project's default grants to
+    // `anon` and `authenticated`, and this one was created with RLS off — so
+    // anyone holding the public anon key could read it, insert into it and
+    // delete from it through the Data API, and thereby decide which migrations
+    // a later restore believed were already applied (issue #93). It was also a
+    // second, disagreeing record of the same thing.
+    await ensureMigrationsTable(options.targetUrl, queryFn)
 
-    // Get already-applied versions
-    const { rows } = await client.query(`SELECT version FROM ${MIGRATIONS_TABLE}`)
-    const applied = new Set(rows.map(r => (r as { version: string }).version))
+    const legacy = await findLegacyTrackingTable(client)
+    if (legacy) {
+      result.skipped.push({
+        type: 'sql',
+        label: 'public._supaforge_migrations',
+        reason: 'left over from an earlier version and reachable with the anon key — '
+          + 'tracking has moved to supabase_migrations.schema_migrations. '
+          + 'Drop it: DROP TABLE public._supaforge_migrations;',
+      })
+    }
+
+    const applied = await getAppliedVersions(options.targetUrl, queryFn)
 
     for (const migration of filtered) {
       if (applied.has(migration.version)) {
@@ -230,10 +245,12 @@ export async function restoreFromMigrations(options: RestoreOptions): Promise<Re
       }
 
       // Apply SQL statements
+      let ran = 0
       for (const sql of migration.up.sql) {
-        if (sql.startsWith('--')) continue // Skip comment-only markers
+        if (isCommentOnly(sql)) continue // marker text, not a statement
         try {
           await client.query(sql)
+          ran++
           result.applied.push({ type: 'sql', label: summarizeStatement(sql) })
         } catch (err) {
           result.errors.push({
@@ -244,9 +261,30 @@ export async function restoreFromMigrations(options: RestoreOptions): Promise<Re
         }
       }
 
-      // Track migration
-      await client.query(
-        `INSERT INTO ${MIGRATIONS_TABLE} (version, description) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      // A migration that applied nothing is not applied.
+      //
+      // `snapshot --migration` writes files whose schema layer is the comment
+      // `-- Schema changed. Use @dbdiff/cli to generate migration SQL.`, and
+      // the baseline `clone` writes has no statements at all. Recording those
+      // as done meant a restore into an empty database built nothing and then
+      // reported success — and left the tracking table asserting the schema
+      // was in place (issue #93).
+      if (ran === 0) {
+        result.skipped.push({
+          type: 'sql',
+          label: `v${migration.version}`,
+          reason: 'carries no SQL to apply, so it was not recorded as applied. '
+            + 'Snapshot-derived migrations hold no schema DDL — use '
+            + '`supaforge clone`, or restore from a snapshot, to build structure.',
+        })
+        continue
+      }
+
+      await queryFn(
+        options.targetUrl,
+        `INSERT INTO ${MIGRATIONS_TABLE} (version, name, statements)
+         VALUES ($1, $2, '{}')
+         ON CONFLICT (version) DO NOTHING`,
         [migration.version, migration.description],
       )
     }
@@ -389,4 +427,21 @@ export function summarizeStatement(sql: string): string {
     .find(l => l.length > 0 && !l.startsWith('--'))
     ?? sql.trim()
   return first.length > 80 ? `${first.slice(0, 77)}...` : first
+}
+
+/**
+ * The `public._supaforge_migrations` table an earlier version created.
+ *
+ * Worth naming rather than ignoring: it is reachable with the project's anon
+ * key, so it should be dropped rather than merely abandoned (issue #93).
+ */
+async function findLegacyTrackingTable(client: pg.Client): Promise<boolean> {
+  try {
+    const { rows } = await client.query(
+      `SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = '_supaforge_migrations'`,
+    )
+    return rows.length > 0
+  } catch {
+    return false
+  }
 }

@@ -347,46 +347,39 @@ async function captureWebhooks(
 ): Promise<SnapshotLayerInfo> {
   const file = 'webhooks.sql'
   try {
+    // The triggers themselves, exactly as the check reads them (issue #77).
+    // This used to start from supabase_functions.hooks — the log of webhook
+    // *invocations* — and rebuild each trigger by hand, which got the same
+    // things wrong here as it did there: a webhook that had never fired had no
+    // log rows and was left out of the snapshot; a deleted one still had rows
+    // and was written into it; the join was on trigger name alone, so two
+    // webhooks of one name on different tables collapsed; every trigger was
+    // emitted as AFTER whatever its real timing; and the arguments carrying the
+    // URL, method, headers, params and timeout were dropped entirely, so
+    // restoring a snapshot produced webhooks that failed every write with
+    // `url argument is missing`. It also re-emitted Supabase's own
+    // http_request via pg_get_functiondef, so a restore replaced it.
     const rows = await queryFn(dbUrl, `
-      SELECT
-        h.id, h.hook_table_id, h.hook_name, h.created_at, h.request_id,
-        pg_get_functiondef(t.tgfoid) AS function_body,
-        CASE
-          WHEN t.tgtype::int & 4 > 0 AND t.tgtype::int & 8 > 0 AND t.tgtype::int & 16 > 0
-            THEN 'INSERT OR UPDATE OR DELETE'
-          WHEN t.tgtype::int & 4 > 0 AND t.tgtype::int & 8 > 0
-            THEN 'INSERT OR UPDATE'
-          WHEN t.tgtype::int & 4 > 0 AND t.tgtype::int & 16 > 0
-            THEN 'INSERT OR DELETE'
-          WHEN t.tgtype::int & 8 > 0 AND t.tgtype::int & 16 > 0
-            THEN 'UPDATE OR DELETE'
-          WHEN t.tgtype::int & 4 > 0 THEN 'INSERT'
-          WHEN t.tgtype::int & 8 > 0 THEN 'UPDATE'
-          WHEN t.tgtype::int & 16 > 0 THEN 'DELETE'
-          ELSE NULL
-        END AS events,
-        (n.nspname || '.' || c.relname) AS trigger_table
-      FROM supabase_functions.hooks h
-      LEFT JOIN pg_trigger t ON t.tgname = h.hook_name
-      LEFT JOIN pg_class c ON c.oid = t.tgrelid
-      LEFT JOIN pg_namespace n ON n.oid = c.relnamespace
-      ORDER BY h.hook_name, h.id
+      SELECT n.nspname || '.' || c.relname AS table_name,
+             t.tgname                      AS name,
+             pg_get_triggerdef(t.oid)      AS definition
+      FROM pg_trigger t
+      JOIN pg_class c      ON c.oid = t.tgrelid
+      JOIN pg_namespace n  ON n.oid = c.relnamespace
+      JOIN pg_proc p       ON p.oid = t.tgfoid
+      JOIN pg_namespace pn ON pn.oid = p.pronamespace
+      WHERE NOT t.tgisinternal
+        AND pn.nspname = 'supabase_functions'
+        AND p.proname  = 'http_request'
+      ORDER BY 1, 2
     `)
 
     const statements = (rows as unknown as WebhookRow[])
-      .filter(h => h.function_body && h.events && h.trigger_table)
-      .map(hook => {
-        return [
-          `-- Webhook: ${hook.hook_name}`,
-          `${hook.function_body};`,
-          '',
-          `CREATE TRIGGER "${hook.hook_name}"`,
-          `  AFTER ${hook.events}`,
-          `  ON ${hook.trigger_table}`,
-          `  FOR EACH ROW`,
-          `  EXECUTE FUNCTION supabase_functions.http_request();`,
-        ].join('\n')
-      })
+      .filter(h => h.definition)
+      .map(hook => [
+        `-- Webhook: ${hook.name} on ${hook.table_name}`,
+        `${hook.definition.replace(/;\s*$/, '')};`,
+      ].join('\n'))
 
     const output = statements.length > 0
       ? `-- SupaForge Webhook Snapshot\n-- ${statements.length} webhooks\n\n${statements.join('\n\n')}\n`
@@ -394,11 +387,12 @@ async function captureWebhooks(
     await writeFile(join(dir, file), output)
     return { captured: true, file, itemCount: statements.length }
   } catch (err) {
+    // Reading the system catalogs cannot fail for a missing `supabase_functions`
+    // schema — a database without one simply has no such triggers and is
+    // captured as zero webhooks, not skipped. So anything arriving here is a
+    // real error rather than an absence, and is reported as one.
     const msg = errMsg(err)
-    await writeFile(join(dir, file), '-- supabase_functions schema not available\n').catch(() => {})
-    if (msg.includes(RELATION_NOT_FOUND)) {
-      return { captured: false, file, itemCount: 0, skipReason: 'supabase_functions schema not available' }
-    }
+    await writeFile(join(dir, file), `-- Webhook snapshot failed: ${msg}\n`).catch(() => {})
     return { captured: false, file, itemCount: 0, error: msg }
   }
 }
@@ -570,8 +564,10 @@ interface CronRow {
 }
 
 interface WebhookRow {
-  hook_name: string
-  function_body: string | null
-  events: string | null
-  trigger_table: string | null
+  /** `schema.table` — a trigger name is only unique per table. */
+  table_name: string
+  /** The trigger name, which is what the Dashboard calls the webhook. */
+  name: string
+  /** `CREATE TRIGGER …`, as the server renders it, arguments included. */
+  definition: string
 }

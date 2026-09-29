@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
-import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, mkdir, writeFile, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -8,8 +8,10 @@ import {
   loadSnapshot,
   findLatestSnapshot,
   listSnapshots,
+  captureSnapshot,
 } from '../src/snapshot.js'
 import type { SnapshotManifest } from '../src/types/config.js'
+import type { QueryFn } from '../src/db.js'
 
 describe('generateTimestamp', () => {
   it('returns ISO-like format without dashes/colons', () => {
@@ -224,5 +226,147 @@ describe('listSnapshots', () => {
 
     const result = await listSnapshots(tempDir)
     expect(result[0].dir).toBe(snap1Dir)
+  })
+})
+
+/**
+ * The webhook layer of a snapshot.
+ *
+ * This is the same defect as issue #77, in the other place it lived: the
+ * capture started from `supabase_functions.hooks` — the log of webhook
+ * *invocations* — and rebuilt each trigger by hand. `restore` replays
+ * `webhooks.sql`, so a snapshot taken that way recreated webhooks with no
+ * arguments and every write to their tables then failed with
+ * `url argument is missing`.
+ */
+describe('captureSnapshot: webhooks', () => {
+  let tempDir: string
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'sf-wh-snap-'))
+  })
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true })
+  })
+
+  const triggerDef = (table: string, name: string, url: string, timing = 'AFTER INSERT') =>
+    `CREATE TRIGGER ${name} ${timing} ON ${table} FOR EACH ROW `
+    + `EXECUTE FUNCTION supabase_functions.http_request(`
+    + `'${url}', 'POST', '{"Content-Type":"application/json"}', '{}', '5000')`
+
+  /** Answers the webhook query only; every other layer gets nothing. */
+  function queryFor(rows: unknown[]): QueryFn {
+    return (async (_dbUrl: string, sql: string) => {
+      if (sql.includes('pg_get_triggerdef')) return rows
+      return []
+    }) as unknown as QueryFn
+  }
+
+  async function capture(rows: unknown[]) {
+    const result = await captureSnapshot({
+      envName: 'prod',
+      env: { dbUrl: 'postgres://example' },
+      config: { environments: { prod: { dbUrl: 'postgres://example' } } } as never,
+      outputDir: tempDir,
+      queryFn: queryFor(rows),
+      fetchFn: (async () => new Response('[]', { status: 200 })) as never,
+    })
+    const sql = await readFile(join(result.dir, 'webhooks.sql'), 'utf8')
+    return { result, sql }
+  }
+
+  it('writes the definition with its arguments', async () => {
+    const { result, sql } = await capture([{
+      table_name: 'public.orders',
+      name: 'orders_webhook',
+      definition: triggerDef('public.orders', 'orders_webhook', 'https://example.invalid/orders'),
+    }])
+
+    expect(result.manifest.layers.webhooks.itemCount).toBe(1)
+    expect(sql).toContain("'https://example.invalid/orders'")
+    expect(sql).toContain("'POST'")
+    expect(sql).toContain("'5000'")
+    // `http_request()` with no arguments is what the hand-built statement
+    // emitted, and it makes every write to the table fail.
+    expect(sql).not.toMatch(/http_request\(\s*\)/)
+  })
+
+  it('does not re-emit Supabase\'s own http_request function', async () => {
+    const { sql } = await capture([{
+      table_name: 'public.orders',
+      name: 'orders_webhook',
+      definition: triggerDef('public.orders', 'orders_webhook', 'https://example.invalid/o'),
+    }])
+
+    // pg_get_functiondef(t.tgfoid) used to be written into the file, so a
+    // restore replaced Supabase's function with the snapshotted copy.
+    expect(sql).not.toContain('CREATE OR REPLACE FUNCTION')
+    expect(sql).not.toContain('LANGUAGE plpgsql')
+  })
+
+  it('keeps two webhooks that share a name on different tables', async () => {
+    const { result, sql } = await capture([
+      {
+        table_name: 'public.a_items',
+        name: 'notify_webhook',
+        definition: triggerDef('public.a_items', 'notify_webhook', 'https://example.invalid/a'),
+      },
+      {
+        table_name: 'public.b_items',
+        name: 'notify_webhook',
+        definition: triggerDef('public.b_items', 'notify_webhook', 'https://example.invalid/b'),
+      },
+    ])
+
+    // The join was on trigger name alone, so one of these swallowed the other.
+    expect(result.manifest.layers.webhooks.itemCount).toBe(2)
+    expect(sql).toContain('public.a_items')
+    expect(sql).toContain('public.b_items')
+    expect(sql).toContain("'https://example.invalid/a'")
+    expect(sql).toContain("'https://example.invalid/b'")
+  })
+
+  it('preserves a trigger that is not AFTER INSERT', async () => {
+    const { sql } = await capture([{
+      table_name: 'public.users',
+      name: 'before_touch',
+      definition: triggerDef('public.users', 'before_touch', 'https://example.invalid/u', 'BEFORE UPDATE'),
+    }])
+
+    // Every trigger used to be written out as `AFTER <events>`, whatever its
+    // real timing, so a BEFORE trigger came back as AFTER.
+    expect(sql).toContain('BEFORE UPDATE')
+    expect(sql).not.toContain('AFTER BEFORE')
+  })
+
+  it('captures zero webhooks rather than skipping when there are none', async () => {
+    const { result, sql } = await capture([])
+
+    // A database with no supabase_functions schema has no such triggers; that
+    // is an empty answer from the catalogs, not a failure to read them.
+    expect(result.manifest.layers.webhooks.captured).toBe(true)
+    expect(result.manifest.layers.webhooks.itemCount).toBe(0)
+    expect(result.manifest.layers.webhooks.error).toBeUndefined()
+    expect(sql).toContain('No webhooks found')
+  })
+
+  it('reports a genuine read failure as an error', async () => {
+    const failing = (async (_dbUrl: string, sql: string) => {
+      if (sql.includes('pg_get_triggerdef')) throw new Error('permission denied for table pg_trigger')
+      return []
+    }) as unknown as QueryFn
+
+    const result = await captureSnapshot({
+      envName: 'prod',
+      env: { dbUrl: 'postgres://example' },
+      config: { environments: { prod: { dbUrl: 'postgres://example' } } } as never,
+      outputDir: tempDir,
+      queryFn: failing,
+      fetchFn: (async () => new Response('[]', { status: 200 })) as never,
+    })
+
+    expect(result.manifest.layers.webhooks.captured).toBe(false)
+    expect(result.manifest.layers.webhooks.error).toContain('permission denied')
   })
 })

@@ -8,6 +8,14 @@ on:
   # Allow manual trigger for debugging
   workflow_dispatch:
 
+permissions:
+  contents: read
+  # Pulling Supabase's images from ghcr.io anonymously is rate limited per
+  # runner IP and shared with every other job on it, which failed this workflow
+  # as `toomanyrequests` for reasons unrelated to the change under test.
+  # Authenticated pulls have a far higher ceiling.
+  packages: read
+
 jobs:
   e2e:
     name: E2E tests (Supabase local)
@@ -35,19 +43,25 @@ jobs:
         with:
           version: latest
 
+      # Raises the ghcr.io pull ceiling. Never fails the job: an anonymous pull
+      # still works, it is only more likely to be throttled.
+      - name: Authenticate image pulls
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login ghcr.io -u "${{ github.actor }}" --password-stdin \
+            || echo "::warning::ghcr login failed — pulls will be anonymous"
+
       - name: Install dependencies
         working-directory: packages/cli
         run: npm ci
 
-      # Start source Supabase instance
+      # Retried: a throttled pull and a port still held by a rolled-back start
+      # both fail here and both clear in seconds. See the script for detail.
       - name: Start source instance
-        working-directory: packages/cli/tests/e2e/supabase-source
-        run: supabase start --exclude imgproxy
+        run: packages/cli/scripts/ci-supabase-start.sh packages/cli/tests/e2e/supabase-source
 
-      # Start target Supabase instance
       - name: Start target instance
-        working-directory: packages/cli/tests/e2e/supabase-target
-        run: supabase start --exclude imgproxy
+        run: packages/cli/scripts/ci-supabase-start.sh packages/cli/tests/e2e/supabase-target
 
       # Extract connection info
       - name: Get source status

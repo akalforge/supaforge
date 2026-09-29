@@ -14,6 +14,8 @@ import { errMsg } from './utils/error'
 import { DEFAULT_IGNORE_SCHEMAS } from './defaults'
 import { dropUnsupportedSetStatements, knownParameters } from './prove'
 import { splitSqlStatements, isCommentOnly, isPsqlMetaCommand, stripPsqlMetaCommands } from './utils/sql-split'
+import { quoteIdent } from './utils/sql.js'
+import { sqlSkeleton } from './sql-deps.js'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
@@ -36,6 +38,23 @@ export interface RestoreOptions {
   queryFn?: QueryFn
   /** Fetch function for API operations. */
   fetchFn?: FetchFn
+  /**
+   * Apply each statement on its own, keeping whatever succeeds.
+   *
+   * Off by default. A restore used to run this way always, so a failure part
+   * way through left a half-restored database and the errors were listed only
+   * at the end (issue #95). PostgreSQL has transactional DDL, so the whole
+   * restore now succeeds or leaves the target exactly as it was.
+   */
+  noTransaction?: boolean
+  /**
+   * Drop the schemas the snapshot covers before replaying into them.
+   *
+   * What `--force` now means. It used to only skip the "target is not empty"
+   * check, so restoring over an existing database failed on every object that
+   * was already there and replaced nothing (issue #95).
+   */
+  replace?: boolean
 }
 
 export interface RestoreResult {
@@ -43,6 +62,15 @@ export interface RestoreResult {
   skipped: { type: 'sql' | 'api'; label: string; reason: string }[]
   errors: { type: 'sql' | 'api'; label: string; error: string }[]
   mode: 'snapshot' | 'migrations'
+  /**
+   * Statements that ran and were then rolled back, when the restore was
+   * transactional and something failed.
+   *
+   * Reported apart from `applied`, which is emptied: a restore that rolled
+   * back applied nothing, and saying it applied 60 operations would be the
+   * most misleading thing this command could tell anyone (issue #95).
+   */
+  rolledBack?: { type: 'sql' | 'api'; label: string }[]
 }
 
 // ─── Safety Check ────────────────────────────────────────────────────────────
@@ -86,7 +114,28 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
   const client = new pg.Client(pgClientConfig(options.targetUrl))
   await client.connect()
 
+  // One transaction for the lot, unless asked otherwise. A restore that fails
+  // half way used to leave a database matching neither the snapshot nor its own
+  // previous state, with the errors reported only at the end (issue #95).
+  // PostgreSQL has transactional DDL, so this is the same guarantee `--apply`
+  // gives in promote().
+  const transactional = !options.noTransaction
+  if (transactional) await client.query('BEGIN')
+
+  /** Webhook triggers the schema dump creates, so the webhooks layer can skip them. */
+  const createdBySchemaLayer = new Set<string>()
+
   try {
+    // `--force` means replace, not "carry on regardless". Skipping the
+    // not-empty check and then failing on every object that already exists
+    // replaced nothing at all.
+    if (options.replace) {
+      for (const schema of await schemasInSnapshot(options.snapshotDir)) {
+        await client.query(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`)
+        result.applied.push({ type: 'sql', label: `Dropped schema ${schema} (--force)` })
+      }
+    }
+
     for (const layer of sqlOrder) {
       const file = layerRestoreFile(layer)
       const info = manifest.layers[layer === 'storage-policies' ? 'storage' : layer]
@@ -117,9 +166,57 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
         const content = layer === 'schema'
           ? await replayableSchemaSql(raw, options.targetUrl)
           : raw
-        const statements = extractExecutableStatements(content)
+
+        let statements = extractExecutableStatements(content)
+
+        // Objects the platform owns cannot be recreated by `postgres`, and a
+        // snapshot of a Supabase project carries several: `pgbouncer.get_auth`
+        // in the schema dump, pg_cron's own policies on `cron.job` in the RLS
+        // dump. They failed on every single restore (issue #95).
+        statements = statements.filter(sql => {
+          const owner = platformOwnedObject(sql)
+          if (owner === undefined) return true
+          result.skipped.push({
+            type: 'sql',
+            label: summarizeStatement(sql),
+            reason: `${owner} is managed by the platform and cannot be recreated here`,
+          })
+          return false
+        })
+
+        // The webhooks layer re-creates triggers the schema dump already made
+        // — the restore-side twin of the overlap #77 settled for `diff --apply`.
+        if (layer === 'webhooks') {
+          statements = statements.filter(sql => {
+            if (!createdBySchemaLayer.has(webhookTriggerKey(sql) ?? '')) return true
+            result.skipped.push({
+              type: 'sql',
+              label: summarizeStatement(sql),
+              reason: 'already created by the schema layer',
+            })
+            return false
+          })
+        }
+
+        if (layer === 'schema') {
+          for (const sql of statements) {
+            const key = webhookTriggerKey(sql)
+            if (key) createdBySchemaLayer.add(key)
+          }
+        }
+
         for (const sql of statements) {
           try {
+            // `CREATE EXTENSION ... WITH SCHEMA "extensions"` needs that schema
+            // to exist, and on plain PostgreSQL it does not — every Supabase
+            // extension then failed with `schema "extensions" does not exist`
+            // (issue #95). Creating it first costs nothing where it already
+            // exists.
+            const needed = extensionTargetSchema(sql)
+            if (needed) {
+              await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(needed)}`)
+            }
+
             await client.query(sql)
             result.applied.push({ type: 'sql', label: summarizeStatement(sql) })
           } catch (err) {
@@ -128,9 +225,15 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
               label: summarizeStatement(sql),
               error: errMsg(err),
             })
+            // In a transaction the first failure aborts it, and every statement
+            // after reports `current transaction is aborted` — noise that
+            // buries the one error that matters. Stop here and let the rollback
+            // below handle it.
+            if (transactional) throw new RestoreAborted()
           }
         }
-      } catch {
+      } catch (err) {
+        if (err instanceof RestoreAborted) throw err
         result.skipped.push({ type: 'sql', label: `Layer: ${layer}`, reason: 'File not readable' })
       }
     }
@@ -158,6 +261,30 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
           }
         }
       } catch { /* no data dir */ }
+    }
+
+    if (transactional) {
+      if (result.errors.length > 0) {
+        await client.query('ROLLBACK')
+        // Nothing was written, so nothing was applied. Reporting otherwise
+        // would be the most misleading thing this command could say.
+        result.rolledBack = result.applied
+        result.applied = []
+      } else {
+        await client.query('COMMIT')
+      }
+    }
+  } catch (err) {
+    if (transactional) {
+      await client.query('ROLLBACK').catch(() => undefined)
+      result.rolledBack = result.applied
+      result.applied = []
+    }
+    // A RestoreAborted carries no message of its own: the statement that failed
+    // has already been recorded, and adding a second entry for the same
+    // failure would only make it harder to read.
+    if (!(err instanceof RestoreAborted)) {
+      result.errors.push({ type: 'sql', label: 'Restore', error: errMsg(err) })
     }
   } finally {
     await client.end()
@@ -445,3 +572,114 @@ async function findLegacyTrackingTable(client: pg.Client): Promise<boolean> {
     return false
   }
 }
+
+/**
+ * The schemas a snapshot's `schema.sql` creates.
+ *
+ * Used by `--force` to clear the ground before replaying. Read from the dump
+ * rather than assumed to be `public`, so a snapshot covering `reporting` as
+ * well does not leave half of it behind — and so nothing outside the snapshot
+ * is touched.
+ */
+async function schemasInSnapshot(snapshotDir: string): Promise<string[]> {
+  try {
+    const sql = await readFile(join(snapshotDir, 'schema.sql'), 'utf-8')
+    const found = new Set<string>()
+
+    for (const match of sql.matchAll(/^\s*CREATE SCHEMA (?:IF NOT EXISTS )?("[^"]+"|[A-Za-z_][\w$]*)/gim)) {
+      found.add(match[1].replace(/"/g, ''))
+    }
+
+    // A dump scoped to public may not carry a CREATE SCHEMA for it at all.
+    found.add('public')
+    return [...found]
+  } catch {
+    return ['public']
+  }
+}
+
+
+/**
+ * Schemas whose contents belong to the platform, not the project.
+ *
+ * A Supabase snapshot captures objects in these that `postgres` cannot
+ * recreate — `pgbouncer.get_auth()` needs the `pgbouncer` role, and pg_cron
+ * owns its own policies on `cron.job` — so every restore failed on them
+ * (issue #95). They are the project's to read, never to rebuild.
+ */
+const PLATFORM_OWNED_SCHEMAS = ['pgbouncer', 'cron', 'pgsodium', 'vault', '_realtime', 'supabase_functions']
+
+/**
+ * The platform-owned object a statement touches, if any.
+ *
+ * Returns the schema name so the skip can say which it was. Read off the
+ * skeleton, so the words inside a routine body or a literal cannot match.
+ */
+export function platformOwnedObject(sql: string): string | undefined {
+  const skeleton = sqlSkeleton(sql)
+
+  for (const schema of PLATFORM_OWNED_SCHEMAS) {
+    // `schema.object` or `"schema"."object"`, after a DDL verb rather than
+    // anywhere: a policy *on* cron.job counts, a comment mentioning cron does
+    // not.
+    const pattern = new RegExp(
+      // The \b belongs only on the unquoted alternative: before a `"` there is
+      // no word boundary to find, since a space and a quote are both non-word
+      // characters — which is why the quoted form never matched.
+      String.raw`\b(?:CREATE|DROP|ALTER)\b[\s\S]{0,200}?(?:"${schema}"|\b${schema})\s*\.`,
+      'i',
+    )
+    if (pattern.test(skeleton)) return schema
+  }
+
+  return undefined
+}
+
+/**
+ * `schema.table.trigger` for a statement creating a webhook trigger, else null.
+ *
+ * A trigger name is unique only per table, which is the same keying the
+ * webhooks check settled on in #77.
+ */
+export function webhookTriggerKey(sql: string): string | null {
+  const match = /CREATE\s+TRIGGER\s+("[^"]+"|[\w$]+)[\s\S]*?\bON\s+((?:"[^"]+"|[\w$]+)(?:\s*\.\s*(?:"[^"]+"|[\w$]+))?)/i
+    .exec(sqlSkeleton(sql))
+  if (!match) return null
+
+  const bare = (s: string) => s.replace(/"/g, '').trim()
+  return `${bare(match[2])}.${bare(match[1])}`.toLowerCase()
+}
+
+/**
+ * A schema that already exists everywhere and cannot be created.
+ *
+ * PostgreSQL rejects a name beginning with `pg_` before it even evaluates
+ * `IF NOT EXISTS`, so asking for one is an error rather than a no-op — the
+ * same trap as issue #94, which is where `--prove` used to abort.
+ */
+export function isSystemSchema(schema: string): boolean {
+  return schema === 'pg_catalog' || schema === 'information_schema' || schema.startsWith('pg_')
+}
+
+/**
+ * The schema a `CREATE EXTENSION ... WITH SCHEMA x` needs creating first, if any.
+ *
+ * A Supabase snapshot puts its extensions in `extensions`, which plain
+ * PostgreSQL has never heard of, so every one of them failed there with
+ * `schema "extensions" does not exist` (issue #95).
+ *
+ * System schemas are excluded. `plpgsql` lives in `pg_catalog`, and asking for
+ * that one aborts the transaction and takes the whole restore with it — which
+ * is what a first attempt at this fix did.
+ */
+export function extensionTargetSchema(sql: string): string | undefined {
+  const match = /CREATE\s+EXTENSION\b[\s\S]*?\bWITH\s+SCHEMA\s+("[^"]+"|[\w$]+)/i
+    .exec(sqlSkeleton(sql))
+  if (!match) return undefined
+
+  const schema = match[1].replace(/"/g, '')
+  return isSystemSchema(schema) ? undefined : schema
+}
+
+/** Thrown to unwind out of the layer loop once a transaction has aborted. */
+class RestoreAborted extends Error {}

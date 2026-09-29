@@ -111,6 +111,23 @@ export async function runMigration(
   }
 }
 
+/**
+ * Applied versions, or an empty set when the tracking table does not exist.
+ *
+ * For read-only paths that must not bring the table into being as a side
+ * effect of looking.
+ */
+async function readAppliedVersionsIfPresent(
+  dbUrl: string,
+  queryFn: QueryFn,
+): Promise<Set<string>> {
+  try {
+    return await getAppliedVersions(dbUrl, queryFn)
+  } catch {
+    return new Set()
+  }
+}
+
 // ─── Baseline (mark all as applied without executing) ────────────────────────
 
 export interface BaselineResult {
@@ -127,10 +144,21 @@ export async function baselineMigrations(
   dir: string,
   queryFn: QueryFn = pgQuery,
   readDirFn?: ReadDirFn,
+  options: { dryRun?: boolean } = {},
 ): Promise<BaselineResult> {
-  await ensureMigrationsTable(dbUrl, queryFn)
-  const applied = await getAppliedVersions(dbUrl, queryFn)
   const local = await readLocalMigrations(dir, readDirFn)
+
+  // A preview writes nothing at all — not even the tracking table, which on
+  // Supabase means creating a schema the project did not have. So under dryRun
+  // the applied set is read defensively instead: no table yet means nothing is
+  // recorded yet, which is the right answer.
+  let applied: Set<string>
+  if (options.dryRun) {
+    applied = await readAppliedVersionsIfPresent(dbUrl, queryFn)
+  } else {
+    await ensureMigrationsTable(dbUrl, queryFn)
+    applied = await getAppliedVersions(dbUrl, queryFn)
+  }
 
   const result: BaselineResult = { marked: [], skipped: [] }
 
@@ -143,13 +171,17 @@ export async function baselineMigrations(
       continue
     }
 
-    await queryFn(
-      dbUrl,
-      `INSERT INTO ${MIGRATIONS_TABLE} (version, name, statements)
-       VALUES ($1, $2, '{}')
-       ON CONFLICT (version) DO NOTHING`,
-      [migration.version, migration.name],
-    )
+    // `marked` is what *would* be recorded under dryRun, so the caller can
+    // print the same list either way (issue #88).
+    if (!options.dryRun) {
+      await queryFn(
+        dbUrl,
+        `INSERT INTO ${MIGRATIONS_TABLE} (version, name, statements)
+         VALUES ($1, $2, '{}')
+         ON CONFLICT (version) DO NOTHING`,
+        [migration.version, migration.name],
+      )
+    }
     result.marked.push({ version: migration.version, name: migration.name })
   }
 

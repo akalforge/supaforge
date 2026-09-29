@@ -189,6 +189,61 @@ describe('isDestructiveSql', () => {
     expect(isDestructiveSql('ALTER TABLE "users" ALTER COLUMN "a" DROP DEFAULT;')).toBe(false)
     expect(isDestructiveSql('ALTER TABLE "users" ALTER COLUMN "a" DROP NOT NULL;')).toBe(false)
   })
+
+  // ── What used to go through --apply ungated (issue #88) ────────────────────
+
+  it('flags DELETE FROM, which is how the data check removes rows', () => {
+    expect(isDestructiveSql(`DELETE FROM "ref_codes" WHERE "id" = '4';`)).toBe(true)
+    expect(isDestructiveSql('delete from plans where id = 1;')).toBe(true)
+  })
+
+  it('flags TRUNCATE and DROP SCHEMA', () => {
+    expect(isDestructiveSql('TRUNCATE TABLE "events";')).toBe(true)
+    expect(isDestructiveSql('DROP SCHEMA "reporting" CASCADE;')).toBe(true)
+  })
+
+  it('flags a policy dropped and not put back', () => {
+    // Not recoverable from the schema, and for a RESTRICTIVE policy removing
+    // it *grants* access — so it belongs behind the same gate as losing rows.
+    expect(isDestructiveSql('DROP POLICY "target_only_guard" ON "public"."plans";')).toBe(true)
+    expect(isDestructiveSql('DROP POLICY IF EXISTS guard ON plans;')).toBe(true)
+  })
+
+  it('does not flag a policy being replaced', () => {
+    // The RLS check renders a *modified* policy as a drop and a create of the
+    // same name. Gating that would have broken policy sync entirely.
+    const replacement = [
+      'DROP POLICY IF EXISTS "users_select_own" ON "public"."users";',
+      'CREATE POLICY "users_select_own" ON "public"."users" FOR SELECT USING ((auth.uid() = id));',
+    ].join('\n')
+
+    expect(isDestructiveSql(replacement)).toBe(false)
+  })
+
+  it('still flags a drop of one policy alongside a replacement of another', () => {
+    const mixed = [
+      'DROP POLICY IF EXISTS "keep" ON "public"."t";',
+      'CREATE POLICY "keep" ON "public"."t" FOR SELECT USING (true);',
+      'DROP POLICY IF EXISTS "gone" ON "public"."t";',
+    ].join('\n')
+
+    expect(isDestructiveSql(mixed)).toBe(true)
+  })
+
+  it('ignores the words appearing inside a literal or a routine body', () => {
+    // Matching is no longer anchored to the start of the statement, so it runs
+    // over the skeleton to keep a body from tripping it.
+    expect(isDestructiveSql(`INSERT INTO audit (note) VALUES ('DROP TABLE users');`)).toBe(false)
+    expect(isDestructiveSql(
+      'CREATE FUNCTION f() RETURNS void AS $$ BEGIN DELETE FROM t; END; $$ LANGUAGE plpgsql;',
+    )).toBe(false)
+  })
+
+  it('flags a drop that is not the first statement', () => {
+    // A merged replacement pair puts the second statement mid-string, which an
+    // anchored match could not see.
+    expect(isDestructiveSql('ALTER TABLE "t" ADD COLUMN "c" text;\nDROP TABLE "old";')).toBe(true)
+  })
 })
 
 describe('parseDbDiffOutput', () => {

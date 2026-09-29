@@ -2,7 +2,7 @@ import pg from 'pg'
 import { pgClientConfig } from './db.js'
 import type { ScanResult, SyncAction } from './types/drift'
 import { errMsg } from './utils/error'
-import { isDestructiveSql } from './dbdiff'
+import { destructiveReason } from './dbdiff'
 import {
   orderStatements, referencedTables,
   createdPolicies, createsOnlyPolicies,
@@ -150,8 +150,11 @@ function classifyIssue(
     return { kind: 'skip', reason: 'No SQL fix or API action available' }
   }
 
-  if (!options.allowDestructive && isDestructiveSql(issue.sql.up)) {
-    return { kind: 'skip', reason: 'Destructive (drops data) — re-run with --allow-destructive to apply' }
+  if (!options.allowDestructive) {
+    const why = destructiveReason(issue.sql.up)
+    if (why) {
+      return { kind: 'skip', reason: `Destructive — ${why}; re-run with --allow-destructive to apply` }
+    }
   }
 
   const outOfScope = outOfScopeReason(issue.sql.up, options.tableFilter)

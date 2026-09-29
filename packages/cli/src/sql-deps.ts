@@ -249,6 +249,34 @@ export function createdPolicies(sql: string): string[] {
  * be. Anything left once the CREATE POLICY statements are removed counts, which
  * errs towards keeping a statement rather than losing DDL.
  */
+/**
+ * The policies a statement drops, keyed as `createdPolicies` keys them.
+ *
+ * Needed to tell a policy being *removed* from one being *replaced*: the RLS
+ * check renders a modified policy as `DROP POLICY` + `CREATE POLICY` for the
+ * same name, and that is not a loss of access control (issue #88).
+ */
+export function droppedPolicies(sql: string): string[] {
+  const out: string[] = []
+  const re = /DROP\s+POLICY\s+(?:IF\s+EXISTS\s+)?("[^"]+"|[A-Za-z_][\w$]*)\s+ON\s+((?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))?)/gi
+  for (const m of sqlSkeleton(sql).matchAll(re)) {
+    out.push(`${bareName(m[2])}.${bareName(m[1])}`)
+  }
+  return out
+}
+
+/**
+ * Policies this statement drops without putting back.
+ *
+ * Dropping a policy is not recoverable from the schema the way dropping a view
+ * or a function is, and a dropped RESTRICTIVE policy *grants* access rather
+ * than removing it — so it belongs behind the same gate as losing rows.
+ */
+export function policiesRemoved(sql: string): string[] {
+  const recreated = new Set(createdPolicies(sql))
+  return droppedPolicies(sql).filter(key => !recreated.has(key))
+}
+
 export function createsOnlyPolicies(sql: string): boolean {
   if (createdPolicies(sql).length === 0) return false
   const withoutPolicies = sqlSkeleton(sql)

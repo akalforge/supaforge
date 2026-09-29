@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import type { DriftIssue } from './types/drift'
 import { errMsg, friendlyDbError, DiagnosticError } from './utils/error'
 import { DBDIFF_EXEC_TIMEOUT_MS, DBDIFF_MAX_BUFFER } from './constants'
+import { sqlSkeleton, policiesRemoved } from './sql-deps'
 
 const execFileAsync = promisify(execFile)
 
@@ -325,17 +326,57 @@ const DROP_FUNCTION = 'drop-function'
 const DROP_TYPES = ['drop', 'drop-view', DROP_FUNCTION, 'drop-trigger', 'drop-type', 'drop-sequence']
 
 /**
- * Does this statement destroy data if executed?
+ * Does this statement destroy data, or weaken access control, if executed?
  *
- * Deliberately narrower than DROP_TYPES: dropping a view, function, trigger or
- * type loses a definition that the migration can recreate, whereas dropping a
- * table or a column loses rows. Only the latter is gated at apply time, which
- * mirrors how @dbdiff/cli splits its own linter into errors and warnings.
+ * Still narrower than DROP_TYPES: dropping a view, function, trigger or type
+ * loses a definition the migration can recreate. What is gated is losing rows
+ * or losing a policy.
+ *
+ * It used to cover `DROP TABLE` and `ALTER TABLE … DROP COLUMN` only, so two
+ * things went through `--apply` that the flag exists to hold back (issue #88):
+ *
+ *   - `DELETE FROM`, which is how the data check removes rows the source does
+ *     not have. Rows are exactly what `--allow-destructive` is about.
+ *   - `DROP POLICY`, which is not recoverable from the schema and, for a
+ *     RESTRICTIVE policy, *grants* access by removing it. The RLS check renders
+ *     a *modified* policy as a drop and a create of the same name, and that is
+ *     a replacement rather than a removal — so only a policy left dropped
+ *     counts.
+ *
+ * Matching runs over `sqlSkeleton`, so the words appearing inside a string
+ * literal or a routine body cannot trigger it — and matching is no longer
+ * anchored to the start, since a merged replacement pair puts the second
+ * statement mid-string.
  */
 export function isDestructiveSql(sql: string): boolean {
-  const upper = sql.toUpperCase().trimStart()
-  if (upper.startsWith('DROP TABLE')) return true
-  return upper.startsWith('ALTER TABLE') && /\bDROP\s+COLUMN\b/.test(upper)
+  return destructiveReason(sql) !== undefined
+}
+
+/**
+ * Why this statement is gated, in the words the skip line should use.
+ *
+ * "Destructive (drops data)" was printed for every case once policies joined
+ * the list, which is wrong for a policy — nothing is lost from a table, and
+ * saying so obscures the part that matters, that removing a RESTRICTIVE policy
+ * opens access up.
+ */
+export function destructiveReason(sql: string): string | undefined {
+  const skeleton = sqlSkeleton(sql).toUpperCase()
+
+  if (/\bDROP\s+SCHEMA\b/.test(skeleton)) return 'drops a schema and everything in it'
+  if (/\bDROP\s+TABLE\b/.test(skeleton)) return 'drops a table and its rows'
+  if (/\bTRUNCATE\b/.test(skeleton)) return 'deletes every row in a table'
+  if (/\bDROP\s+COLUMN\b/.test(skeleton)) return 'drops a column and its values'
+  if (/\bDELETE\s+FROM\b/.test(skeleton)) return 'deletes rows'
+
+  const policies = policiesRemoved(sql)
+  if (policies.length > 0) {
+    return policies.length === 1
+      ? `removes the policy ${policies[0]}, which may widen access`
+      : `removes ${policies.length} policies, which may widen access`
+  }
+
+  return undefined
 }
 
 export function parseDbDiffOutput(output: string): DbDiffResult {

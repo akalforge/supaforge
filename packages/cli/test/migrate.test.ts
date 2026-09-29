@@ -255,3 +255,78 @@ describe('baselineMigrations edge cases', () => {
     expect(result.skipped).toHaveLength(0)
   })
 })
+
+/**
+ * Previewing a baseline (issue #88).
+ *
+ * `migrate baseline` used to write on sight: its only flag was `--env`, and
+ * everything else in the tool previews by default. It records migrations as
+ * applied without running them, so a run against the wrong environment tells
+ * that database its migrations are already done.
+ */
+describe('baselineMigrations: dryRun', () => {
+  const threeFiles: ReadDirFn = async () => ['001_a.sql', '002_b.sql', '003_c.sql']
+
+  it('reports what it would mark, and writes nothing', async () => {
+    const writes: string[] = []
+    const queryFn: QueryFn = async (_url, sql) => {
+      writes.push(sql)
+      if (sql.includes('SELECT version')) return [{ version: '001' }]
+      return []
+    }
+
+    const result = await baselineMigrations('postgres://test', 'dir', queryFn, threeFiles, { dryRun: true })
+
+    // The same lists the real run would produce, so the caller prints one thing.
+    expect(result.marked.map(m => m.version)).toEqual(['002', '003'])
+    expect(result.skipped.map(s => s.version)).toEqual(['001'])
+
+    expect(writes.some(sql => sql.includes('INSERT INTO'))).toBe(false)
+  })
+
+  it('does not create the tracking table', async () => {
+    // On Supabase that means creating a schema the project did not have. A
+    // preview that leaves a schema behind is not a preview.
+    const writes: string[] = []
+    const queryFn: QueryFn = async (_url, sql) => {
+      writes.push(sql)
+      if (sql.includes('SELECT version')) return []
+      return []
+    }
+
+    await baselineMigrations('postgres://test', 'dir', queryFn, threeFiles, { dryRun: true })
+
+    expect(writes.some(sql => sql.includes('CREATE SCHEMA'))).toBe(false)
+    expect(writes.some(sql => sql.includes('CREATE TABLE'))).toBe(false)
+  })
+
+  it('treats a missing tracking table as nothing recorded', async () => {
+    // Reading it is how the preview learns what is already applied, and on a
+    // database that has never been baselined the relation does not exist.
+    const queryFn: QueryFn = async (_url, sql) => {
+      if (sql.includes('SELECT version')) {
+        throw new Error('relation "supabase_migrations.schema_migrations" does not exist')
+      }
+      return []
+    }
+
+    const result = await baselineMigrations('postgres://test', 'dir', queryFn, threeFiles, { dryRun: true })
+
+    expect(result.marked).toHaveLength(3)
+    expect(result.skipped).toHaveLength(0)
+  })
+
+  it('still writes when not previewing', async () => {
+    const inserts: unknown[][] = []
+    const queryFn: QueryFn = async (_url, sql, params) => {
+      if (sql.includes('SELECT version')) return []
+      if (sql.includes('INSERT INTO')) { inserts.push(params ?? []); return [] }
+      return []
+    }
+
+    const result = await baselineMigrations('postgres://test', 'dir', queryFn, threeFiles, { dryRun: false })
+
+    expect(result.marked).toHaveLength(3)
+    expect(inserts).toHaveLength(3)
+  })
+})

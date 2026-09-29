@@ -16,12 +16,17 @@ export default class MigrateBaseline extends BaseCommand {
 
   static override examples = [
     '<%= config.bin %> migrate baseline --env=prod',
+    '<%= config.bin %> migrate baseline --env=prod --apply',
   ]
 
   static override flags = {
     env: Flags.string({
       char: 'e',
       description: 'Target environment to baseline',
+    }),
+    apply: Flags.boolean({
+      description: 'Write the tracking rows (previews without it)',
+      default: false,
     }),
   }
 
@@ -39,7 +44,12 @@ export default class MigrateBaseline extends BaseCommand {
 
     this.log(`${bold('migrate baseline')} → ${dim(envName)} (${dim(this.redactUrl(env.dbUrl))})\n`)
 
-    const result = await baselineMigrations(env.dbUrl, dir)
+    // Previews by default, like every other state-changing command. It used to
+    // write on sight with no flag but --env, which made it the easiest command
+    // in the tool to run by accident (issue #88).
+    const result = await baselineMigrations(env.dbUrl, dir, undefined, undefined, {
+      dryRun: !flags.apply,
+    })
 
     if (result.marked.length === 0 && result.skipped.length === 0) {
       this.log(`${dim('No migration files found in')} ${dir}`)
@@ -47,7 +57,9 @@ export default class MigrateBaseline extends BaseCommand {
     }
 
     if (result.marked.length > 0) {
-      this.log(`${ok(`Marked ${result.marked.length} migration(s) as applied:`)}`)
+      this.log(flags.apply
+        ? `${ok(`Marked ${result.marked.length} migration(s) as applied:`)}`
+        : `${bold(`Would mark ${result.marked.length} migration(s) as applied:`)}`)
       for (const m of result.marked) {
         this.log(`  ${ok('✓')} ${m.version}_${m.name}`)
       }
@@ -60,6 +72,8 @@ export default class MigrateBaseline extends BaseCommand {
       }
     }
 
-    this.log(`\n${ok('Baseline complete.')} ✓`)
+    this.log(flags.apply
+      ? `\n${ok('Baseline complete.')} ✓`
+      : `\n${dim('Nothing was written.')} → Add ${bold('--apply')} to record these as applied.`)
   }
 }

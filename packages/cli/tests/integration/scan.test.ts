@@ -91,6 +91,42 @@ describe('integration: full scan', () => {
     expect(extraInvoice).toBeDefined()
   })
 
+  it.skipIf(skipIfNoContainers())('should detect a webhook whose URL changed', () => {
+    // The configuration lives in the trigger's arguments. Comparing the events
+    // and the table only, as the check did before issue #77, called this
+    // identical.
+    const webhooks = result.checks.find(l => l.check === 'webhooks')!
+    const modified = webhooks.issues.find(i => i.id.includes('on_post_published'))
+
+    expect(modified).toBeDefined()
+    expect(modified!.title).toContain('Modified webhook')
+    expect(modified!.sql?.up).toContain('example.invalid/posts')
+  })
+
+  it.skipIf(skipIfNoContainers())('should keep two webhooks that share a trigger name', () => {
+    // Keyed by name alone, one of these used to swallow the other.
+    const webhooks = result.checks.find(l => l.check === 'webhooks')!
+    const touched = webhooks.issues.filter(i => i.id.includes('on_row_touched'))
+
+    // Present on public.users on both sides, missing on public.posts in the
+    // target: exactly one issue, and it names the table.
+    expect(touched).toHaveLength(1)
+    expect(touched[0].id).toContain('posts')
+  })
+
+  it.skipIf(skipIfNoContainers())('should ignore the invocation log', () => {
+    const webhooks = result.checks.find(l => l.check === 'webhooks')!
+
+    // `on_legacy_deleted` has log rows on the source and no trigger: the
+    // webhook was deleted, and the record of its invocations outlived it.
+    // Reading the log reported it as missing from the target.
+    expect(webhooks.issues.filter(i => i.id.includes('on_legacy_deleted'))).toHaveLength(0)
+
+    // `on_user_created` is a trigger on both sides, so it is identical however
+    // the log reads.
+    expect(webhooks.issues.filter(i => i.id.includes('on_user_created'))).toHaveLength(0)
+  })
+
   it.skipIf(skipIfNoContainers())('should detect storage policy drift', () => {
     const storage = result.checks.find(l => l.check === 'storage')!
     // Storage layer should detect policy drift (missing insert, modified select)

@@ -65,24 +65,25 @@ export class RealtimeCheck extends Check {
   }
 }
 
+/**
+ * Every publication and the tables in it.
+ *
+ * `supabase_realtime` used to be excluded here, with a second query defined
+ * for it that nothing ever called (issue #90). That is the publication
+ * Supabase Realtime actually uses: enabling Realtime on a table means adding
+ * it to this publication, so excluding it hid the only Realtime drift most
+ * projects will ever have. Publishing a table in dev and not in production
+ * reported clean.
+ *
+ * Its *presence* is not drift — every Supabase project has it — and nothing
+ * reports it as such, because both sides have it. Its table list is the whole
+ * point.
+ */
 const PUBLICATION_SQL = `
   SELECT p.pubname, pt.schemaname, pt.tablename
   FROM pg_publication p
   LEFT JOIN pg_publication_tables pt ON p.pubname = pt.pubname
-  WHERE p.pubname NOT IN ('supabase_realtime')
   ORDER BY p.pubname, pt.schemaname, pt.tablename
-`
-
-/**
- * Supabase uses the `supabase_realtime` publication by default.
- * We separately query its tables for diffing.
- */
-const SUPABASE_REALTIME_SQL = `
-  SELECT p.pubname, pt.schemaname, pt.tablename
-  FROM pg_publication p
-  LEFT JOIN pg_publication_tables pt ON p.pubname = pt.pubname
-  WHERE p.pubname = 'supabase_realtime'
-  ORDER BY pt.schemaname, pt.tablename
 `
 
 function pubTableKey(pub: RealtimePublication): string {

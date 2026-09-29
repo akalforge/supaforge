@@ -24,6 +24,33 @@ interface RoleGrant {
   is_grantable: boolean
 }
 
+/**
+ * Roles the platform owns outright.
+ *
+ * Their attributes and their grants are Supabase's to manage, and a difference
+ * in either means the two projects run different Supabase versions rather than
+ * that anybody changed anything.
+ */
+const PLATFORM_ROLES = [
+  'postgres', 'supabase_admin', 'authenticator',
+  'supabase_auth_admin', 'supabase_storage_admin', 'dashboard_user',
+  'pgbouncer', 'supavisor',
+]
+
+/**
+ * The roles the Data API authenticates as.
+ *
+ * Their *attributes* are Supabase's — nobody usefully diffs whether `anon` can
+ * log in — but their *table grants* are the application's, and are exactly the
+ * drift worth catching: `REVOKE ALL ON public.plans FROM anon` is the
+ * difference between a table being readable through the anon key and not
+ * (issue #90). All three were filtered out of the grants query, so that change
+ * reported clean.
+ */
+const API_ROLES = ['anon', 'authenticated', 'service_role']
+
+const quoted = (names: string[]) => names.map(n => `'${n}'`).join(', ')
+
 const ROLES_SQL = `
   SELECT
     rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb,
@@ -31,11 +58,7 @@ const ROLES_SQL = `
     rolvaliduntil::text AS rolvaliduntil
   FROM pg_roles
   WHERE NOT (rolname LIKE 'pg_%')
-    AND rolname NOT IN (
-      'postgres','supabase_admin','authenticator','service_role',
-      'supabase_auth_admin','supabase_storage_admin','dashboard_user',
-      'anon','authenticated','pgbouncer','supavisor'
-    )
+    AND rolname NOT IN (${quoted([...PLATFORM_ROLES, ...API_ROLES])})
   ORDER BY rolname
 `
 
@@ -43,11 +66,7 @@ const GRANTS_SQL = `
   SELECT grantee, table_schema, table_name, privilege_type,
          (is_grantable = 'YES') AS is_grantable
   FROM information_schema.role_table_grants
-  WHERE grantee NOT IN (
-    'postgres','supabase_admin','authenticator','service_role',
-    'supabase_auth_admin','supabase_storage_admin','dashboard_user',
-    'anon','authenticated','pgbouncer','supavisor'
-  )
+  WHERE grantee NOT IN (${quoted(PLATFORM_ROLES)})
     AND grantee NOT LIKE 'pg_%'
   ORDER BY grantee, table_schema, table_name, privilege_type
 `

@@ -243,3 +243,61 @@ describe('diffGrants', () => {
     expect(extraIssues[0].severity).toBe('info')
   })
 })
+
+/**
+ * Which roles' grants are compared (issue #90).
+ *
+ * `anon`, `authenticated` and `service_role` were filtered out of the grants
+ * query along with the platform's own roles. Those three are what the Data API
+ * authenticates as, so `REVOKE ALL ON public.plans FROM anon` — the difference
+ * between a table being readable through the anon key and not — reported
+ * clean, and the drift score stayed at 100.
+ */
+describe('RolesCheck: the queries it runs', () => {
+  /** Capture both statements the check issues. */
+  async function capturedSql(): Promise<{ roles: string; grants: string }> {
+    const seen: string[] = []
+    const queryFn = (async (_url: string, sql: string) => {
+      seen.push(sql)
+      return []
+    }) as unknown as QueryFn
+
+    await new RolesCheck(queryFn).scan(mockContext())
+
+    return {
+      roles: seen.find(s => s.includes('pg_roles')) ?? '',
+      grants: seen.find(s => s.includes('role_table_grants')) ?? '',
+    }
+  }
+
+  it('compares grants held by the Data API roles', async () => {
+    const { grants } = await capturedSql()
+
+    for (const role of ['anon', 'authenticated', 'service_role']) {
+      expect(grants, `${role} must not be excluded from the grants query`)
+        .not.toContain(`'${role}'`)
+    }
+  })
+
+  it('still ignores grants held by platform roles', async () => {
+    // A difference in these means the two projects run different Supabase
+    // versions, not that anybody changed anything.
+    const { grants } = await capturedSql()
+
+    for (const role of ['supabase_admin', 'supabase_auth_admin', 'authenticator', 'pgbouncer']) {
+      expect(grants, `${role} should still be excluded`).toContain(`'${role}'`)
+    }
+    expect(grants).toContain("NOT LIKE 'pg_%'")
+  })
+
+  it('still ignores the Data API roles when comparing role attributes', async () => {
+    // Nobody usefully diffs whether `anon` can log in — that is Supabase's to
+    // set. It is only their table grants that belong to the application.
+    const { roles } = await capturedSql()
+
+    for (const role of ['anon', 'authenticated', 'service_role']) {
+      expect(roles, `${role} should still be excluded from the attributes query`)
+        .toContain(`'${role}'`)
+    }
+  })
+})

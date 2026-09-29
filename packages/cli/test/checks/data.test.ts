@@ -21,13 +21,17 @@ function mockContext(tables?: string[]): CheckContext {
 /**
  * Mock queryFn that makes all tables appear "changed" — different fingerprints
  * between source and target so they pass through to the actual diff.
+ *
+ * The fingerprint is a content digest since issue #90; a row count and a
+ * relation size could not see an update, an insert paired with a delete, or
+ * any same-length value change.
  */
 function mockChangedQueryFn(): QueryFn {
   let callCount = 0
   return vi.fn(async () => {
     callCount++
-    // Alternate: even calls = source fingerprint, odd = target (different size)
-    return [{ row_count: 10, size_bytes: String(callCount % 2 === 0 ? 1024 : 2048) }]
+    // Alternate: even calls = source digest, odd = target (a different digest)
+    return [{ row_count: 10, content: callCount % 2 === 0 ? 'source-digest' : 'target-digest' }]
   })
 }
 
@@ -138,7 +142,7 @@ describe('DataCheck honours the table filter (issue #43)', () => {
       sqls.push(sql)
       callCount++
       // Always differ, so nothing is short-circuited as unchanged.
-      return [{ row_count: 10, size_bytes: String(callCount % 2 === 0 ? 1024 : 2048) }]
+      return [{ row_count: 10, content: callCount % 2 === 0 ? 'a' : 'b' }]
     }
     return {
       queryFn,

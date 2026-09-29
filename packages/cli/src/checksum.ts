@@ -1,25 +1,47 @@
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
-import { quoteIdent, quoteLiteral } from './utils/sql'
+import { quoteIdent } from './utils/sql'
 
 /**
- * Quick table-level checksum using PostgreSQL's built-in hash functions.
- * Returns a composite fingerprint of (row_count, size_bytes) for a table.
+ * Table-level checksums, used to skip the expensive row-by-row diff.
  *
- * This is much faster than a full row-by-row diff and can short-circuit
- * the expensive @dbdiff/cli invocation when tables are identical.
+ * This was a row count plus `pg_total_relation_size`, both catalog reads that
+ * never touch the rows — and never noticed a change either (issue #90). An
+ * update, an insert and a delete together leave the count where it was; any
+ * same-length value change leaves both numbers identical. In the report three
+ * data changes went unreported and the drift score stayed at 100.
+ *
+ * So the fingerprint is now a digest of the contents. It costs a sequential
+ * scan per table per side, which is the right trade for this check: it compares
+ * *reference* tables the user names in `checks.data.tables`, not the whole
+ * database.
  */
 
 export interface TableFingerprint {
   table: string
   rowCount: number
-  /** pg_total_relation_size in bytes (includes indexes + toast). */
-  sizeBytes: number
+  /**
+   * md5 over every row, order-independent.
+   *
+   * Two databases can hold the same rows in different physical order, so the
+   * per-row digests are sorted before being combined — otherwise an identical
+   * table would fingerprint differently after a VACUUM FULL.
+   */
+  content: string
 }
 
 /**
- * Compute a fast fingerprint for a single table using row count + relation size.
- * Both are catalog-level operations that don't scan the table.
+ * Compute a content fingerprint for a single table.
+ *
+ * `t::text` renders a whole row, so the digest covers every column without
+ * naming any — which keeps this working when the two sides disagree about
+ * column order or one has a column the other does not.
+ *
+ * Its rendering can depend on server settings for a few types, so two identical
+ * tables can in principle digest differently. That direction is safe: the table
+ * is then handed to dbdiff, which compares it properly and reports nothing. The
+ * direction that must not happen is the one this replaces — a difference the
+ * fingerprint cannot see.
  */
 export async function getTableFingerprint(
   dbUrl: string,
@@ -27,22 +49,22 @@ export async function getTableFingerprint(
   queryFn: QueryFn = pgQuery,
 ): Promise<TableFingerprint> {
   const sql = `
-    SELECT
-      (SELECT count(*)::int FROM ${quoteIdent(table)}) AS row_count,
-      pg_total_relation_size(${quoteLiteral(table)})::bigint AS size_bytes
+    SELECT count(*)::int AS row_count,
+           coalesce(md5(string_agg(row_digest, '' ORDER BY row_digest)), '') AS content
+    FROM (SELECT md5(t::text) AS row_digest FROM ${quoteIdent(table)} t) s
   `
-  const [row] = await queryFn(dbUrl, sql) as unknown as [{ row_count: number; size_bytes: string }]
+  const [row] = await queryFn(dbUrl, sql) as unknown as [{ row_count: number; content: string }]
   return {
     table,
     rowCount: row.row_count,
-    sizeBytes: Number(row.size_bytes),
+    content: row.content,
   }
 }
 
 /**
- * Compare two tables across environments using fast fingerprints.
- * Returns true if the tables appear identical (same row count + size),
- * meaning the expensive full diff can be skipped.
+ * Compare two tables across environments by fingerprint.
+ *
+ * True means the contents match and the full diff can be skipped.
  */
 export async function tablesMatch(
   sourceUrl: string,
@@ -54,7 +76,7 @@ export async function tablesMatch(
     getTableFingerprint(sourceUrl, table, queryFn),
     getTableFingerprint(targetUrl, table, queryFn),
   ])
-  return source.rowCount === target.rowCount && source.sizeBytes === target.sizeBytes
+  return source.rowCount === target.rowCount && source.content === target.content
 }
 
 /**

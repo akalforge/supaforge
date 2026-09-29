@@ -396,7 +396,7 @@ export async function prepareClone(
 }
 
 /** Configuration parameter names this server recognises. */
-async function knownParameters(dbUrl: string): Promise<Set<string>> {
+export async function knownParameters(dbUrl: string): Promise<Set<string>> {
   const rows = await pgQuery(dbUrl, 'SELECT name FROM pg_settings') as unknown as
     Array<{ name: string }>
   return new Set(rows.map(r => r.name.toLowerCase()))

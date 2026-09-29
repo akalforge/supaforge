@@ -261,3 +261,148 @@ describe('getPublicTables', () => {
     expect(typeof getPublicTables).toBe('function')
   })
 })
+
+/**
+ * Replaying a real pg_dump.
+ *
+ * `restore` used to look for a `schema.sql` that `snapshot` never wrote, so the
+ * schema layer was skipped and restoring into an empty database produced no
+ * tables (issue #80). Now that the file exists, what it contains has to survive
+ * being split into statements — and a pg_dump contains the three things the old
+ * splitter got wrong.
+ */
+describe('previewSnapshotRestore: a pg_dump schema layer', () => {
+  let tempDir: string
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'supaforge-restore-dump-'))
+  })
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true })
+  })
+
+  const manifest = (): SnapshotManifest => ({
+    version: 1,
+    timestamp: '20260929T120000Z',
+    environment: 'prod',
+    layers: {
+      schema: { captured: true, file: 'schema.json', itemCount: 1, sqlFile: 'schema.sql' },
+    },
+  })
+
+  async function preview(schemaSql: string) {
+    await writeFile(join(tempDir, 'manifest.json'), JSON.stringify(manifest()))
+    await writeFile(join(tempDir, 'schema.sql'), schemaSql)
+    const layers = await previewSnapshotRestore(tempDir)
+    return layers.find(l => l.layer === 'schema')?.statements ?? []
+  }
+
+  it('keeps a dollar-quoted routine body in one piece', async () => {
+    const statements = await preview(`--
+-- Name: touch_seen(); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.touch_seen() RETURNS trigger
+    LANGUAGE plpgsql
+    AS $$
+BEGIN
+    NEW.seen_at := now();
+    RETURN NEW;
+END;
+$$;
+`)
+
+    // Split on ";" this arrived as three fragments: the header plus `AS $$
+    // BEGIN NEW.seen_at := now()`, then `RETURN NEW`, then `END; $$`. None
+    // parses, and every trigger executing the function failed after it.
+    expect(statements).toHaveLength(1)
+    expect(statements[0]).toContain('RETURN NEW;')
+    expect(statements[0]).toContain('$$')
+  })
+
+  it('drops the psql wrappers pg_dump 16+ emits', async () => {
+    const statements = await preview(`\\restrict aBcDeF
+
+CREATE TABLE public.t (id integer);
+
+\\unrestrict aBcDeF;
+`)
+
+    expect(statements).toHaveLength(1)
+    expect(statements[0]).toContain('CREATE TABLE public.t')
+    expect(statements.some(s => s.includes('restrict'))).toBe(false)
+  })
+
+  it('makes CREATE SCHEMA conditional', async () => {
+    const statements = await preview(`--
+-- Name: public; Type: SCHEMA; Schema: -; Owner: -
+--
+
+CREATE SCHEMA public;
+`)
+
+    // Every database already has `public`, and a dump scoped to it recreates
+    // it — so an otherwise clean restore failed on its first statement.
+    expect(statements).toHaveLength(1)
+    expect(statements[0]).toMatch(/CREATE SCHEMA IF NOT EXISTS public/i)
+  })
+
+  it('leaves a CREATE SCHEMA that is already conditional alone', async () => {
+    const statements = await preview('CREATE SCHEMA IF NOT EXISTS reporting;\n')
+
+    expect(statements[0]).toMatch(/CREATE SCHEMA IF NOT EXISTS reporting/i)
+    expect(statements[0]).not.toMatch(/IF NOT EXISTS\s+IF NOT EXISTS/i)
+  })
+
+  it('does not rewrite the words appearing inside a body', async () => {
+    const statements = await preview(
+      `CREATE FUNCTION f() RETURNS void AS $$ BEGIN EXECUTE 'CREATE SCHEMA x'; END; $$;\n`,
+    )
+
+    expect(statements).toHaveLength(1)
+    expect(statements[0]).toContain("EXECUTE 'CREATE SCHEMA x'")
+    expect(statements[0]).not.toContain('IF NOT EXISTS')
+  })
+
+  it('discards comment-only blocks', async () => {
+    const statements = await preview(`--
+-- PostgreSQL database dump
+--
+
+--
+-- Name: t; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.t (id integer);
+`)
+
+    expect(statements).toHaveLength(1)
+  })
+})
+
+describe('summarizeStatement', () => {
+  it('names the statement, not the blank line above it', async () => {
+    const { summarizeStatement } = await import('../src/restore.js')
+
+    // pg_dump writes `-- header\n-- 2 extensions\n\nCREATE EXTENSION …`.
+    // Skipping only comment lines picked the empty line, so restore reported
+    // `✓ [sql]` with nothing after it — and an error as `✗ [sql] :` with no
+    // indication of which statement failed (issue #80).
+    expect(summarizeStatement('-- header\n-- 2 extensions\n\nCREATE EXTENSION x;'))
+      .toBe('CREATE EXTENSION x;')
+  })
+
+  it('truncates something long', async () => {
+    const { summarizeStatement } = await import('../src/restore.js')
+    const summary = summarizeStatement(`SELECT ${'a'.repeat(200)}`)
+
+    expect(summary.length).toBe(80)
+    expect(summary.endsWith('...')).toBe(true)
+  })
+
+  it('falls back to the whole statement when there is nothing else', async () => {
+    const { summarizeStatement } = await import('../src/restore.js')
+    expect(summarizeStatement('-- only a comment')).toBe('-- only a comment')
+  })
+})

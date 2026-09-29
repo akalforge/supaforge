@@ -1,5 +1,7 @@
 import { mkdir, writeFile, readFile, readdir, rm } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
+import { execFile as execFileCb } from 'node:child_process'
+import { promisify } from 'node:util'
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
 import { quoteIdent } from './utils/sql'
@@ -7,9 +9,13 @@ import { normalizeRoles } from './utils/strings'
 import type { EnvironmentConfig, SupaForgeConfig, SnapshotManifest, SnapshotLayerInfo } from './types/config'
 import { DEFAULT_IGNORE_SCHEMAS, RELATION_NOT_FOUND } from './defaults'
 import { introspectSchema } from './schema-introspect'
+import type { SchemaSnapshot } from './schema-introspect'
+import { getServerMajorVersion, resolvePgDumpPath } from './pg-tools'
 import { errMsg } from './utils/error'
 import { ok, warn, dim } from './ui'
 import { SUPABASE_MGMT_API, SUPAFORGE_DIR, SNAPSHOTS_SUBDIR } from './constants'
+
+const execFile = promisify(execFileCb)
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
@@ -142,9 +148,78 @@ async function captureSchema(
   try {
     const schema = await introspectSchema(dbUrl, ignoreSchemas)
     await writeFile(join(dir, file), JSON.stringify(schema, null, 2) + '\n')
-    return { captured: true, file, itemCount: schema.tables.length }
+
+    return {
+      captured: true,
+      file,
+      itemCount: schema.tables.length,
+      ...await captureSchemaSql(dir, dbUrl, schema),
+    }
   } catch (err) {
     return { captured: false, file, itemCount: 0, error: errMsg(err) }
+  }
+}
+
+/** The schemas this snapshot describes, across every object kind it holds. */
+function schemasIn(schema: SchemaSnapshot): string[] {
+  const names = new Set<string>()
+  for (const group of [
+    schema.tables, schema.views, schema.functions,
+    schema.triggers, schema.sequences, schema.enums,
+  ]) {
+    for (const item of group as Array<{ schema?: string }>) {
+      if (item.schema) names.add(item.schema)
+    }
+  }
+  return names.size > 0 ? [...names].sort() : ['public']
+}
+
+/**
+ * The same schema again, as DDL `restore` can replay.
+ *
+ * `schema.json` above is introspection output: the right shape for diffing two
+ * snapshots, and not executable. `restore` looked for a `schema.sql` that
+ * nothing ever wrote, reported the layer as skipped with "File not readable",
+ * and carried on — so restoring a snapshot into an empty database produced no
+ * tables at all, and the only error was the RLS layer failing against tables
+ * that were never created (issue #80).
+ *
+ * pg_dump writes it, scoped to the schemas the snapshot describes so the two
+ * files agree about what is covered. A snapshot is still captured when pg_dump
+ * is missing or too old — the JSON is what the diffing path needs, and losing
+ * the whole snapshot over a missing client would be the worse trade. The reason
+ * is recorded instead, so `restore` can say why rather than guessing.
+ */
+async function captureSchemaSql(
+  dir: string,
+  dbUrl: string,
+  schema: SchemaSnapshot,
+): Promise<Pick<SnapshotLayerInfo, 'sqlFile' | 'sqlSkipReason'>> {
+  const sqlFile = 'schema.sql'
+  try {
+    const serverMajor = await getServerMajorVersion(dbUrl)
+    const resolved = await resolvePgDumpPath(serverMajor)
+    if (!resolved) {
+      return {
+        sqlSkipReason:
+          `no pg_dump new enough for this server (needs ${serverMajor} or later) — `
+          + 'schema.json was still captured, but restore cannot replay the schema',
+      }
+    }
+
+    const { stdout } = await execFile(resolved.path, [
+      dbUrl, '--schema-only', '--no-owner', '--no-privileges',
+      ...schemasIn(schema).map(s => `--schema=${s}`),
+    ], { maxBuffer: 256 * 1024 * 1024, timeout: 300_000 })
+
+    if (stdout.trim().length === 0) {
+      return { sqlSkipReason: 'pg_dump produced an empty schema dump' }
+    }
+
+    await writeFile(join(dir, sqlFile), stdout)
+    return { sqlFile }
+  } catch (err) {
+    return { sqlSkipReason: errMsg(err) }
   }
 }
 
@@ -519,6 +594,11 @@ interface RlsRow {
 function generateCreatePolicySql(p: RlsRow): string {
   const roles = normalizeRoles(p.roles).join(', ')
   const lines = [
+    // Dropped first so a snapshot can be restored twice. Without it a second
+    // restore fails with `policy "…" already exists` and the layers after it
+    // never run (issue #80). The RLS check's own fix SQL already pairs the two
+    // this way.
+    `DROP POLICY IF EXISTS "${p.policyname}" ON "${p.schemaname}"."${p.tablename}";`,
     `CREATE POLICY "${p.policyname}"`,
     `  ON "${p.schemaname}"."${p.tablename}"`,
     `  AS ${p.permissive}`,
@@ -544,6 +624,8 @@ interface StoragePolicyRow {
 function generateStorageCreatePolicySql(p: StoragePolicyRow): string {
   const roles = normalizeRoles(p.roles).join(', ')
   const lines = [
+    // Re-runnable, as above.
+    `DROP POLICY IF EXISTS "${p.policyname}" ON "storage"."${p.tablename}";`,
     `CREATE POLICY "${p.policyname}"`,
     `  ON "storage"."${p.tablename}"`,
     `  AS ${p.permissive}`,

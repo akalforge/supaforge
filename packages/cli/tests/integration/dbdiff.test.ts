@@ -109,11 +109,18 @@ describe('integration: runDbDiff schema', () => {
     expect(missingMood).toBeDefined()
     expect(missingMood!.id).toContain('create-type')
 
-    // post_status is recreated via DROP + CREATE → drop-type or create-type
+    // post_status is recreated via DROP + CREATE, which is one modified type
+    // rather than an extra one and a missing one (issue #81). Reported as two
+    // issues it was also ordered as two, and the CREATE ran before the DROP it
+    // replaced — `type "post_status" already exists`.
     const postStatusIssues = issues.filter(i => i.title.includes('post_status'))
-    expect(postStatusIssues.length).toBeGreaterThanOrEqual(1)
-    const types = postStatusIssues.map(i => i.id)
-    expect(types.some(id => id.includes('drop-type') || id.includes('create-type'))).toBe(true)
+    expect(postStatusIssues).toHaveLength(1)
+    expect(postStatusIssues[0].id).toContain('alter-type')
+    expect(postStatusIssues[0].title).toContain('Type modified')
+
+    // Drop before create, in the one statement.
+    const up = postStatusIssues[0].sql?.up ?? ''
+    expect(up.indexOf('DROP TYPE')).toBeLessThan(up.indexOf('CREATE TYPE'))
   })
 
   it.skipIf(skipIfNoContainers())('handles identical schemas with empty output', async () => {

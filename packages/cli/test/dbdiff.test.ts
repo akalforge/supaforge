@@ -13,7 +13,7 @@ import {
   extractRoutineArgs,
   routineLabel,
   extractRoutineName,
-  mergeRoutineReplacements,
+  mergeReplacements,
   parseDbDiffProgress,
   extractQualifiedName,
 } from '../src/dbdiff.js'
@@ -699,44 +699,44 @@ describe('routine titles name the routine (issue #35)', () => {
   })
 })
 
-describe('mergeRoutineReplacements (issue #35)', () => {
+describe('mergeReplacements (issue #35)', () => {
   const DROP = 'DROP FUNCTION IF EXISTS "example_fn";'
   const CREATE = 'CREATE OR REPLACE FUNCTION public.example_fn() RETURNS integer AS $$ SELECT 2 $$;'
 
   it('collapses a DROP + CREATE pair for the same routine into one entry', () => {
-    const merged = mergeRoutineReplacements([DROP, CREATE], ['', ''])
+    const merged = mergeReplacements([DROP, CREATE], ['', ''])
     expect(merged).toHaveLength(1)
-    expect(merged[0].modifiedRoutine).toBe('public.example_fn')
+    expect(merged[0].modified?.name).toBe('public.example_fn')
     expect(merged[0].up).toContain('DROP FUNCTION')
     expect(merged[0].up).toContain('CREATE OR REPLACE FUNCTION')
   })
 
   it('leaves an unpaired DROP alone — that is a genuine extra function', () => {
-    const merged = mergeRoutineReplacements([DROP], [''])
+    const merged = mergeReplacements([DROP], [''])
     expect(merged).toHaveLength(1)
-    expect(merged[0].modifiedRoutine).toBeUndefined()
+    expect(merged[0].modified).toBeUndefined()
   })
 
   it('leaves an unpaired CREATE alone — that is a genuine missing function', () => {
-    const merged = mergeRoutineReplacements([CREATE], [''])
+    const merged = mergeReplacements([CREATE], [''])
     expect(merged).toHaveLength(1)
-    expect(merged[0].modifiedRoutine).toBeUndefined()
+    expect(merged[0].modified).toBeUndefined()
   })
 
   it('does not pair a DROP with a CREATE for a different routine', () => {
     const other = 'CREATE OR REPLACE FUNCTION public.other_fn() RETURNS void AS $$ SELECT $$;'
-    const merged = mergeRoutineReplacements([DROP, other], ['', ''])
+    const merged = mergeReplacements([DROP, other], ['', ''])
     expect(merged).toHaveLength(2)
-    expect(merged.every(m => m.modifiedRoutine === undefined)).toBe(true)
+    expect(merged.every((m) => m.modified === undefined)).toBe(true)
   })
 
   it('leaves non-routine statements untouched', () => {
     const stmts = ['ALTER TABLE "t" ADD COLUMN "c" text;', 'DROP TABLE "old";']
-    expect(mergeRoutineReplacements(stmts, ['', ''])).toHaveLength(2)
+    expect(mergeReplacements(stmts, ['', ''])).toHaveLength(2)
   })
 })
 
-describe('mergeRoutineReplacements with overloaded routines (@dbdiff/cli 3.0.0-rc.7)', () => {
+describe('mergeReplacements with overloaded routines (@dbdiff/cli 3.0.0-rc.7)', () => {
   // Verbatim from `dbdiff --driver=pgsql` 3.0.0-rc.7 against two PostgreSQL 16
   // databases whose three `dist` overloads all differ. Before rc.7 the adapter
   // never saw this: dbdiff collapsed overloads onto one name and emitted a
@@ -752,13 +752,13 @@ describe('mergeRoutineReplacements with overloaded routines (@dbdiff/cli 3.0.0-r
   const down = up.map(() => '')
 
   it('reports one modified-routine entry per overload, not five entries', () => {
-    const merged = mergeRoutineReplacements(up, down)
+    const merged = mergeReplacements(up, down)
     expect(merged).toHaveLength(3)
-    expect(merged.every(m => m.modifiedRoutine !== undefined)).toBe(true)
+    expect(merged.every((m) => m.modified !== undefined)).toBe(true)
   })
 
   it('pairs each DROP with its own CREATE, not with the last one', () => {
-    const merged = mergeRoutineReplacements(up, down)
+    const merged = mergeReplacements(up, down)
 
     // The failure this guards against attached the text body to the bigint
     // drop, so the applied migration removed two overloads permanently.
@@ -774,14 +774,14 @@ describe('mergeRoutineReplacements with overloaded routines (@dbdiff/cli 3.0.0-r
   })
 
   it('consumes each CREATE once so none is duplicated across entries', () => {
-    const merged = mergeRoutineReplacements(up, down)
-    const bodies = merged.map(m => /SELECT a [*|-]+ b;/.exec(m.up)?.[0])
+    const merged = mergeReplacements(up, down)
+    const bodies = merged.map((m) => /SELECT a [*|-]+ b;/.exec(m.up)?.[0])
     expect(new Set(bodies).size).toBe(3)
   })
 
   it('distinguishes the overloads by argument signature in the title', () => {
-    const merged = mergeRoutineReplacements(up, down)
-    expect(merged.map(m => m.modifiedRoutine)).toEqual([
+    const merged = mergeReplacements(up, down)
+    expect(merged.map((m) => m.modified?.name)).toEqual([
       'public.dist(bigint,bigint)',
       'public.dist(integer,integer)',
       'public.dist(text,text)',
@@ -789,7 +789,7 @@ describe('mergeRoutineReplacements with overloaded routines (@dbdiff/cli 3.0.0-r
   })
 
   it('still merges a bare DROP with no argument list (MySQL, pre-rc.7)', () => {
-    const merged = mergeRoutineReplacements(
+    const merged = mergeReplacements(
       [
         'DROP FUNCTION IF EXISTS "example_fn";',
         'CREATE OR REPLACE FUNCTION public.example_fn() RETURNS integer AS $$ SELECT 2 $$;',
@@ -797,11 +797,11 @@ describe('mergeRoutineReplacements with overloaded routines (@dbdiff/cli 3.0.0-r
       ['', ''],
     )
     expect(merged).toHaveLength(1)
-    expect(merged[0].modifiedRoutine).toBe('public.example_fn')
+    expect(merged[0].modified?.name).toBe('public.example_fn')
   })
 
   it('keeps an overload unpaired when only its DROP is present', () => {
-    const merged = mergeRoutineReplacements(
+    const merged = mergeReplacements(
       [
         'DROP FUNCTION IF EXISTS "dist"(bigint,bigint);',
         'DROP FUNCTION IF EXISTS "dist"(text,text);',
@@ -810,8 +810,8 @@ describe('mergeRoutineReplacements with overloaded routines (@dbdiff/cli 3.0.0-r
       ['', '', ''],
     )
     expect(merged).toHaveLength(2)
-    expect(merged[0].modifiedRoutine).toBeUndefined()
-    expect(merged[1].modifiedRoutine).toBe('public.dist(text,text)')
+    expect(merged[0].modified).toBeUndefined()
+    expect(merged[1].modified?.name).toBe('public.dist(text,text)')
   })
 })
 
@@ -1153,5 +1153,108 @@ describe('extractQualifiedName', () => {
   it('returns "unknown" when the keyword is absent or nothing follows it', () => {
     expect(extractQualifiedName('SELECT 1;', /\bTABLE\s+/i)).toBe('unknown')
     expect(extractQualifiedName('ALTER TABLE ', /\bTABLE\s+/i)).toBe('unknown')
+  })
+})
+
+/**
+ * Replacing an object that is not a routine (issue #81).
+ *
+ * dbdiff replaces a changed enum by emitting `DROP TYPE` + `CREATE TYPE`, the
+ * same shape it uses for a changed function. Left as two independent issues
+ * they were phased apart by `orderStatements` — drops last, creates early — so
+ * the CREATE ran before the DROP it was replacing and `--apply` failed with
+ * `type "order_state" already exists`, rolling the whole thing back.
+ */
+describe('mergeReplacements: types, domains and sequences', () => {
+  const DROP_TYPE = 'DROP TYPE IF EXISTS "order_state";'
+  const CREATE_TYPE = `CREATE TYPE "order_state" AS ENUM ('new', 'paid', 'shipped');`
+
+  it('collapses a DROP + CREATE pair for the same type into one entry', () => {
+    const merged = mergeReplacements([DROP_TYPE, CREATE_TYPE], ['', ''])
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0].modified).toEqual({ kind: 'type', name: 'order_state' })
+  })
+
+  it('keeps the drop before the create inside the merged statement', () => {
+    const merged = mergeReplacements([DROP_TYPE, CREATE_TYPE], ['', ''])
+    const up = merged[0].up
+
+    expect(up.indexOf('DROP TYPE')).toBeLessThan(up.indexOf('CREATE TYPE'))
+  })
+
+  it('pairs forward only, which is the order dbdiff emits', () => {
+    // A CREATE *before* the DROP is not merged. dbdiff renders a replaced
+    // object as drop-then-create, so pairing backwards would only ever be
+    // guessing — and the existing routine logic is deliberately conservative
+    // for the same reason: a wrong pairing writes a migration that drops one
+    // object and recreates a different one in its place.
+    const merged = mergeReplacements([CREATE_TYPE, DROP_TYPE], ['', ''])
+
+    expect(merged).toHaveLength(2)
+    expect(merged.every((m) => m.modified === undefined)).toBe(true)
+  })
+
+  it('leaves an unpaired CREATE TYPE alone — that is a genuinely new type', () => {
+    const merged = mergeReplacements([CREATE_TYPE], [''])
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0].modified).toBeUndefined()
+  })
+
+  it('leaves an unpaired DROP TYPE alone — that is a genuinely extra type', () => {
+    const merged = mergeReplacements([DROP_TYPE], [''])
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0].modified).toBeUndefined()
+  })
+
+  it('does not pair a type with a differently named one', () => {
+    const other = `CREATE TYPE "shipping_state" AS ENUM ('pending');`
+    const merged = mergeReplacements([DROP_TYPE, other], ['', ''])
+
+    expect(merged).toHaveLength(2)
+    expect(merged.every((m) => m.modified === undefined)).toBe(true)
+  })
+
+  it('does not pair a type with a routine of the same name', () => {
+    // Keyed by kind as well as name, so these are two separate objects.
+    const merged = mergeReplacements(
+      ['DROP TYPE IF EXISTS "thing";', 'CREATE OR REPLACE FUNCTION public.thing() RETURNS void AS $$ SELECT $$;'],
+      ['', ''],
+    )
+
+    expect(merged).toHaveLength(2)
+    expect(merged.every((m) => m.modified === undefined)).toBe(true)
+  })
+
+  it('collapses a domain replacement', () => {
+    const merged = mergeReplacements(
+      ['DROP DOMAIN IF EXISTS "positive_int";', 'CREATE DOMAIN "positive_int" AS integer CHECK (VALUE > 0);'],
+      ['', ''],
+    )
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0].modified).toEqual({ kind: 'type', name: 'positive_int' })
+  })
+
+  it('collapses a sequence replacement', () => {
+    const merged = mergeReplacements(
+      ['DROP SEQUENCE IF EXISTS "counter";', 'CREATE SEQUENCE "counter" START 42;'],
+      ['', ''],
+    )
+
+    expect(merged).toHaveLength(1)
+    expect(merged[0].modified).toEqual({ kind: 'sequence', name: 'counter' })
+  })
+
+  it('keeps the DOWN statements of both halves', () => {
+    const merged = mergeReplacements(
+      [DROP_TYPE, CREATE_TYPE],
+      ['DROP TYPE IF EXISTS "order_state";', `CREATE TYPE "order_state" AS ENUM ('new', 'paid', 'shipped', 'refunded');`],
+    )
+
+    expect(merged[0].down).toContain('refunded')
+    expect(merged[0].down).toContain('DROP TYPE')
   })
 })

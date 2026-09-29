@@ -570,3 +570,128 @@ describe('promote --only', () => {
     expect(result.applied).toHaveLength(4)
   })
 })
+
+/**
+ * The same collision as policies, one layer along (issue #77).
+ *
+ * The schema check's SQL creates webhook triggers, and the webhooks check now
+ * emits the server's own `pg_get_triggerdef()` for the same trigger. Applied
+ * together the second failed with `trigger ... already exists`, and because the
+ * apply is transactional that one collision discarded every other fix: the
+ * reported symptom was a full `diff --apply` rolling back six correct schema
+ * fixes.
+ */
+describe('planWork trigger de-duplication', () => {
+  function withSchemaAndWebhookTrigger(): ScanResult {
+    return makeScanResult({
+      checks: [
+        {
+          check: 'schema', status: 'drifted', issues: [{
+            id: 'schema-create-trigger-1', severity: 'warning',
+            title: 'Trigger missing: public.orders_webhook',
+            sql: {
+              up: 'CREATE TRIGGER "orders_webhook" AFTER INSERT ON "public"."orders" '
+                + "FOR EACH ROW EXECUTE FUNCTION supabase_functions.http_request('https://e.invalid/o');",
+            },
+          }],
+        },
+        {
+          check: 'webhooks', status: 'drifted', issues: [{
+            id: 'webhooks-missing-public.orders.orders_webhook', severity: 'warning',
+            title: 'Missing webhook: orders_webhook on public.orders',
+            sql: {
+              up: 'CREATE TRIGGER orders_webhook AFTER INSERT ON public.orders '
+                + "FOR EACH ROW EXECUTE FUNCTION supabase_functions.http_request('https://e.invalid/o');",
+            },
+          }],
+        },
+      ],
+    } as Partial<ScanResult>)
+  }
+
+  it('keeps one statement for the trigger, not two', () => {
+    const plan = planWork(withSchemaAndWebhookTrigger())
+    const ids = plan.sqlStatements.map(s => s.issueId)
+
+    expect(ids).toContain('schema-create-trigger-1')
+    expect(ids).not.toContain('webhooks-missing-public.orders.orders_webhook')
+  })
+
+  it('says which fix already did it', () => {
+    const plan = planWork(withSchemaAndWebhookTrigger())
+    const skipped = plan.skipped.find(s => s.check === 'webhooks')
+
+    expect(skipped?.reason).toMatch(/already created/i)
+    expect(skipped?.reason).toMatch(/trigger/i)
+  })
+
+  it('keeps both when they are different triggers on different tables', () => {
+    // Two webhooks may share a trigger name, which is why the table is part of
+    // the key. Dropping the second as a duplicate would lose a webhook.
+    const plan = planWork(makeScanResult({
+      checks: [{
+        check: 'webhooks', status: 'drifted', issues: [
+          {
+            id: 'webhooks-missing-public.a_items.notify_webhook', severity: 'warning',
+            title: 'a', sql: { up: 'CREATE TRIGGER notify_webhook AFTER INSERT ON public.a_items FOR EACH ROW EXECUTE FUNCTION f();' },
+          },
+          {
+            id: 'webhooks-missing-public.b_items.notify_webhook', severity: 'warning',
+            title: 'b', sql: { up: 'CREATE TRIGGER notify_webhook AFTER INSERT ON public.b_items FOR EACH ROW EXECUTE FUNCTION f();' },
+          },
+        ],
+      }],
+    } as Partial<ScanResult>))
+
+    expect(plan.sqlStatements).toHaveLength(2)
+  })
+
+  it('never drops a statement that also creates the function the trigger calls', () => {
+    const plan = planWork(makeScanResult({
+      checks: [
+        {
+          check: 'webhooks', status: 'drifted', issues: [{
+            id: 'webhooks-missing-public.orders.t', severity: 'warning', title: 'w',
+            sql: { up: 'CREATE TRIGGER t AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION touch();' },
+          }],
+        },
+        {
+          check: 'schema', status: 'drifted', issues: [{
+            id: 'schema-create-function-2', severity: 'warning', title: 's',
+            sql: {
+              up: 'CREATE OR REPLACE FUNCTION touch() RETURNS trigger AS $$ BEGIN RETURN NEW; END $$ LANGUAGE plpgsql;\n'
+                + 'CREATE TRIGGER t AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION touch();',
+            },
+          }],
+        },
+      ],
+    } as Partial<ScanResult>))
+
+    // Whichever runs second, the bundled one survives: losing it would lose the
+    // function.
+    expect(plan.sqlStatements.map(s => s.issueId)).toContain('schema-create-function-2')
+  })
+
+  it('still de-duplicates policies, which share the mechanism', () => {
+    // Guard for issue #67 after generalising that fix to two kinds of object.
+    const plan = planWork(makeScanResult({
+      checks: [
+        {
+          check: 'schema', status: 'drifted', issues: [{
+            id: 'schema-create-policy-1', severity: 'warning', title: 's',
+            sql: { up: 'CREATE POLICY "read_own" ON "invoices" FOR SELECT USING (true);' },
+          }],
+        },
+        {
+          check: 'rls', status: 'drifted', issues: [{
+            id: 'rls-missing-public.invoices.read_own', severity: 'critical', title: 'r',
+            sql: { up: 'CREATE POLICY "read_own" ON "public"."invoices" FOR SELECT USING (true);' },
+          }],
+        },
+      ],
+    } as Partial<ScanResult>))
+
+    expect(plan.sqlStatements.map(s => s.issueId)).toContain('schema-create-policy-1')
+    expect(plan.skipped.find(s => s.check === 'rls')?.reason).toMatch(/policy/i)
+  })
+})

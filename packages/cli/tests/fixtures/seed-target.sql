@@ -158,6 +158,34 @@ INSERT INTO supabase_functions.hooks (hook_table_id, hook_name) VALUES
     (2, 'on_post_published'),
     (4, 'on_invoice_sent');
 
+-- Supabase's own webhook trigger function. A stub here: the check identifies a
+-- webhook by the trigger calling supabase_functions.http_request, and never
+-- needs it to run.
+CREATE OR REPLACE FUNCTION supabase_functions.http_request()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN NEW;
+END;
+$$;
+
+-- Webhooks are triggers, and their configuration — URL, method, headers,
+-- params, timeout — lives in the trigger's arguments. The check used to read
+-- the hooks table above, which is the log of invocations and carries none of
+-- that (issue #77). The log rows are kept deliberately: they must not affect
+-- the result.
+CREATE TRIGGER on_user_created AFTER INSERT ON public.users FOR EACH ROW
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/users', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
+CREATE TRIGGER on_post_published AFTER INSERT ON public.posts FOR EACH ROW
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/v1/posts', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
+CREATE TRIGGER on_invoice_sent AFTER INSERT ON public.plans FOR EACH ROW
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/invoices', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
+CREATE TRIGGER on_row_touched AFTER UPDATE ON public.users FOR EACH ROW
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/touch/users', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
+
 -- === Storage (DRIFTED) ===
 CREATE SCHEMA storage;
 CREATE TABLE storage.objects (

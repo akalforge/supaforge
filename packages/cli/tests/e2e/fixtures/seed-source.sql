@@ -57,15 +57,18 @@ END $$;
 
 DO $$
 BEGIN
-  DROP TRIGGER IF EXISTS on_user_created    ON public.users;
+  DROP TRIGGER IF EXISTS on_user_created     ON public.users;
+  DROP TRIGGER IF EXISTS on_profile_updated  ON public.users;
   DROP TRIGGER IF EXISTS on_payment_received ON public.payments;
+  DROP TRIGGER IF EXISTS on_order_shipped    ON public.payments;
 EXCEPTION WHEN undefined_table THEN NULL;
 END $$;
 
 DO $$
 BEGIN
   DELETE FROM supabase_functions.hooks
-    WHERE hook_name IN ('on_user_created', 'on_payment_received');
+    WHERE hook_name IN ('on_user_created', 'on_payment_received',
+                        'on_order_shipped', 'on_legacy_deleted');
 EXCEPTION WHEN undefined_table THEN NULL;
 END $$;
 
@@ -122,27 +125,78 @@ CREATE TABLE IF NOT EXISTS supabase_functions.hooks (
     request_id      BIGINT
 );
 
--- Noop trigger function for webhook testing
-CREATE OR REPLACE FUNCTION supabase_functions.webhook_dispatch()
-RETURNS TRIGGER AS $$
+-- Supabase's own webhook function, which a real stack already has as a C
+-- function. The name matters: a database webhook *is* a trigger calling
+-- supabase_functions.http_request, and that is how the check identifies one
+-- (issue #77). The arguments the triggers pass below are the webhook's
+-- configuration.
+--
+-- Created only when absent, so a real stack keeps its own. Replacing it is
+-- what the old fix did as a side effect of syncing a webhook, and is exactly
+-- what must not happen.
+DO $do$
 BEGIN
-    RETURN COALESCE(NEW, OLD);
-END;
-$$ LANGUAGE plpgsql;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'supabase_functions'
+          AND p.proname = 'http_request'
+    ) THEN
+        EXECUTE $fn$
+            CREATE FUNCTION supabase_functions.http_request()
+            RETURNS TRIGGER AS $body$
+            BEGIN
+                RETURN COALESCE(NEW, OLD);
+            END;
+            $body$ LANGUAGE plpgsql
+        $fn$;
+    END IF;
+END
+$do$;
 
 -- on_user_created webhook
 INSERT INTO supabase_functions.hooks (hook_table_id, hook_name) VALUES (1, 'on_user_created');
 CREATE TRIGGER on_user_created
     AFTER INSERT ON public.users
     FOR EACH ROW
-    EXECUTE FUNCTION supabase_functions.webhook_dispatch();
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/users', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
 
 -- on_payment_received webhook
 INSERT INTO supabase_functions.hooks (hook_table_id, hook_name) VALUES (3, 'on_payment_received');
 CREATE TRIGGER on_payment_received
     AFTER INSERT ON public.payments
     FOR EACH ROW
-    EXECUTE FUNCTION supabase_functions.webhook_dispatch();
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/payments', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
+
+-- The three cases that separate reading the triggers from reading the log
+-- (issue #77). Each was silently wrong before, and none is visible to a check
+-- that derives webhooks from supabase_functions.hooks.
+
+-- 1. A webhook that has never fired: no log rows at all, so it was invisible.
+--    Deliberately no INSERT into supabase_functions.hooks here.
+CREATE TRIGGER on_profile_updated
+    AFTER UPDATE ON public.users
+    FOR EACH ROW
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/profiles', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
+
+-- 2. A webhook that was deleted: its log rows outlive it, so it was reported
+--    as missing from the target and offered with no usable fix. Log row only,
+--    deliberately no trigger.
+INSERT INTO supabase_functions.hooks (hook_table_id, hook_name) VALUES (9, 'on_legacy_deleted');
+
+-- 3. A webhook repointed at a different URL. Same name, same table, same
+--    events as the target's — only the arguments differ, which the log does
+--    not carry, so the two were called identical.
+INSERT INTO supabase_functions.hooks (hook_table_id, hook_name) VALUES (5, 'on_order_shipped');
+CREATE TRIGGER on_order_shipped
+    AFTER INSERT ON public.payments
+    FOR EACH ROW
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/orders/v2', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
 
 -- === Storage Policies ===
 -- storage.objects table exists in real Supabase

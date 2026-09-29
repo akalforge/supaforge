@@ -63,6 +63,24 @@ export function resolveExcludedChecks(config: SupaForgeConfig): CheckName[] {
  * run. Collapsing the second into the first is what made a layer that never
  * opened a connection render as a green pass (issue #42).
  */
+/**
+ * How many checks may run at once.
+ *
+ * Four by default: enough to hide the latency of the light checks behind each
+ * other, few enough that two dbdiff subprocesses and a connection pool per
+ * database stay reasonable. `SUPAFORGE_CHECK_CONCURRENCY=1` restores the old
+ * one-at-a-time behaviour, which is also the way to get strictly ordered
+ * progress output.
+ */
+function checkConcurrency(): number {
+  const raw = process.env.SUPAFORGE_CHECK_CONCURRENCY
+  if (raw) {
+    const n = Number(raw)
+    if (Number.isInteger(n) && n > 0) return n
+  }
+  return 4
+}
+
 async function runCheck(
   check: Check,
   ctx: CheckContext,
@@ -112,46 +130,67 @@ export async function scan(
 
   await bus?.emit('supaforge.scan.before', ctx)
 
-  const results: CheckResult[] = []
+  // Independent checks, run a few at a time rather than one after another.
+  //
+  // They share nothing and each is mostly waiting on a database, so the run was
+  // paying the sum of their latencies for no reason: the 13 non-schema checks
+  // took about 9 s of a 48 s diff over a 100 ms link (issue #78). The limit is
+  // deliberate rather than unbounded — the schema and data checks each spawn
+  // @dbdiff/cli, and a Supabase pooler counts every connection.
+  //
+  // Results are collected by position, so the report stays in check order
+  // however they finish. Progress events fire as each one does, which is the
+  // honest thing to show for concurrent work.
+  const results: CheckResult[] = new Array(checksToScan.length)
+  const total = checksToScan.length
+  let next = 0
 
-  for (let i = 0; i < checksToScan.length; i++) {
-    const name = checksToScan[i]
-    const check = registry.get(name)
-    const total = checksToScan.length
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++
+      if (i >= total) return
 
-    options.onProgress?.({ phase: 'check:start', check: name, index: i, total })
+      const name = checksToScan[i]
+      const check = registry.get(name)
 
-    // Sub-check progress (e.g. the schema diff's table counter) is reported
-    // through the same channel, tagged with the owning check.
-    const checkCtx = {
-      ...ctx,
-      onDetail: options.onDetail ? (detail: string) => options.onDetail?.(name, detail) : undefined,
+      options.onProgress?.({ phase: 'check:start', check: name, index: i, total })
+
+      // Sub-check progress (e.g. the schema diff's table counter) is reported
+      // through the same channel, tagged with the owning check.
+      const checkCtx = {
+        ...ctx,
+        onDetail: options.onDetail ? (detail: string) => options.onDetail?.(name, detail) : undefined,
+      }
+
+      if (!check) {
+        const skipReason = 'not registered'
+        results[i] = { check: name, status: 'skipped', issues: [], skipReason, durationMs: 0 }
+        options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'skipped', issueCount: 0, durationMs: 0, skipReason })
+        continue
+      }
+
+      await bus?.emit('supaforge.check.before', { check: name })
+
+      const result = await runCheck(check, checkCtx, name, source.dbUrl)
+      results[i] = result
+      options.onProgress?.({
+        phase: 'check:done',
+        check: name,
+        index: i,
+        total,
+        status: result.status,
+        issueCount: result.issues.length,
+        durationMs: result.durationMs,
+        ...(result.skipReason ? { skipReason: result.skipReason } : {}),
+      })
+
+      await bus?.emit('supaforge.check.after', { check: name, result })
     }
-
-    if (!check) {
-      const skipReason = 'not registered'
-      results.push({ check: name, status: 'skipped', issues: [], skipReason, durationMs: 0 })
-      options.onProgress?.({ phase: 'check:done', check: name, index: i, total, status: 'skipped', issueCount: 0, durationMs: 0, skipReason })
-      continue
-    }
-
-    await bus?.emit('supaforge.check.before', { check: name })
-
-    const result = await runCheck(check, checkCtx, name, source.dbUrl)
-    results.push(result)
-    options.onProgress?.({
-      phase: 'check:done',
-      check: name,
-      index: i,
-      total,
-      status: result.status,
-      issueCount: result.issues.length,
-      durationMs: result.durationMs,
-      ...(result.skipReason ? { skipReason: result.skipReason } : {}),
-    })
-
-    await bus?.emit('supaforge.check.after', { check: name, result })
   }
+
+  await Promise.all(
+    Array.from({ length: Math.min(checkConcurrency(), total) }, () => worker()),
+  )
 
   const summary = summarize(results)
   const score = computeScore(results)

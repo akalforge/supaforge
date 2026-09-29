@@ -15,7 +15,7 @@ const SNAPSHOT_LAYERS = [
   'auth (config via Management API)',
   'cron (pg_cron jobs)',
   'data (reference tables from checks.data.tables)',
-  'webhooks (supabase_functions hooks)',
+  'webhooks (database webhook triggers)',
   'extensions (installed Postgres extensions)',
 ]
 

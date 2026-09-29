@@ -15,303 +15,243 @@ function mockContext(): CheckContext {
   }
 }
 
-const makeHook = (overrides: Record<string, unknown> = {}) => ({
-  id: 1,
-  hook_table_id: 100,
-  hook_name: 'on_user_created',
-  created_at: '2026-01-01T00:00:00Z',
-  request_id: null,
-  function_body: null,
-  events: null,
-  trigger_table: null,
-  ...overrides,
+/**
+ * A webhook as the catalog holds it: a trigger calling
+ * supabase_functions.http_request with the URL, method, headers, params and
+ * timeout as arguments.
+ *
+ * The check used to read `supabase_functions.hooks` — the log of webhook
+ * *invocations* — which is what issue #77 is about. These fixtures are the
+ * shape of the answer, one row per webhook however often it has fired.
+ */
+const hook = (
+  table: string,
+  name: string,
+  url = `https://example.invalid/${name}`,
+  events = 'AFTER INSERT',
+) => ({
+  table_name: table,
+  name,
+  definition:
+    `CREATE TRIGGER ${name} ${events} ON ${table} FOR EACH ROW `
+    + `EXECUTE FUNCTION supabase_functions.http_request(`
+    + `'${url}', 'POST', '{"Content-Type":"application/json"}', '{}', '5000')`,
 })
 
-/** Hook with full trigger metadata — enables SQL generation */
-const makeHookWithTrigger = (overrides: Record<string, unknown> = {}) => ({
-  ...makeHook(),
-  function_body: 'CREATE OR REPLACE FUNCTION supabase_functions.http_request() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END; $$',
-  events: 'INSERT',
-  trigger_table: 'public.users',
-  ...overrides,
-})
+/** Answer the webhook query per side; pg_net present on both. */
+function queryFor(source: unknown[], target: unknown[]): QueryFn {
+  return (async (dbUrl: string, sql: string) => {
+    if (sql.includes('pg_extension')) return [{ n: 1 }]
+    return dbUrl.includes('target') ? target : source
+  }) as unknown as QueryFn
+}
 
 describe('WebhooksCheck', () => {
-  it('returns no issues when hooks and extensions match', async () => {
-    const hook = makeHook()
-    const queryFn: QueryFn = async (_dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return [{ extname: 'pg_net' }]
-      return [hook]
-    }
+  it('reports nothing when both sides match', async () => {
+    const both = [hook('public.orders', 'orders_webhook')]
+    const issues = await new WebhooksCheck(queryFor(both, both)).scan(mockContext())
 
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
     expect(issues).toHaveLength(0)
   })
 
-  it('detects pg_net extension missing in target', async () => {
-    const queryFn: QueryFn = async (dbUrl, sql) => {
-      if (sql.includes('pg_extension')) {
-        return dbUrl.includes('source') ? [{ extname: 'pg_net' }] : []
-      }
+  it('reads one row per webhook, whatever the invocation log holds', async () => {
+    // The query must go to the trigger catalog. Reading the log made cost grow
+    // with invocations — 10,000 rows returned 21.9 MB for five webhooks, each
+    // row carrying its own copy of pg_get_functiondef(http_request).
+    let seen = ''
+    const queryFn = (async (_url: string, sql: string) => {
+      if (!sql.includes('pg_extension')) seen = sql
       return []
-    }
+    }) as unknown as QueryFn
 
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
+    await new WebhooksCheck(queryFn).scan(mockContext())
 
-    const pgNetIssue = issues.find(i => i.id === 'webhooks-pgnet-missing')
-    expect(pgNetIssue).toBeDefined()
-    expect(pgNetIssue!.severity).toBe('critical')
-    expect(pgNetIssue!.sql?.up).toContain('CREATE EXTENSION')
-    expect(pgNetIssue!.sql?.down).toContain('DROP EXTENSION')
+    expect(seen).toContain('pg_trigger')
+    expect(seen).toContain('pg_get_triggerdef')
+    expect(seen).not.toContain('supabase_functions.hooks')
+    expect(seen).not.toContain('pg_get_functiondef')
   })
 
-  it('detects missing webhook in target', async () => {
-    const queryFn: QueryFn = async (dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return []
-      if (dbUrl.includes('source')) return [makeHook()]
-      return []
-    }
+  // ── The symptoms of reading the log (issue #77) ───────────────────────────
 
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
+  it('sees a webhook that has never fired', async () => {
+    // It has no log rows, so it used to be invisible.
+    const issues = await new WebhooksCheck(
+      queryFor([hook('public.invoices', 'invoices_webhook')], []),
+    ).scan(mockContext())
 
     expect(issues).toHaveLength(1)
-    expect(issues[0].severity).toBe('warning')
-    expect(issues[0].id).toBe('webhooks-missing-on_user_created')
-    expect(issues[0].title).toContain('Missing webhook')
-    // No sync SQL without trigger metadata
-    expect(issues[0].sql).toBeUndefined()
+    expect(issues[0].title).toContain('invoices_webhook')
   })
 
-  it('detects extra webhook in target', async () => {
-    const queryFn: QueryFn = async (dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return []
-      if (dbUrl.includes('target')) return [makeHook({ hook_name: 'extra_hook' })]
-      return []
-    }
+  it('does not report a webhook that was deleted', async () => {
+    // Its log rows outlive it, so a deleted webhook was reported as missing
+    // from the target — and offered with no usable fix.
+    const issues = await new WebhooksCheck(queryFor([], [])).scan(mockContext())
 
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
+    expect(issues).toHaveLength(0)
+  })
+
+  it('keeps two webhooks that share a trigger name on different tables', async () => {
+    // Entries were keyed by name alone, so these collapsed into one and the
+    // other table's webhook was silently lost.
+    const issues = await new WebhooksCheck(
+      queryFor(
+        [hook('public.a_items', 'notify_webhook', 'https://example.invalid/a'),
+         hook('public.b_items', 'notify_webhook', 'https://example.invalid/b')],
+        [],
+      ),
+    ).scan(mockContext())
+
+    expect(issues).toHaveLength(2)
+    expect(issues.map(i => i.id).sort()).toEqual([
+      'webhooks-missing-public.a_items.notify_webhook',
+      'webhooks-missing-public.b_items.notify_webhook',
+    ])
+  })
+
+  it('notices a changed URL', async () => {
+    // "Modified" compared the events and the table only, so the whole of a
+    // webhook's configuration could change unreported.
+    const issues = await new WebhooksCheck(
+      queryFor(
+        [hook('public.customers', 'customers_webhook', 'https://example.invalid/v2/customers')],
+        [hook('public.customers', 'customers_webhook', 'https://example.invalid/v1/customers')],
+      ),
+    ).scan(mockContext())
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].title).toContain('Modified webhook')
+    expect(issues[0].sql?.up).toContain('v2/customers')
+  })
+
+  it('notices changed events', async () => {
+    const issues = await new WebhooksCheck(
+      queryFor(
+        [hook('public.orders', 'orders_webhook', 'https://e.invalid/o', 'AFTER INSERT OR UPDATE')],
+        [hook('public.orders', 'orders_webhook', 'https://e.invalid/o', 'AFTER INSERT')],
+      ),
+    ).scan(mockContext())
+
+    expect(issues).toHaveLength(1)
+    expect(issues[0].title).toContain('Modified webhook')
+  })
+
+  it('ignores whitespace when comparing', async () => {
+    const source = [hook('public.orders', 'orders_webhook')]
+    const target = [{
+      ...source[0],
+      definition: source[0].definition.replace(/ /g, '\n  '),
+    }]
+
+    const issues = await new WebhooksCheck(queryFor(source, target)).scan(mockContext())
+    expect(issues).toHaveLength(0)
+  })
+
+  // ── The fix it generates ──────────────────────────────────────────────────
+
+  it('applies the definition with its arguments', async () => {
+    // The old fix emitted `http_request()` with no arguments, after which every
+    // insert on the target failed with `url argument is missing`.
+    const issues = await new WebhooksCheck(
+      queryFor([hook('public.orders', 'orders_webhook')], []),
+    ).scan(mockContext())
+
+    const up = issues[0].sql?.up ?? ''
+    expect(up).toContain("'https://example.invalid/orders_webhook'")
+    expect(up).toContain("'POST'")
+    expect(up).toContain("'5000'")
+    expect(up).not.toMatch(/http_request\(\s*\)/)
+  })
+
+  it('does not touch Supabase\'s own http_request function', async () => {
+    // The old fix recreated it from the source project's copy as a side effect
+    // of syncing a webhook.
+    const issues = await new WebhooksCheck(
+      queryFor([hook('public.orders', 'orders_webhook')], []),
+    ).scan(mockContext())
+
+    expect(issues[0].sql?.up).not.toContain('CREATE OR REPLACE FUNCTION')
+    expect(issues[0].sql?.down).not.toContain('CREATE OR REPLACE FUNCTION')
+  })
+
+  it('ends every statement with a semicolon, exactly one', async () => {
+    const issues = await new WebhooksCheck(
+      queryFor([hook('public.orders', 'orders_webhook')], []),
+    ).scan(mockContext())
+
+    expect(issues[0].sql?.up.trimEnd().endsWith(';')).toBe(true)
+    expect(issues[0].sql?.up).not.toContain(';;')
+  })
+
+  it('reverses a missing webhook by dropping it', async () => {
+    const issues = await new WebhooksCheck(
+      queryFor([hook('public.orders', 'orders_webhook')], []),
+    ).scan(mockContext())
+
+    expect(issues[0].sql?.down).toBe('DROP TRIGGER IF EXISTS "orders_webhook" ON public.orders;')
+  })
+
+  it('offers a way back for an extra webhook', async () => {
+    // The old fix left `down` empty, calling the drop unrecoverable, although
+    // the target's own definition is the way back.
+    const issues = await new WebhooksCheck(
+      queryFor([], [hook('public.legacy', 'legacy_webhook')]),
+    ).scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('info')
-    expect(issues[0].id).toBe('webhooks-extra-extra_hook')
-    // No sync SQL without trigger metadata
-    expect(issues[0].sql).toBeUndefined()
+    expect(issues[0].sql?.up).toContain('DROP TRIGGER IF EXISTS "legacy_webhook"')
+    expect(issues[0].sql?.down).toContain('CREATE TRIGGER legacy_webhook')
   })
 
-  it('detects both pg_net missing and hook differences', async () => {
-    const queryFn: QueryFn = async (dbUrl, sql) => {
-      if (sql.includes('pg_extension')) {
-        return dbUrl.includes('source') ? [{ extname: 'pg_net' }] : []
-      }
-      if (dbUrl.includes('source')) return [makeHook()]
+  it('names the table in the issue, so two of one name are distinguishable', async () => {
+    const issues = await new WebhooksCheck(
+      queryFor([hook('public.a_items', 'notify_webhook')], []),
+    ).scan(mockContext())
+
+    expect(issues[0].title).toContain('public.a_items')
+    expect(issues[0].description).toContain('public.a_items')
+  })
+
+  // ── pg_net, unchanged ─────────────────────────────────────────────────────
+
+  it('detects pg_net missing in the target', async () => {
+    const queryFn = (async (dbUrl: string, sql: string) => {
+      if (sql.includes('pg_extension')) return dbUrl.includes('target') ? [] : [{ n: 1 }]
       return []
-    }
+    }) as unknown as QueryFn
 
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
+    const issues = await new WebhooksCheck(queryFn).scan(mockContext())
 
-    expect(issues).toHaveLength(2)
-    const ids = issues.map(i => i.id)
-    expect(ids).toContain('webhooks-pgnet-missing')
-    expect(ids).toContain('webhooks-missing-on_user_created')
+    expect(issues).toHaveLength(1)
+    expect(issues[0].id).toBe('webhooks-pgnet-missing')
+    expect(issues[0].severity).toBe('critical')
   })
 
-  it('handles supabase_functions.hooks not existing', async () => {
-    const queryFn: QueryFn = async (_dbUrl, sql) => {
+  it('reports no pg_net issue when both sides have it', async () => {
+    const issues = await new WebhooksCheck(queryFor([], [])).scan(mockContext())
+    expect(issues.filter(i => i.id === 'webhooks-pgnet-missing')).toHaveLength(0)
+  })
+
+  it('survives a database with no supabase_functions schema', async () => {
+    const queryFn = (async (_url: string, sql: string) => {
       if (sql.includes('pg_extension')) return []
       throw new Error('relation "supabase_functions.hooks" does not exist')
-    }
+    }) as unknown as QueryFn
 
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
-    expect(issues).toHaveLength(0)
+    await expect(new WebhooksCheck(queryFn).scan(mockContext())).resolves.toEqual([])
   })
 
-  it('handles pg_extension check failure gracefully', async () => {
-    const queryFn: QueryFn = async (_dbUrl, sql) => {
-      if (sql.includes('pg_extension')) throw new Error('connection refused')
-      return []
-    }
+  it('reports pg_net and webhook differences together', async () => {
+    const queryFn = (async (dbUrl: string, sql: string) => {
+      if (sql.includes('pg_extension')) return dbUrl.includes('target') ? [] : [{ n: 1 }]
+      return dbUrl.includes('target') ? [] : [hook('public.orders', 'orders_webhook')]
+    }) as unknown as QueryFn
 
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
-    // Both pg_net checks fail → false/false → no pg_net issue
-    expect(issues).toHaveLength(0)
-  })
+    const issues = await new WebhooksCheck(queryFn).scan(mockContext())
 
-  it('detects multiple missing hooks', async () => {
-    const queryFn: QueryFn = async (dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return []
-      if (dbUrl.includes('source')) {
-        return [
-          makeHook({ hook_name: 'hook_a' }),
-          makeHook({ hook_name: 'hook_b', id: 2 }),
-        ]
-      }
-      return []
-    }
-
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
-
-    expect(issues).toHaveLength(2)
-    expect(issues[0].id).toBe('webhooks-missing-hook_a')
-    expect(issues[1].id).toBe('webhooks-missing-hook_b')
-  })
-
-  it('no pg_net issue when both have it', async () => {
-    const queryFn: QueryFn = async (_dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return [{ extname: 'pg_net' }]
-      return []
-    }
-
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
-    expect(issues).toHaveLength(0)
-  })
-
-  // ── Sync SQL generation (with trigger metadata) ─────────────────────
-
-  it('generates sync SQL for missing webhook with trigger metadata', async () => {
-    const queryFn: QueryFn = async (dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return []
-      if (dbUrl.includes('source')) return [makeHookWithTrigger()]
-      return []
-    }
-
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
-
-    expect(issues).toHaveLength(1)
-    expect(issues[0].sql).toBeDefined()
-    expect(issues[0].sql!.up).toContain('CREATE TRIGGER')
-    expect(issues[0].sql!.up).toContain('on_user_created')
-    expect(issues[0].sql!.up).toContain('AFTER INSERT')
-    expect(issues[0].sql!.up).toContain('public.users')
-    expect(issues[0].sql!.down).toContain('DROP TRIGGER')
-    expect(issues[0].sql!.down).toContain('on_user_created')
-  })
-
-  it('generates sync SQL for extra webhook with trigger table', async () => {
-    const queryFn: QueryFn = async (dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return []
-      if (dbUrl.includes('target')) {
-        return [makeHookWithTrigger({ hook_name: 'extra_hook' })]
-      }
-      return []
-    }
-
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
-
-    expect(issues).toHaveLength(1)
-    expect(issues[0].sql).toBeDefined()
-    expect(issues[0].sql!.up).toContain('DROP TRIGGER')
-    expect(issues[0].sql!.up).toContain('extra_hook')
-  })
-
-  it('includes trigger table in description when available', async () => {
-    const queryFn: QueryFn = async (dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return []
-      if (dbUrl.includes('source')) {
-        return [makeHookWithTrigger({ events: 'INSERT OR UPDATE' })]
-      }
-      return []
-    }
-
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
-
-    expect(issues[0].description).toContain('public.users')
-    expect(issues[0].description).toContain('INSERT OR UPDATE')
-  })
-
-  // ── Modified webhook detection ───────────────────────────────────────
-
-  it('detects webhook with changed events', async () => {
-    const queryFn: QueryFn = async (dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return []
-      if (dbUrl.includes('source')) return [makeHookWithTrigger({ events: 'INSERT OR UPDATE' })]
-      return [makeHookWithTrigger({ events: 'INSERT' })]
-    }
-
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
-
-    expect(issues).toHaveLength(1)
-    const issue = issues[0]
-    expect(issue.id).toBe('webhooks-modified-on_user_created')
-    expect(issue.severity).toBe('warning')
-    expect(issue.title).toContain('Modified webhook')
-    expect(issue.title).toContain('on_user_created')
-    expect(issue.description).toContain('events')
-    expect(issue.description).toContain('INSERT OR UPDATE')
-    expect(issue.description).toContain('INSERT')
-  })
-
-  it('detects webhook with changed trigger table', async () => {
-    const queryFn: QueryFn = async (dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return []
-      if (dbUrl.includes('source')) return [makeHookWithTrigger({ trigger_table: 'public.profiles' })]
-      return [makeHookWithTrigger({ trigger_table: 'public.users' })]
-    }
-
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
-
-    expect(issues).toHaveLength(1)
-    const issue = issues[0]
-    expect(issue.id).toBe('webhooks-modified-on_user_created')
-    expect(issue.description).toContain('table')
-    expect(issue.description).toContain('public.profiles')
-    expect(issue.description).toContain('public.users')
-  })
-
-  it('detects webhook with both events and table changed', async () => {
-    const queryFn: QueryFn = async (dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return []
-      if (dbUrl.includes('source')) return [makeHookWithTrigger({ events: 'INSERT OR UPDATE', trigger_table: 'public.profiles' })]
-      return [makeHookWithTrigger({ events: 'INSERT', trigger_table: 'public.users' })]
-    }
-
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
-
-    expect(issues).toHaveLength(1)
-    expect(issues[0].description).toContain('events')
-    expect(issues[0].description).toContain('table')
-  })
-
-  it('generates sync SQL for modified webhook (drop + recreate)', async () => {
-    const queryFn: QueryFn = async (dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return []
-      if (dbUrl.includes('source')) return [makeHookWithTrigger({ events: 'INSERT OR UPDATE' })]
-      return [makeHookWithTrigger({ events: 'INSERT' })]
-    }
-
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
-
-    expect(issues[0].sql).toBeDefined()
-    expect(issues[0].sql!.up).toContain('DROP TRIGGER')
-    expect(issues[0].sql!.up).toContain('CREATE TRIGGER')
-    expect(issues[0].sql!.up).toContain('INSERT OR UPDATE')
-  })
-
-  it('does not report modified for identical webhooks', async () => {
-    const hook = makeHookWithTrigger()
-    const queryFn: QueryFn = async (_dbUrl, sql) => {
-      if (sql.includes('pg_extension')) return []
-      return [hook]
-    }
-
-    const check = new WebhooksCheck(queryFn)
-    const issues = await check.scan(mockContext())
-    expect(issues).toHaveLength(0)
+    expect(issues.map(i => i.id)).toContain('webhooks-pgnet-missing')
+    expect(issues.map(i => i.id)).toContain('webhooks-missing-public.orders.orders_webhook')
   })
 })
-

@@ -83,7 +83,7 @@ supaforge snapshot --env=prod --migration
 | Storage | Storage API | ✅ Ready |
 | Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Ready |
 | Cron Jobs | `cron.job` table | ✅ Ready |
-| Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ Ready |
+| Webhooks | `pg_trigger` + `pg_net` | ✅ Ready |
 | Realtime | `pg_publication` + `pg_publication_tables`, and `pg_policies` on `realtime` | ✅ Ready — publications and Realtime Authorization policies |
 | Vault Secrets | `vault.secrets` | ✅ Ready |
 | Postgres Extensions | `pg_extension` | ✅ Ready |
@@ -99,7 +99,7 @@ How SupaForge maps to every standard Supabase module (see [Supabase Features](ht
 |---|---|---|---|
 | **Database** | Postgres schema | ✅ Schema | Tables, columns, indexes, constraints, views, triggers, functions, standalone sequences, enum and composite types, domains, materialized views |
 | | Reference / seed data | ✅ Data | Row-level diff for all public tables (configurable) |
-| | Database webhooks | ✅ Webhooks | `supabase_functions.hooks` + `pg_net` extension |
+| | Database webhooks | ✅ Webhooks | The triggers that call `supabase_functions.http_request`, read via `pg_get_triggerdef` — so a webhook's URL, method, headers, params and timeout are compared too — plus the `pg_net` extension |
 | | Postgres extensions | ✅ Extensions | Enabled/disabled detection via `pg_extension` |
 | | Vault / Secrets | ✅ Vault | Secret name/description drift; values are environment-specific |
 | | Postgres roles | ✅ Roles | Custom role attributes and table grants. Supabase's own service roles are excluded |
@@ -455,10 +455,19 @@ run prints what it is scoped to before it starts.
 | `SUPAFORGE_DBDIFF_TIMEOUT` | `600` | Seconds before the schema/data diff is abandoned. Overrides `checks.schema.timeout`. |
 | `SUPAFORGE_DBDIFF_MEMORY` | dbdiff's own `1G` | Passed to `@dbdiff/cli --memory-limit`. Takes `512M`, `2G`, or `-1` for unlimited. |
 | `SUPAFORGE_CONNECT_TIMEOUT` | `15` | Seconds before a database connection attempt is abandoned. Applies to every connection, including the preflight reachability check. |
+| `SUPAFORGE_CHECK_CONCURRENCY` | `4` | How many checks run at once. `1` restores running them one after another. |
 
 ```bash
 SUPAFORGE_DBDIFF_TIMEOUT=600 SUPAFORGE_DBDIFF_MEMORY=2G supaforge diff
 ```
+
+Checks are independent, so they run concurrently and a scan spends its latency
+in parallel rather than end to end. The limit is deliberate rather than
+unbounded: the schema and data checks each spawn `@dbdiff/cli`, and a Supabase
+pooler counts every connection. Lower it when diffing against a pooler with a
+tight connection limit; `SUPAFORGE_CHECK_CONCURRENCY=1` makes a run's output
+strictly sequential, which is occasionally easier to read when debugging a
+single check.
 
 `checks.exclude` permanently skips the listed checks on every `diff`/`hukam`/`sync` run — useful when diffing against a clone, where `storage`, `auth`, `edge-functions`, `vault`, `realtime` and `roles` have no local equivalent and produce only noise. Roles is easy to overlook and is the second-largest source of it: a clone is vanilla PostgreSQL, so Supabase's service roles do not exist and every grant referencing one reads as drift. The `--skip` CLI flag does the same on a one-off basis; both are merged at runtime.
 
@@ -511,7 +520,7 @@ packages/cli/
 │   ├── prove.ts         # Replay a fix set on a throwaway clone
 │   ├── scoring.ts       # Drift and posture scores (0–100)
 │   └── render.ts        # Terminal output
-└── test/                # 1311 tests across 62 files
+└── test/                # 1335 tests across 62 files
 ```
 
 ## Development
@@ -520,7 +529,7 @@ packages/cli/
 git clone https://github.com/akalforge/supaforge.git
 cd supaforge/packages/cli
 npm install
-npm test       # Run all tests (1311 across 62 files)
+npm test       # Run all tests (1335 across 62 files)
 npm run lint   # Type-check
 npm run build  # Build with tsup
 

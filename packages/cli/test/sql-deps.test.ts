@@ -7,6 +7,8 @@ import {
   providedNames,
   referencedTables,
   orderStatements,
+  createdTriggers,
+  createsOnlyTriggers,
 } from '../src/sql-deps.js'
 
 /**
@@ -236,5 +238,89 @@ describe('orderStatements', () => {
     expect(orderStatements([], (s: { sql: string }) => s.sql)).toEqual([])
     const one = [{ id: 'only', sql: 'CREATE TABLE t (id int);' }]
     expect(orderIds(one)).toEqual(['only'])
+  })
+})
+
+/**
+ * Triggers collide the way policies did (issue #77).
+ *
+ * The schema check's SQL creates webhook triggers — they are ordinary triggers
+ * to dbdiff — and the webhooks check now emits the server's own
+ * `pg_get_triggerdef()` for the same trigger. Applied together the second fails
+ * with `trigger ... already exists` and the transactional apply discards every
+ * other fix with it.
+ */
+describe('createdTriggers', () => {
+  it('keys a trigger by its table as well as its name', () => {
+    // A trigger name is unique per table, not per schema, so two webhooks may
+    // share a name — which is exactly how one of them used to be lost.
+    expect(createdTriggers(
+      'CREATE TRIGGER notify_webhook AFTER INSERT ON public.a_items FOR EACH ROW EXECUTE FUNCTION f();',
+    )).toEqual(['a_items.notify_webhook'])
+  })
+
+  it('matches however the two layers spell the table', () => {
+    const bare = createdTriggers('CREATE TRIGGER t AFTER INSERT ON "orders" FOR EACH ROW EXECUTE FUNCTION f();')
+    const qualified = createdTriggers(
+      'CREATE TRIGGER "t"\n  AFTER INSERT\n  ON "public"."orders"\n  FOR EACH ROW\n  EXECUTE FUNCTION f();',
+    )
+    expect(bare).toEqual(qualified)
+  })
+
+  it('finds every trigger in a multi-statement fix', () => {
+    expect(createdTriggers([
+      'CREATE TRIGGER a AFTER INSERT ON t1 FOR EACH ROW EXECUTE FUNCTION f();',
+      'CREATE TRIGGER b AFTER UPDATE ON t2 FOR EACH ROW EXECUTE FUNCTION f();',
+    ].join('\n')).sort()).toEqual(['t1.a', 't2.b'])
+  })
+
+  it('reads a constraint trigger too', () => {
+    expect(createdTriggers(
+      'CREATE CONSTRAINT TRIGGER c AFTER INSERT ON t DEFERRABLE FOR EACH ROW EXECUTE FUNCTION f();',
+    )).toEqual(['t.c'])
+  })
+
+  it('ignores a trigger name inside a string or comment', () => {
+    expect(createdTriggers("SELECT 'CREATE TRIGGER x AFTER INSERT ON t';")).toEqual([])
+    expect(createdTriggers('-- CREATE TRIGGER x AFTER INSERT ON t\nSELECT 1;')).toEqual([])
+  })
+
+  it('finds nothing in unrelated SQL', () => {
+    expect(createdTriggers('ALTER TABLE t ADD COLUMN c text;')).toEqual([])
+  })
+})
+
+describe('createsOnlyTriggers', () => {
+  it('is true for a statement that only creates a trigger', () => {
+    expect(createsOnlyTriggers(
+      'CREATE TRIGGER t AFTER INSERT ON orders FOR EACH ROW EXECUTE FUNCTION f();',
+    )).toBe(true)
+  })
+
+  it('tolerates the DROP the webhooks check emits before recreating', () => {
+    expect(createsOnlyTriggers([
+      'DROP TRIGGER IF EXISTS "t" ON public.orders;',
+      'CREATE TRIGGER t AFTER INSERT ON public.orders FOR EACH ROW EXECUTE FUNCTION f();',
+    ].join('\n'))).toBe(true)
+  })
+
+  it('is false when the statement also creates the function the trigger calls', () => {
+    // The schema check bundles them, and dropping that as a duplicate would
+    // lose the function.
+    expect(createsOnlyTriggers([
+      'CREATE OR REPLACE FUNCTION touch() RETURNS trigger AS $$ BEGIN RETURN NEW; END $$ LANGUAGE plpgsql;',
+      'CREATE TRIGGER t AFTER INSERT ON orders FOR EACH ROW EXECUTE FUNCTION touch();',
+    ].join('\n'))).toBe(false)
+  })
+
+  it('is false when the statement also creates the table', () => {
+    expect(createsOnlyTriggers([
+      'CREATE TABLE orders (id integer);',
+      'CREATE TRIGGER t AFTER INSERT ON orders FOR EACH ROW EXECUTE FUNCTION f();',
+    ].join('\n'))).toBe(false)
+  })
+
+  it('is false when there is no trigger at all', () => {
+    expect(createsOnlyTriggers('ALTER TABLE t ADD COLUMN c text;')).toBe(false)
   })
 })

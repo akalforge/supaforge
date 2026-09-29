@@ -143,10 +143,45 @@ CREATE TABLE supabase_functions.hooks (
     request_id      BIGINT
 );
 
+-- Invocation history. `on_legacy_deleted` is the case that matters: its
+-- webhook was deleted, but the log of what it once did outlives it. Reading
+-- this table reported it as missing from the target, with no usable fix.
 INSERT INTO supabase_functions.hooks (hook_table_id, hook_name) VALUES
     (1, 'on_user_created'),
     (2, 'on_post_published'),
-    (3, 'on_payment_received');
+    (3, 'on_payment_received'),
+    (9, 'on_legacy_deleted');
+
+-- Supabase's own webhook trigger function. A stub here: the check identifies a
+-- webhook by the trigger calling supabase_functions.http_request, and never
+-- needs it to run.
+CREATE OR REPLACE FUNCTION supabase_functions.http_request()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    RETURN NEW;
+END;
+$$;
+
+-- Webhooks are triggers, and their configuration — URL, method, headers,
+-- params, timeout — lives in the trigger's arguments. The check used to read
+-- the hooks table above, which is the log of invocations and carries none of
+-- that (issue #77). The log rows are kept deliberately: they must not affect
+-- the result.
+CREATE TRIGGER on_user_created AFTER INSERT ON public.users FOR EACH ROW
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/users', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
+CREATE TRIGGER on_post_published AFTER INSERT ON public.posts FOR EACH ROW
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/posts', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
+CREATE TRIGGER on_payment_received AFTER INSERT ON public.plans FOR EACH ROW
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/payments', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
+CREATE TRIGGER on_row_touched AFTER UPDATE ON public.users FOR EACH ROW
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/touch/users', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
+CREATE TRIGGER on_row_touched AFTER UPDATE ON public.posts FOR EACH ROW
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/touch/posts', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
 
 -- === Storage (RLS-testable without Supabase API) ===
 CREATE SCHEMA storage;

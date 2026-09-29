@@ -5,7 +5,11 @@
 --   Schema:    Source has plans table, target has it too but may lack bio column (for schema check)
 --   RLS:       Missing "posts_insert_own" (CVE-2025-48757), modified "users_select_own" USING
 --   Cron:      Missing "weekly_digest", modified "cleanup_sessions" schedule (0 6 vs 0 3)
---   Webhooks:  Missing "on_payment_received", extra "on_invoice_sent", pg_net NOT installed
+--   Webhooks:  Missing "on_payment_received" and "on_profile_updated" (which has
+--              never fired, so it has no log rows), extra "on_invoice_sent",
+--              "on_order_shipped" repointed at a different URL,
+--              "on_legacy_deleted" deleted but still in the source's log,
+--              pg_net NOT installed
 --   Storage:   Missing "avatars_insert" policy, bucket visibility + missing bucket via API
 --   Realtime:  Missing supaforge_live publication (source publishes posts + payments)
 --   Vault:     Missing "smtp_password" secret (source has api_key + smtp_password)
@@ -68,16 +72,19 @@ END $$;
 
 DO $$
 BEGIN
-  DROP TRIGGER IF EXISTS on_user_created   ON public.users;
+  DROP TRIGGER IF EXISTS on_user_created     ON public.users;
+  DROP TRIGGER IF EXISTS on_profile_updated  ON public.users;
   DROP TRIGGER IF EXISTS on_payment_received ON public.payments;
-  DROP TRIGGER IF EXISTS on_invoice_sent   ON public.payments;
+  DROP TRIGGER IF EXISTS on_invoice_sent     ON public.payments;
+  DROP TRIGGER IF EXISTS on_order_shipped    ON public.payments;
 EXCEPTION WHEN undefined_table THEN NULL;
 END $$;
 
 DO $$
 BEGIN
   DELETE FROM supabase_functions.hooks
-    WHERE hook_name IN ('on_user_created', 'on_payment_received', 'on_invoice_sent');
+    WHERE hook_name IN ('on_user_created', 'on_payment_received', 'on_invoice_sent',
+                        'on_order_shipped', 'on_legacy_deleted');
 EXCEPTION WHEN undefined_table THEN NULL;
 END $$;
 
@@ -153,19 +160,35 @@ CREATE TABLE IF NOT EXISTS supabase_functions.hooks (
     request_id      BIGINT
 );
 
-CREATE OR REPLACE FUNCTION supabase_functions.webhook_dispatch()
-RETURNS TRIGGER AS $$
+-- Created only when absent, so a real stack keeps its own. See seed-source.sql.
+DO $do$
 BEGIN
-    RETURN COALESCE(NEW, OLD);
-END;
-$$ LANGUAGE plpgsql;
+    IF NOT EXISTS (
+        SELECT 1
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        WHERE n.nspname = 'supabase_functions'
+          AND p.proname = 'http_request'
+    ) THEN
+        EXECUTE $fn$
+            CREATE FUNCTION supabase_functions.http_request()
+            RETURNS TRIGGER AS $body$
+            BEGIN
+                RETURN COALESCE(NEW, OLD);
+            END;
+            $body$ LANGUAGE plpgsql
+        $fn$;
+    END IF;
+END
+$do$;
 
 -- on_user_created (same as source)
 INSERT INTO supabase_functions.hooks (hook_table_id, hook_name) VALUES (1, 'on_user_created');
 CREATE TRIGGER on_user_created
     AFTER INSERT ON public.users
     FOR EACH ROW
-    EXECUTE FUNCTION supabase_functions.webhook_dispatch();
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/users', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
 
 -- DRIFT: "on_payment_received" is MISSING
 
@@ -174,7 +197,23 @@ INSERT INTO supabase_functions.hooks (hook_table_id, hook_name) VALUES (4, 'on_i
 CREATE TRIGGER on_invoice_sent
     AFTER INSERT ON public.payments
     FOR EACH ROW
-    EXECUTE FUNCTION supabase_functions.webhook_dispatch();
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/invoices', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
+
+-- DRIFT: "on_profile_updated" is MISSING, and has never fired on the source
+-- either, so it has no log rows to be inferred from.
+
+-- No log rows for "on_legacy_deleted": the source has them and no trigger, so
+-- the webhook does not exist on either side and must not be reported.
+
+-- DRIFT: "on_order_shipped" points at a different URL. Same name, same table,
+-- same events — only the arguments differ.
+INSERT INTO supabase_functions.hooks (hook_table_id, hook_name) VALUES (5, 'on_order_shipped');
+CREATE TRIGGER on_order_shipped
+    AFTER INSERT ON public.payments
+    FOR EACH ROW
+    EXECUTE FUNCTION supabase_functions.http_request(
+        'https://example.invalid/orders/v1', 'POST', '{"Content-Type":"application/json"}', '{}', '5000');
 
 -- === Storage Policies (DRIFTED) ===
 CREATE POLICY "avatars_select"

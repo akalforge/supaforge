@@ -295,3 +295,157 @@ describe('skipped checks are distinguishable from clean ones (issue #42)', () =>
     expect(result.score).toBe(100)
   })
 })
+
+/**
+ * Independent checks run a few at a time (issue #78).
+ *
+ * They share nothing and each is mostly waiting on a database, so running them
+ * one after another paid the sum of their latencies: the 13 non-schema checks
+ * took about 9 s of a 48 s diff over a 100 ms link.
+ *
+ * Two properties matter and pull in opposite directions — work must overlap,
+ * and the report must not depend on which check happens to finish first.
+ */
+class SlowLayer extends Check {
+  readonly name: CheckName
+  constructor(name: CheckName, private ms: number, private log: string[]) {
+    super()
+    this.name = name
+  }
+
+  async scan(_ctx: CheckContext): Promise<DriftIssue[]> {
+    this.log.push(`start:${this.name}`)
+    await new Promise(resolve => setTimeout(resolve, this.ms))
+    this.log.push(`end:${this.name}`)
+    return []
+  }
+}
+
+/** Records how many scans were in flight at once. */
+class CountingLayer extends Check {
+  readonly name: CheckName
+  constructor(name: CheckName, private state: { now: number; peak: number }) {
+    super()
+    this.name = name
+  }
+
+  async scan(): Promise<DriftIssue[]> {
+    this.state.now++
+    this.state.peak = Math.max(this.state.peak, this.state.now)
+    await new Promise(resolve => setTimeout(resolve, 20))
+    this.state.now--
+    return []
+  }
+}
+
+describe('scan concurrency', () => {
+  const four: CheckName[] = ['rls', 'cron', 'vault', 'extensions']
+
+  function registryOf(checks: Check[]): CheckRegistry {
+    const registry = new CheckRegistry()
+    for (const c of checks) registry.register(c)
+    return registry
+  }
+
+  it('overlaps independent checks', async () => {
+    const log: string[] = []
+    const registry = registryOf(four.map(n => new SlowLayer(n, 40, log)))
+
+    await scan(registry, { config, checks: four })
+
+    // Serial execution gives start,end,start,end… Overlap means at least one
+    // check starts before an earlier one ends.
+    const firstEnd = log.findIndex(e => e.startsWith('end:'))
+    const startsBeforeFirstEnd = log.slice(0, firstEnd).filter(e => e.startsWith('start:')).length
+    expect(startsBeforeFirstEnd).toBeGreaterThan(1)
+  })
+
+  it('is faster than the sum of its parts', async () => {
+    const log: string[] = []
+    const registry = registryOf(four.map(n => new SlowLayer(n, 60, log)))
+
+    const started = Date.now()
+    await scan(registry, { config, checks: four })
+    const elapsed = Date.now() - started
+
+    // Four 60 ms checks: 240 ms serially, about 60 ms at a concurrency of four.
+    // Asserting a generous bound rather than a tight one, because a loaded CI
+    // box should not make this flake.
+    expect(elapsed).toBeLessThan(200)
+  })
+
+  it('keeps the report in check order however they finish', async () => {
+    const log: string[] = []
+    // Descending durations, so completion order is the reverse of check order.
+    const registry = registryOf([
+      new SlowLayer('rls', 80, log),
+      new SlowLayer('cron', 60, log),
+      new SlowLayer('vault', 40, log),
+      new SlowLayer('extensions', 20, log),
+    ])
+
+    const result = await scan(registry, { config, checks: four })
+
+    expect(result.checks.map(c => c.check)).toEqual(four)
+    // …and the reverse really did finish first, so the ordering was exercised.
+    expect(log.filter(e => e.startsWith('end:'))[0]).toBe('end:extensions')
+  })
+
+  it('never exceeds the concurrency limit', async () => {
+    const state = { now: 0, peak: 0 }
+    const names: CheckName[] = ['rls', 'cron', 'vault', 'extensions', 'storage', 'auth']
+    const registry = registryOf(names.map(n => new CountingLayer(n, state)))
+
+    await scan(registry, { config, checks: names })
+
+    expect(state.peak).toBeLessThanOrEqual(4)
+    expect(state.peak).toBeGreaterThan(1)
+  })
+
+  it('runs one at a time when asked to', async () => {
+    const previous = process.env.SUPAFORGE_CHECK_CONCURRENCY
+    process.env.SUPAFORGE_CHECK_CONCURRENCY = '1'
+    try {
+      const state = { now: 0, peak: 0 }
+      const registry = registryOf(four.map(n => new CountingLayer(n, state)))
+
+      await scan(registry, { config, checks: four })
+
+      expect(state.peak).toBe(1)
+    } finally {
+      if (previous === undefined) delete process.env.SUPAFORGE_CHECK_CONCURRENCY
+      else process.env.SUPAFORGE_CHECK_CONCURRENCY = previous
+    }
+  })
+
+  it('reports progress for every check, with its own index', async () => {
+    const log: string[] = []
+    const registry = registryOf(four.map(n => new SlowLayer(n, 10, log)))
+    const done: Array<{ check: string; index: number }> = []
+
+    await scan(registry, {
+      config,
+      checks: four,
+      onProgress: (e) => {
+        if (e.phase === 'check:done') done.push({ check: e.check, index: e.index })
+      },
+    })
+
+    expect(done).toHaveLength(4)
+    // The index travels with the event, so interleaved output stays meaningful.
+    expect(done.map(d => d.index).sort()).toEqual([0, 1, 2, 3])
+  })
+
+  it('still records an errored check in its own slot', async () => {
+    const registry = registryOf([
+      new SlowLayer('rls', 30, []),
+      new ErrorLayer(),
+      new SlowLayer('cron', 10, []),
+    ])
+
+    const result = await scan(registry, { config, checks: ['rls', 'auth', 'cron'] })
+
+    expect(result.checks.map(c => c.check)).toEqual(['rls', 'auth', 'cron'])
+    expect(result.checks[1].status).toBe('error')
+  })
+})

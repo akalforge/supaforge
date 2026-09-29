@@ -138,7 +138,7 @@ function isSelected(issueId: string, only: string[] | undefined): boolean {
  * branch, and so the decision can be asserted directly in tests.
  */
 function classifyIssue(
-  issue: { id: string; sql?: { up: string }; action?: SyncAction },
+  issue: { id: string; sql?: { up: string }; action?: SyncAction; manualOnly?: string },
   options: PlanOptions,
 ): { kind: 'sql'; sql: string } | { kind: 'api'; action: SyncAction } | { kind: 'skip'; reason: string } {
   if (!isSelected(issue.id, options.only)) {
@@ -147,7 +147,9 @@ function classifyIssue(
 
   if (!issue.sql?.up) {
     if (issue.action) return { kind: 'api', action: issue.action }
-    return { kind: 'skip', reason: 'No SQL fix or API action available' }
+    // A check that knows why it cannot offer a fix says so; "nothing
+    // available" on its own leaves the user with no next step.
+    return { kind: 'skip', reason: issue.manualOnly ?? 'No SQL fix or API action available' }
   }
 
   if (!options.allowDestructive) {

@@ -41,7 +41,48 @@ describe('VaultCheck', () => {
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('warning')
     expect(issues[0].title).toContain('api_key')
-    expect(issues[0].sql?.up).toContain('vault.create_secret')
+  })
+
+  // ── A secret that cannot be synced has no fix (issue #91) ──────────────────
+
+  it('offers no SQL for a secret missing from the target', async () => {
+    // It used to emit `vault.create_secret('PLACEHOLDER_VALUE', …)`, and
+    // `--apply` ran it. The target then held a live secret with a bogus value,
+    // so whatever read it failed at runtime rather than failing loudly as
+    // absent — and because the secret now existed, the next diff stopped
+    // asking for the manual step at all.
+    const queryFn: QueryFn = async (dbUrl) => {
+      if (dbUrl.includes('source')) return [makeSecret()]
+      return []
+    }
+
+    const issues = await new VaultCheck(queryFn).scan(mockContext())
+
+    expect(issues[0].sql).toBeUndefined()
+  })
+
+  it('never emits a placeholder value anywhere', async () => {
+    const queryFn: QueryFn = async (dbUrl) => {
+      if (dbUrl.includes('source')) return [makeSecret()]
+      return []
+    }
+
+    const issues = await new VaultCheck(queryFn).scan(mockContext())
+
+    expect(JSON.stringify(issues)).not.toContain('PLACEHOLDER_VALUE')
+  })
+
+  it('says what to run instead, with the real value left to the user', async () => {
+    const queryFn: QueryFn = async (dbUrl) => {
+      if (dbUrl.includes('source')) return [makeSecret()]
+      return []
+    }
+
+    const issues = await new VaultCheck(queryFn).scan(mockContext())
+
+    expect(issues[0].manualOnly).toContain('vault.create_secret')
+    expect(issues[0].manualOnly).toContain('api_key')
+    expect(issues[0].manualOnly).toContain('<value>')
   })
 
   it('detects extra secret in target', async () => {

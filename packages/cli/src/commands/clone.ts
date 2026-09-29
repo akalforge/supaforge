@@ -317,18 +317,21 @@ export default class Clone extends BaseCommand {
     this.log(`      ${ok('✓')} Baseline stored: ${migrationFile}`)
 
     this.log('    [4/4] Updating config...')
-    const newConfig: SupaForgeConfig = {
-      ...config,
-      environments: {
-        ...config.environments,
-        local: { dbUrl: localDbUrl },
-      },
-      source: 'local',
-      target: envName,
-    }
+    const newConfig = configAfterClone(config, envName, localDbUrl)
     const configPath = resolve('supaforge.config.json')
     await writeFile(configPath, JSON.stringify(newConfig, null, 2) + '\n')
     this.log(`      ${ok('✓')} Config updated: ${configPath}`)
+
+    // Say what moved. Overwriting these silently is the other half of #89:
+    // whatever the project was pointed at before is gone, with no record of it
+    // in the output.
+    const wasSource = config.source
+    const wasTarget = config.target
+    if (wasSource !== envName || wasTarget !== 'local') {
+      this.log(`      ${dim('source:')} ${wasSource ?? dim('(unset)')} ${dim('→')} ${envName}`)
+      this.log(`      ${dim('target:')} ${wasTarget ?? dim('(unset)')} ${dim('→')} local ${dim('(the clone)')}`)
+      this.log(`      ${dim('A bare')} ${cmd('supaforge diff --apply')} ${dim('now writes into the clone, not into')} "${envName}".`)
+    }
 
     // Register clone in .supaforge/branches.json so `clone --list` works
     const branchMeta: BranchMeta = {
@@ -373,13 +376,52 @@ export default class Clone extends BaseCommand {
     const skipFlags = CLONE_SKIP_FLAGS
     this.log(`  ${bold('Your workflow is now:')}`)
     this.log(`    1. Develop against the local database ${dim(`(${localDbName})`)}`)
-    this.log(`    2. Verify the clone matches "${envName}":`)
-    this.log(`         ${cmd(`supaforge diff --source=${envName} --target=local --detail --include-files`)}`)
+    this.log(`    2. Verify the clone matches "${envName}":  ${cmd('supaforge diff --detail')}`)
     this.log(`       ${dim('Add')} ${cmd(skipFlags)} ${dim('to hide the Supabase-managed noise above.')}`)
     this.log(`    3. See what drifted as you work:  ${cmd('supaforge diff')}`)
-    this.log(`    4. Push local changes to "${envName}": ${cmd('supaforge diff --apply')}`)
-    this.log(`    5. Capture the current state:      ${cmd('supaforge snapshot --apply')}`)
+    this.log(`    4. Capture the current state:     ${cmd('supaforge snapshot --apply')}`)
+    this.log('')
+    // Named in full rather than as a bare `--apply`. This is the direction that
+    // writes to a hosted database, and from a clone it carries the absences the
+    // warning above is about — so it should not be reachable by habit.
+    this.log(`  ${bold(`Pushing local changes back to "${envName}"`)} ${dim('writes to that database:')}`)
+    this.log(`    ${cmd(`supaforge diff --source=local --target=${envName} --dry-run`)} ${dim('← review first')}`)
+    this.log(`    ${cmd(`supaforge diff --source=local --target=${envName} --apply`)}`)
+    this.log(`    ${dim('A clone is vanilla PostgreSQL, so')} ${cmd(skipFlags)} ${dim('belongs on those too.')}`)
     this.log('')
     this.log(renderTip({ command: 'clone', cloneApplied: true, schemaOnly: flags['schema-only'] }))
+  }
+}
+
+/**
+ * The config a clone leaves behind.
+ *
+ * The clone becomes the **target**, so a bare `supaforge diff --apply` in this
+ * directory writes into the local copy.
+ *
+ * It used to be the source, with the cloned-from environment as the target —
+ * and the closing guidance recommended a bare `diff --apply`. Together those
+ * pointed the next unqualified apply at the hosted database the clone had just
+ * been taken from, carrying with it exactly the roles-and-grants drift the same
+ * screen warns about (issue #89). Pushing that way is still available and is
+ * now spelled out in full, which is the direction that deserves to be explicit.
+ *
+ * Everything else about the config is preserved, including any environment
+ * already called `local`, which is replaced rather than merged: it names a
+ * database, and the clone is the database it now names.
+ */
+export function configAfterClone(
+  config: SupaForgeConfig,
+  envName: string,
+  localDbUrl: string,
+): SupaForgeConfig {
+  return {
+    ...config,
+    environments: {
+      ...config.environments,
+      local: { ...config.environments.local, dbUrl: localDbUrl },
+    },
+    source: envName,
+    target: 'local',
   }
 }

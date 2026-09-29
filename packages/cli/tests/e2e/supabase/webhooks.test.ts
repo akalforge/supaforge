@@ -164,22 +164,37 @@ describe('e2e: webhooks layer', () => {
   it.skipIf(shouldSkip())('should apply triggers that accept writes', async () => {
     const targetUrl = process.env.SUPAFORGE_E2E_TARGET_DB_URL!
 
-    // The promoted trigger must carry its arguments, or this insert fails with
-    // `url argument is missing` — the symptom that made the old fix worse than
-    // the drift it was closing.
-    const inserted = await pgQuery(
+    // Every promoted trigger must carry its arguments, or the write that fires
+    // it fails with `url argument is missing` — the symptom that made the old
+    // fix worse than the drift it was closing.
+    //
+    // These three writes fire all four webhooks now on the target:
+    // on_user_created and on_profile_updated on public.users,
+    // on_payment_received and on_order_shipped on public.payments. pg_net
+    // queues the request rather than waiting on it, so an unreachable
+    // example.invalid URL is not what decides this.
+    const email = `webhook-probe-${Date.now()}@example.invalid`
+
+    const [user] = await pgQuery(
       targetUrl,
-      `INSERT INTO public.payments (amount) VALUES (1) RETURNING id`,
-    )
-    expect(inserted).toHaveLength(1)
+      `INSERT INTO public.users (email) VALUES ($1) RETURNING id`,
+      [email],
+    ) as unknown as { id: string }[]
+    expect(user?.id).toBeDefined()
 
     const updated = await pgQuery(
       targetUrl,
-      `UPDATE public.users SET email = email WHERE id = (
-         SELECT id FROM public.users LIMIT 1
-       ) RETURNING id`,
+      `UPDATE public.users SET full_name = 'probe' WHERE id = $1 RETURNING id`,
+      [user.id],
     )
-    expect(Array.isArray(updated)).toBe(true)
+    expect(updated).toHaveLength(1)
+
+    const inserted = await pgQuery(
+      targetUrl,
+      `INSERT INTO public.payments (user_id, amount) VALUES ($1, 1) RETURNING id`,
+      [user.id],
+    )
+    expect(inserted).toHaveLength(1)
 
     // And the arguments are really there, not merely tolerated.
     const defs = await pgQuery(targetUrl, `

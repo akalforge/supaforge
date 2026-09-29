@@ -40,13 +40,24 @@ const exec = promisify(execFile)
  * extensions: a Supabase column default calling `extensions.uuid_generate_v4()`
  * cannot be created without the extension that owns the function.
  *
- * plpgsql is excluded because every database already has it.
+ * Extensions living in a system schema are excluded, by *schema* rather than
+ * by name. Filtering `plpgsql` by name left `pg_cron` — which Supabase installs
+ * into `pg_catalog` — and the clone preparation then ran
+ * `CREATE SCHEMA IF NOT EXISTS "pg_catalog"`. PostgreSQL rejects a name
+ * beginning with `pg_` before it evaluates `IF NOT EXISTS`:
+ *
+ *     error: unacceptable schema name "pg_catalog"  (42939)
+ *
+ * so `--prove` aborted on every project with Cron enabled (issue #94). There is
+ * nothing to create for these schemas in any case: they exist in every
+ * database, and so do the extensions in them.
  */
 const TARGET_EXTENSIONS_SQL = `
   SELECT e.extname AS name, n.nspname AS schema
     FROM pg_extension e
     JOIN pg_namespace n ON n.oid = e.extnamespace
-   WHERE e.extname <> 'plpgsql'
+   WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+     AND n.nspname NOT LIKE 'pg\\_%'
    ORDER BY e.extname
 `
 
@@ -385,7 +396,12 @@ export async function prepareClone(
 
   for (const ext of extensions) {
     if (schemas.includes(ext.schema)) continue
+    // Tolerated for the same reason the CREATE EXTENSION below it is: a schema
+    // this clone will not accept is not a reason to abandon the proof. If the
+    // structure genuinely needed it, the replay fails next and says so — which
+    // is a better error than this one (issue #94).
     await queryFn(cloneUrl, `CREATE SCHEMA IF NOT EXISTS "${ext.schema}"`)
+      .catch(() => undefined)
     // Best-effort: an extension the server cannot offer this database is not a
     // reason to abandon the proof. If the schema genuinely needed it, the replay
     // fails next and says so.

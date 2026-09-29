@@ -404,19 +404,20 @@ export function sqlToIssues(
 
   if (upStatements.length === 0) return []
 
-  const merged = mergeRoutineReplacements(upStatements, downStatements)
+  const merged = mergeReplacements(upStatements, downStatements)
 
   // Generate one issue per UP statement, paired with its DOWN counterpart
-  return merged.map(({ up: upSql, down: downSql, modifiedRoutine }, i) => {
+  return merged.map(({ up: upSql, down: downSql, modified }, i) => {
     const type = classifyStatement(upSql)
 
-    if (modifiedRoutine) {
+    if (modified) {
+      const report = REPLACEABLE_REPORT[modified.kind]
       return {
-        id: `${check}-alter-function-${i + 1}`,
+        id: `${check}-alter-${report.idPart}-${i + 1}`,
         check,
         severity: 'warning' as const,
-        title: `Function modified: ${qualifySchemaName(modifiedRoutine)}`,
-        description: 'Function body differs between source and target.',
+        title: `${report.label}: ${qualifySchemaName(modified.name)}`,
+        description: `${report.what} differs between source and target.`,
         sql: { up: upSql, down: downSql },
       }
     }
@@ -437,8 +438,50 @@ export function sqlToIssues(
 interface MergedStatement {
   up: string
   down: string
-  /** Set when this entry is a DROP+CREATE pair replacing one routine. */
-  modifiedRoutine?: string
+  /** Set when this entry is a DROP+CREATE pair replacing one object. */
+  modified?: { kind: ReplaceableKind; name: string }
+}
+
+/**
+ * The object kinds dbdiff replaces by dropping and recreating.
+ *
+ * Routines were the first (issue #35). Types, domains and sequences behave the
+ * same way — an enum whose values changed arrives as `DROP TYPE` + `CREATE
+ * TYPE` — and needed the same treatment for the same two reasons (issue #81).
+ */
+type ReplaceableKind = 'routine' | 'type' | 'sequence'
+
+/** How each kind's identifier is read out of a statement. */
+const REPLACEABLE_NAME: Record<ReplaceableKind, (sql: string) => string> = {
+  routine: extractRoutineName,
+  type: (sql) => extractQualifiedName(sql, /\b(?:TYPE|DOMAIN)\s+(?:IF\s+EXISTS\s+)?/i),
+  sequence: (sql) => extractQualifiedName(sql, /\bSEQUENCE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?/i),
+}
+
+/** How a merged pair of each kind is reported. */
+const REPLACEABLE_REPORT: Record<ReplaceableKind, { idPart: string; label: string; what: string }> = {
+  routine:  { idPart: 'function', label: 'Function modified', what: 'Function body' },
+  type:     { idPart: 'type',     label: 'Type modified',     what: 'Type definition' },
+  sequence: { idPart: 'sequence', label: 'Sequence modified', what: 'Sequence definition' },
+}
+
+/** Whether a statement drops or creates a replaceable object, and of which kind. */
+function replaceablePart(sql: string): { kind: ReplaceableKind; drop: boolean } | undefined {
+  switch (classifyStatement(sql)) {
+    case CREATE_FUNCTION:   return { kind: 'routine',  drop: false }
+    case DROP_FUNCTION:     return { kind: 'routine',  drop: true }
+    case 'create-type':     return { kind: 'type',     drop: false }
+    case 'drop-type':       return { kind: 'type',     drop: true }
+    case 'create-sequence': return { kind: 'sequence', drop: false }
+    case 'drop-sequence':   return { kind: 'sequence', drop: true }
+    default:                return undefined
+  }
+}
+
+/** Kind and bare name together, so a function and a type of one name cannot pair. */
+function replacementKey(kind: ReplaceableKind, sql: string): string {
+  const name = REPLACEABLE_NAME[kind](sql)
+  return `${kind}:${name.slice(name.lastIndexOf('.') + 1).toLowerCase()}`
 }
 
 /**
@@ -457,7 +500,7 @@ interface MergedStatement {
  *
  * Postgres allows overloading, so one name can own several DROP+CREATE pairs
  * whose argument types differ. They cannot be told apart by name, and the
- * statements do not agree on a signature to match them by (see `routineKey`),
+ * statements do not agree on a signature to match them by (see `replacementKey`),
  * so pairing goes by position:
  *
  * - Adjacent DROP+CREATE always merge. dbdiff renders a changed routine from a
@@ -472,20 +515,22 @@ interface MergedStatement {
  * wrong pairing writes a migration that drops an overload and recreates a
  * different one in its place.
  */
-export function mergeRoutineReplacements(
+export function mergeReplacements(
   upStatements: string[],
   downStatements: string[],
 ): MergedStatement[] {
-  // Per name, the indices of the CREATEs still up for grabs, in source order.
+  // Per key, the indices of the CREATEs still up for grabs, in source order.
   const unclaimedCreates = new Map<string, number[]>()
   const dropCounts = new Map<string, number>()
   upStatements.forEach((sql, i) => {
-    const type = classifyStatement(sql)
-    const key = routineKey(sql)
-    if (type === CREATE_FUNCTION) {
-      unclaimedCreates.set(key, [...(unclaimedCreates.get(key) ?? []), i])
-    } else if (type === DROP_FUNCTION) {
+    const part = replaceablePart(sql)
+    if (!part) return
+
+    const key = replacementKey(part.kind, sql)
+    if (part.drop) {
       dropCounts.set(key, (dropCounts.get(key) ?? 0) + 1)
+    } else {
+      unclaimedCreates.set(key, [...(unclaimedCreates.get(key) ?? []), i])
     }
   })
 
@@ -496,12 +541,13 @@ export function mergeRoutineReplacements(
     if (absorbed.has(i)) return
 
     const down = downStatements[i] ?? ''
-    if (classifyStatement(upSql) !== DROP_FUNCTION) {
+    const part = replaceablePart(upSql)
+    if (!part?.drop) {
       out.push({ up: upSql, down })
       return
     }
 
-    const key = routineKey(upSql)
+    const key = replacementKey(part.kind, upSql)
     const unambiguous = dropCounts.get(key) === 1 && unclaimedCreates.get(key)?.length === 1
     const createIdx = claimCreateFor(unclaimedCreates, key, i, unambiguous)
     if (createIdx === undefined) {
@@ -509,11 +555,25 @@ export function mergeRoutineReplacements(
       return
     }
 
+    const createSql = upStatements[createIdx]
     absorbed.add(createIdx)
     out.push({
-      up: `${upSql}\n${upStatements[createIdx]}`,
+      // Drop first, create second, in one statement. Kept together rather than
+      // ordered apart because `orderStatements` sends drops to the last phase
+      // and creates to an early one, which put the CREATE before the DROP it
+      // was replacing — `type "order_state" already exists`, and the whole
+      // apply rolled back (issue #81). Phasing reads the CREATE in a merged
+      // pair, so the pair runs where the object it leaves behind belongs.
+      up: `${upSql}\n${createSql}`,
       down: [down, downStatements[createIdx] ?? ''].filter(Boolean).join('\n'),
-      modifiedRoutine: extractRoutineName(upStatements[createIdx]) + extractRoutineArgs(upSql),
+      modified: {
+        kind: part.kind,
+        // A routine's name is qualified by its argument types, since overloads
+        // share a name; nothing else can be overloaded.
+        name: part.kind === 'routine'
+          ? extractRoutineName(createSql) + extractRoutineArgs(upSql)
+          : REPLACEABLE_NAME[part.kind](createSql),
+      },
     })
   })
 
@@ -977,22 +1037,4 @@ export function extractRoutineArgs(sql: string): string {
     else if (sql[i] === ')' && --depth === 0) return sql.slice(open, i + 1)
   }
   return ''
-}
-
-/**
- * Key a routine for pairing a DROP with the CREATE that replaces it.
- *
- * The unqualified, lowercased name — dbdiff emits the DROP unqualified (`DROP
- * FUNCTION IF EXISTS "f"`) and the CREATE qualified (`CREATE OR REPLACE
- * FUNCTION public.f(...)`), so the schema has to come off before they match.
- *
- * Deliberately excludes the argument types even though the DROP now carries
- * them, because the CREATE does not: it comes from `pg_get_functiondef`, which
- * renders parameter names and defaults (`f(a text, b text DEFAULT 'x')`) rather
- * than the bare type list `regprocedure` gives the DROP. Overloads therefore
- * share a key, and `mergeRoutineReplacements` separates them by position.
- */
-function routineKey(sql: string): string {
-  const name = extractRoutineName(sql)
-  return name.slice(name.lastIndexOf('.') + 1).toLowerCase()
 }

@@ -324,3 +324,64 @@ describe('createsOnlyTriggers', () => {
     expect(createsOnlyTriggers('ALTER TABLE t ADD COLUMN c text;')).toBe(false)
   })
 })
+
+/**
+ * A replaced object's drop and create must stay together (issue #81).
+ *
+ * `orderStatements` sends drops to the last phase and creates to an early one,
+ * which is right for independent statements and wrong for the two halves of
+ * replacing one object. An enum whose values changed failed to apply with
+ * `type "order_state" already exists`.
+ */
+describe('statementPhase: a merged replacement pair', () => {
+  const pair = (drop: string, create: string) => `${drop}\n${create}`
+
+  it('phases a type replacement by the type it leaves behind', () => {
+    const merged = pair(
+      'DROP TYPE IF EXISTS "order_state";',
+      `CREATE TYPE "order_state" AS ENUM ('new', 'paid');`,
+    )
+
+    expect(statementPhase(merged)).toBe(PHASE.CREATE_BASE)
+    expect(statementPhase(merged)).toBeLessThan(PHASE.DROP_BASE)
+  })
+
+  it('phases a domain replacement the same way', () => {
+    const merged = pair(
+      'DROP DOMAIN IF EXISTS "positive_int";',
+      'CREATE DOMAIN "positive_int" AS integer CHECK (VALUE > 0);',
+    )
+
+    expect(statementPhase(merged)).toBe(PHASE.CREATE_BASE)
+  })
+
+  it('phases a sequence replacement the same way', () => {
+    const merged = pair(
+      'DROP SEQUENCE IF EXISTS "counter";',
+      'CREATE SEQUENCE "counter" START 42;',
+    )
+
+    expect(statementPhase(merged)).toBe(PHASE.CREATE_BASE)
+  })
+
+  it('still phases a lone DROP TYPE last', () => {
+    // An unmerged drop is a genuinely extra type, and dropping it last is
+    // correct — anything using it has to go first.
+    expect(statementPhase('DROP TYPE IF EXISTS "gone";')).toBe(PHASE.DROP_BASE)
+  })
+
+  it('orders a merged type replacement before the table that uses it', () => {
+    const merged = pair(
+      'DROP TYPE IF EXISTS "order_state";',
+      `CREATE TYPE "order_state" AS ENUM ('new');`,
+    )
+    const items = [
+      'ALTER TABLE "orders" ADD COLUMN "state" "order_state";',
+      merged,
+    ]
+
+    const ordered = orderStatements(items, s => s)
+
+    expect(ordered[0]).toBe(merged)
+  })
+})

@@ -44,7 +44,7 @@ supaforge snapshot --env=prod --migration            # Incremental backup with m
 | Storage | Storage API + `pg_policies` | ✅ Buckets (`public`, `type`, `file_size_limit`, `allowed_mime_types`, `avif_autodetection`; `owner_id` reported only), analytics and vector buckets, policies. Skipped when either side has no `storage` schema. `--include-files` adds file-level drift detection (checksums for JSON, size/date for binary) — **detection only, files are never transferred**. | Buckets via API (POST/PUT/DELETE); Policies via SQL |
 | Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Self-hosted covers provider flags and signup settings, not `JWT_EXP` / `MFA_ENABLED` | PATCH via API (hosted only) |
 | Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
-| Webhooks | `supabase_functions.hooks` + `pg_net` | ✅ | SQL when trigger metadata available |
+| Webhooks | `pg_trigger` + `pg_net` | ✅ Every trigger calling `supabase_functions.http_request`, compared on its full definition — so the URL, method, headers, params and timeout count, not just the table and events | SQL (up/down) |
 | Realtime | `pg_publication` + `pg_publication_tables`, and `pg_policies` on `realtime` | ✅ Publications, plus **Realtime Authorization** policies on `realtime.messages` (who may join which channel) | SQL (CREATE/ALTER PUBLICATION; CREATE/DROP POLICY) |
 | Vault Secrets | `vault.secrets` | ✅ | SQL (`vault.create_secret` / `vault.update_secret`) |
 | Postgres Extensions | `pg_extension` | ✅ | SQL (CREATE/DROP EXTENSION) |
@@ -1046,7 +1046,7 @@ supaforge diff                # schema + data checks active out of the box
 
 The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.
 
-**What the schema layer reaches.** `3.0.0-rc.12`, the pinned version, models
+**What the schema layer reaches.** `3.0.0-rc.13`, the pinned version, models
 composite types, domains, materialized views (and their indexes), standalone
 sequences and RLS policies — five kinds that earlier releases did not read at
 all, and therefore reported as no drift whether they matched or not. A schema
@@ -1086,10 +1086,26 @@ narrowing the scan:
 | `SUPAFORGE_DBDIFF_TIMEOUT` | `600` | Seconds before a diff is abandoned. Overrides `checks.schema.timeout` |
 | `SUPAFORGE_DBDIFF_MEMORY` | dbdiff's own `1G` | Passed to `--memory-limit`; takes `512M`, `2G`, or `-1` for unlimited |
 | `SUPAFORGE_CONNECT_TIMEOUT` | `15` | Seconds before a database connection attempt is abandoned. Applies to every connection, including the preflight reachability check |
+| `SUPAFORGE_CHECK_CONCURRENCY` | `4` | How many checks run at once. `1` restores running them one after another |
 
 ```bash
 SUPAFORGE_DBDIFF_TIMEOUT=600 SUPAFORGE_DBDIFF_MEMORY=2G supaforge diff
 ```
+
+**Connections and concurrency.** Queries share one connection pool per database
+rather than opening a connection per query, and the checks — which are
+independent of one another — run four at a time, so a scan spends its latency in
+parallel rather than end to end. The concurrency limit is deliberate rather than
+unbounded: the schema and data checks each spawn `@dbdiff/cli`, and a Supabase
+pooler counts every connection against your limit. Lower
+`SUPAFORGE_CHECK_CONCURRENCY` when diffing through a pooler with little
+headroom; `=1` makes a run strictly sequential, which is occasionally easier to
+follow when debugging one check.
+
+The report is assembled by position, not by completion order, so it reads in
+check order however the checks happen to finish. Two paths still hold a
+connection of their own by design: the preflight reachability probes, which have
+their own timeout, and an `--apply`, which is one connection for one transaction.
 
 **Per-environment overrides.** `checks.exclude` and `checks.schema.timeout` can
 be set on an individual environment, applying when it is the diff target and

@@ -39,7 +39,16 @@ supaforge hukam
 
 ## Single Database
 
-Only have one Supabase project? SupaForge works as a snapshot, backup, and audit tool for a single remote database — no second environment needed.
+Only have one Supabase project? SupaForge works as a snapshot, audit and cloning tool for a single remote database — no second environment needed.
+
+> **Not a substitute for database backups.** A snapshot records your
+> *configuration* — policies, cron jobs, webhooks, extensions, storage settings
+> — so you can see what changed and replay it elsewhere. It holds no table data
+> beyond the reference tables you list in `checks.data.tables`, and
+> `restore --from-snapshot` does not currently recreate the schema
+> ([#80](https://github.com/akalforge/supaforge/issues/80)). Use
+> `supaforge clone` to copy a database, and your provider's backups to protect
+> one.
 
 ```bash
 npm install -g @akalforge/supaforge
@@ -61,14 +70,18 @@ cat > supaforge.config.json << 'EOF'
 EOF
 
 # Capture a full snapshot (schema, RLS, cron, storage, auth, etc.)
-supaforge snapshot --env=prod
+supaforge snapshot --env=prod --apply
 
 # Clone remote to local for development
 supaforge clone --env=prod --apply
 
-# Incremental backup (snapshot + migration file)
-supaforge snapshot --env=prod --migration
+# Incremental record of what changed (snapshot + migration file)
+supaforge snapshot --env=prod --migration --apply
 ```
+
+> **`--apply` is not optional here.** Every one of these previews by default and
+> writes nothing without it, so `supaforge snapshot --env=prod` on its own
+> prints what it *would* capture and leaves you with no snapshot.
 
 > Single-database configs omit `source` and `target`. The `diff` command requires two environments — use `snapshot`, `clone`, and `restore` instead.
 
@@ -143,8 +156,9 @@ supaforge diff --ci --fail-on=warning     Fail on WARNING as well as CRITICAL
 supaforge sync                            Alias for diff --apply
 supaforge hukam                           Alias for diff 🙏
 
-supaforge snapshot                        Capture full 9-layer snapshot
-supaforge snapshot --migration            Also generate incremental migration diff
+supaforge snapshot                        Preview what a 9-layer snapshot would capture
+supaforge snapshot --apply                Capture it
+supaforge snapshot --migration --apply    Also generate incremental migration diff
 supaforge snapshot --list                 List all snapshots
 supaforge snapshot --prune --apply        Delete old snapshots
 
@@ -155,7 +169,7 @@ supaforge clone --env=prod --start-local  Auto-start a local PostgreSQL containe
 supaforge clone --list                    List existing clones
 supaforge clone --delete=<name> --apply   Remove a clone
 
-supaforge restore --env=local --from-snapshot=latest --apply   Restore from snapshot
+supaforge restore --env=local --from-snapshot=latest --apply   Replay a snapshot's SQL layers
 supaforge restore --env=local --from-migrations --apply        Replay migrations
 
 supaforge migrate create --name=add_orders   Generate a migration file from schema drift
@@ -182,6 +196,13 @@ supaforge mcp                             Start MCP stdio server for AI agents
 > `report` reads a local run log and prints it. Only `report --send` leaves the
 > machine, and only for the entries you pick: it shows exactly what would be
 > transmitted and asks first. No SQL, table names or schema content is included.
+>
+> `restore --from-snapshot` replays a snapshot's **SQL** layers — RLS policies,
+> cron jobs, webhooks, extensions, storage policies. The schema layer is
+> captured as JSON for diffing rather than as replayable SQL, so it is *not*
+> recreated ([#80](https://github.com/akalforge/supaforge/issues/80)): restore
+> into a database that already has the tables, and use `supaforge clone` to
+> build one that does.
 
 ### How `--apply` executes
 
@@ -194,6 +215,15 @@ executes it, a column before the index and view that read it, and the
 destructive drops go last. `@dbdiff/cli` emits statements in the order it walks
 the catalogue, which carries no such guarantee — applying that order directly
 failed on fix sets that were perfectly valid.
+
+> **Known limitation.** Sending drops to the end is wrong for the one case
+> where a drop and a create are two halves of *replacing the same object*: an
+> enum whose values changed arrives as `DROP TYPE` + `CREATE TYPE`, and the
+> create is currently ordered first, so it fails with `type … already exists`
+> and the transaction rolls back
+> ([#81](https://github.com/akalforge/supaforge/issues/81)). `supaforge migrate
+> create` writes the same fix set in a working order, so that is the way through
+> in the meantime. Routine replacement is already handled correctly.
 
 **Atomicity.** The whole SQL fix set runs in one transaction. PostgreSQL
 supports transactional DDL, so if any statement fails the rest are rolled back
@@ -520,7 +550,7 @@ packages/cli/
 │   ├── prove.ts         # Replay a fix set on a throwaway clone
 │   ├── scoring.ts       # Drift and posture scores (0–100)
 │   └── render.ts        # Terminal output
-└── test/                # 1335 tests across 62 files
+└── test/                # 1341 tests across 62 files
 ```
 
 ## Development
@@ -529,7 +559,7 @@ packages/cli/
 git clone https://github.com/akalforge/supaforge.git
 cd supaforge/packages/cli
 npm install
-npm test       # Run all tests (1335 across 62 files)
+npm test       # Run all tests (1341 across 62 files)
 npm run lint   # Type-check
 npm run build  # Build with tsup
 

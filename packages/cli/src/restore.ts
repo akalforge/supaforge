@@ -1,4 +1,5 @@
-import { readFile } from 'node:fs/promises'
+import { readFile, access } from 'node:fs/promises'
+import { constants } from 'node:fs'
 import { join } from 'node:path'
 import pg from 'pg'
 import { pgClientConfig } from './db.js'
@@ -9,6 +10,8 @@ import type { QueryFn } from './db'
 import { pgQuery } from './db'
 import { errMsg } from './utils/error'
 import { DEFAULT_IGNORE_SCHEMAS } from './defaults'
+import { dropUnsupportedSetStatements, knownParameters } from './prove'
+import { splitSqlStatements, isCommentOnly, isPsqlMetaCommand, stripPsqlMetaCommands } from './utils/sql-split'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
@@ -90,8 +93,28 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
         continue
       }
 
+      // The schema layer's own file is introspection JSON, not DDL; `schema.sql`
+      // is the replayable companion (issue #80). Say which it is and why when
+      // it is not there, rather than reporting "File not readable" — that
+      // sends the reader looking for a permissions problem, and the schema
+      // silently not being restored is the whole of the bug.
+      if (layer === 'schema' && !(await isReadable(join(options.snapshotDir, file)))) {
+        result.skipped.push({
+          type: 'sql',
+          label: `Layer: ${layer}`,
+          reason: info.sqlSkipReason
+            ?? 'this snapshot has no schema.sql — it predates one being written, so the '
+             + 'schema cannot be replayed. Use `supaforge clone`, or '
+             + '`restore --from-migrations`.',
+        })
+        continue
+      }
+
       try {
-        const content = await readFile(join(options.snapshotDir, file), 'utf-8')
+        const raw = await readFile(join(options.snapshotDir, file), 'utf-8')
+        const content = layer === 'schema'
+          ? await replayableSchemaSql(raw, options.targetUrl)
+          : raw
         const statements = extractExecutableStatements(content)
         for (const sql of statements) {
           try {
@@ -269,6 +292,36 @@ export async function previewMigrationRestore(cwd = process.cwd(), toVersion?: s
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+/** Whether a snapshot file exists and can be read. */
+async function isReadable(path: string): Promise<boolean> {
+  try {
+    await access(path, constants.R_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The schema dump, with preamble settings the target does not have removed.
+ *
+ * pg_dump writes its preamble for its own version, so a snapshot taken with a
+ * PostgreSQL 17 client carries `SET transaction_timeout = 0`, which a 15 or 16
+ * server rejects — and the restore would fail on the first line of the schema.
+ * The same filtering `--prove` applies for the same reason (issue #72).
+ *
+ * If the target cannot be asked what it supports, the dump is replayed as-is:
+ * a failure there is a real failure, and guessing which settings to drop would
+ * be worse than reporting it.
+ */
+async function replayableSchemaSql(sql: string, targetUrl: string): Promise<string> {
+  try {
+    return dropUnsupportedSetStatements(sql, await knownParameters(targetUrl)).sql
+  } catch {
+    return sql
+  }
+}
+
 function layerRestoreFile(layer: string): string {
   switch (layer) {
     case 'extensions': return 'extensions.sql'
@@ -281,22 +334,59 @@ function layerRestoreFile(layer: string): string {
   }
 }
 
+/** Blank lines and comment lines ahead of the statement's first real token. */
+const LEADING_NOISE = /^(?:[ \t]*(?:--[^\n]*)?\n)*[ \t]*/
+
+/** `CREATE SCHEMA x`, at the point the statement actually begins. */
+const OPENS_CREATE_SCHEMA = /^CREATE\s+SCHEMA\s+(?!IF\s+NOT\s+EXISTS\b)/i
+
+/**
+ * Make a `CREATE SCHEMA` conditional, if that is what this statement is.
+ *
+ * Both the test and the rewrite are anchored past pg_dump's comment header
+ * rather than applied to the statement as a whole. Matching anywhere reaches
+ * into routine bodies — a function running `EXECUTE 'CREATE SCHEMA x'` would
+ * have had its body rewritten, changing what the function does.
+ */
+function makeCreateSchemaConditional(statement: string): string {
+  const lead = LEADING_NOISE.exec(statement)?.[0] ?? ''
+  const body = statement.slice(lead.length)
+
+  if (!OPENS_CREATE_SCHEMA.test(body)) return statement
+  return lead + body.replace(/^CREATE\s+SCHEMA\s+/i, 'CREATE SCHEMA IF NOT EXISTS ')
+}
+
 function extractExecutableStatements(content: string): string[] {
   if (!content) return []
-  // Split by semicolon-followed-by-newline, filtering out comments and empty lines
-  return content
-    .split(/;\s*\n/)
-    .map(s => s.trim())
-    .filter(s => {
-      if (!s) return false
-      // Skip pure comment blocks
-      const lines = s.split('\n').filter(l => l.trim().length > 0)
-      return lines.some(l => !l.trim().startsWith('--'))
-    })
+
+  // `\restrict` / `\unrestrict` go first: they end at the newline, not at a
+  // semicolon, so removing them after splitting would take the statement they
+  // are sitting above with them.
+  const sql = stripPsqlMetaCommands(content)
+
+  // A real pg_dump cannot be split on `;` — routine bodies are dollar-quoted
+  // and contain their own semicolons (issue #80).
+  return splitSqlStatements(sql)
+    .filter(s => !isCommentOnly(s))
+    .filter(s => !isPsqlMetaCommand(s))
+    // A dump scoped to `--schema=public` recreates the schema, and every
+    // database already has `public`. Making it conditional keeps a genuinely
+    // new schema (`CREATE SCHEMA reporting`) working while restoring into an
+    // existing database stops failing on line one.
+    .map(makeCreateSchemaConditional)
     .map(s => s.endsWith(';') ? s : `${s};`)
 }
 
-function summarizeStatement(sql: string): string {
-  const first = sql.split('\n').find(l => !l.trim().startsWith('--'))?.trim() ?? sql.trim()
+export function summarizeStatement(sql: string): string {
+  // Blank lines are not the statement. Skipping only comment lines meant a
+  // dump's `-- header\n-- 2 extensions\n\nCREATE EXTENSION …` summarised as the
+  // empty line between them, so restore reported `✓ [sql]` with nothing after
+  // it and, worse, `✗ [sql] : policy … already exists` — an error with no
+  // indication of which statement produced it (issue #80).
+  const first = sql
+    .split('\n')
+    .map(l => l.trim())
+    .find(l => l.length > 0 && !l.startsWith('--'))
+    ?? sql.trim()
   return first.length > 80 ? `${first.slice(0, 77)}...` : first
 }

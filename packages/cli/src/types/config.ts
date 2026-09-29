@@ -98,6 +98,14 @@ export interface SnapshotLayerInfo {
   error?: string
   /** Human-readable reason the layer was skipped (when captured is false and there is no error). */
   skipReason?: string
+  /**
+   * A companion file holding replayable SQL, when the layer's own `file` is
+   * not replayable. The schema layer is captured as introspection JSON for
+   * diffing, so it also writes `schema.sql` for `restore` (issue #80).
+   */
+  sqlFile?: string
+  /** Why `sqlFile` is absent, when it could not be produced. */
+  sqlSkipReason?: string
 }
 
 export interface SnapshotManifest {

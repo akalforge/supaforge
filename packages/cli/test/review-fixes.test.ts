@@ -42,16 +42,40 @@ describe('platformOwnedObject by subject', () => {
 })
 
 describe('tolerableFailure', () => {
-  const missing = { code: '3F000', message: 'schema "storage" does not exist' }
-  it('skips a statement that needs a Supabase-only schema the target lacks', () => {
-    expect(tolerableFailure('GRANT SELECT ON "storage"."objects" TO "anon";', missing)).toMatch(/storage/)
-    expect(tolerableFailure('CREATE EXTENSION IF NOT EXISTS "pg_graphql" WITH SCHEMA "graphql";',
-      { code: '0A000', message: 'extension "pg_graphql" is not available' })).toMatch(/extension/)
+  const plain = new Set(['public', 'pg_catalog', 'information_schema'])
+  const supabase = new Set([...plain, 'auth', 'storage', 'graphql', 'extensions'])
+  const missing = (what: string) => ({ code: '3F000', message: `schema "${what}" does not exist` })
+
+  it('skips an attachment that needs a Supabase schema the target lacks', () => {
+    expect(tolerableFailure('GRANT SELECT ON "storage"."objects" TO "anon";', missing('storage'), plain)).toMatch(/storage/)
+    expect(tolerableFailure('CREATE POLICY p ON public.t USING (auth.uid() = owner);',
+      { code: '3F000', message: 'schema "auth" does not exist' }, plain)).toMatch(/auth/)
+    expect(tolerableFailure('ALTER TABLE ONLY public.profiles ADD CONSTRAINT profiles_id_fkey FOREIGN KEY (id) REFERENCES auth.users(id);',
+      missing('auth'), plain)).toMatch(/auth/)
+    expect(tolerableFailure('CREATE TRIGGER w AFTER INSERT ON public.o FOR EACH ROW EXECUTE FUNCTION supabase_functions.http_request();',
+      missing('supabase_functions'), plain)).toMatch(/supabase_functions/)
   })
-  it('fails the restore for anything else', () => {
-    expect(tolerableFailure('CREATE TABLE public.t (id int);', { code: '42P07', message: 'exists' })).toBeUndefined()
-    expect(tolerableFailure('CREATE VIEW public.v AS SELECT * FROM public.missing;', missing)).toBeUndefined()
-    expect(tolerableFailure('GRANT SELECT ON storage.objects TO anon;', { code: '42501', message: 'denied' })).toBeUndefined()
+
+  it('skips an extension the server does not ship', () => {
+    expect(tolerableFailure('CREATE EXTENSION IF NOT EXISTS "pg_graphql" WITH SCHEMA "graphql";',
+      { code: '0A000', message: 'extension "pg_graphql" is not available' }, plain)).toMatch(/extension/)
+  })
+
+  it('never skips on a target that has the schema — a Supabase target', () => {
+    // Something genuinely missing there is a real problem, not a plain-PG artefact.
+    expect(tolerableFailure('CREATE POLICY p ON storage.objects USING (storage.my_helper());',
+      { code: '42883', message: 'function storage.my_helper() does not exist' }, supabase)).toBeUndefined()
+  })
+
+  it('never skips a table, whatever it references', () => {
+    expect(tolerableFailure('CREATE TABLE public.t (id uuid DEFAULT auth.uid());', missing('auth'), plain)).toBeUndefined()
+  })
+
+  it('never skips anything else', () => {
+    expect(tolerableFailure('CREATE TABLE public.t (id int);', { code: '42P07', message: 'exists' }, plain)).toBeUndefined()
+    expect(tolerableFailure('CREATE VIEW public.v AS SELECT * FROM public.missing;', { code: '42P01', message: 'x' }, plain)).toBeUndefined()
+    expect(tolerableFailure('GRANT SELECT ON storage.objects TO anon;', { code: '42501', message: 'denied' }, plain)).toBeUndefined()
+    expect(tolerableFailure('CREATE EXTENSION foo;', { code: '42501', message: 'denied' }, plain)).toBeUndefined()
   })
 })
 

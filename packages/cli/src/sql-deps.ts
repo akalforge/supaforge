@@ -1,3 +1,4 @@
+import { splitSqlStatements } from './utils/sql-split.js'
 import { escapeRegex } from './utils/strings.js'
 
 /**
@@ -66,6 +67,11 @@ export const PHASE = {
  * FUNCTION f()` is read as a trigger.
  */
 const PHASE_RULES: Array<[RegExp, number]> = [
+  // A column type change grouped with the dependants dbdiff drops and
+  // recreates around it (see groupColumnTypeChanges) runs as the column change
+  // it is — before a foreign key that needs the new type, for one — not as the
+  // view or policy it happens to recreate.
+  [/^\s*DROP\s+(?:POLICY|TRIGGER|(?:MATERIALIZED\s+)?VIEW)\b[\s\S]*\bALTER\s+TABLE\s+\S+\s+ALTER\s+COLUMN\s+\S+\s+(?:SET\s+DATA\s+)?TYPE\b/i, PHASE.ALTER_TABLE],
   [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b/i, PHASE.CREATE_DEPENDANT],
   [/\bCREATE\s+POLICY\b/i, PHASE.CREATE_DEPENDANT],
   [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\b/i, PHASE.CREATE_VIEW],
@@ -366,16 +372,32 @@ function identifierMatcher(name: string): RegExp {
  */
 function linkDependencies(nodes: Node[], texts: string[], provides: string[][]): void {
   const droppers = texts.map((sql, i) => isDropOnly(sql, provides[i]))
+  // What a statement *uses* is what it mentions outside its DROPs. A column
+  // type change grouped with the dependants it drops and recreates mentions
+  // the policy it drops, and was made to wait for the fix that creates that
+  // policy — which then ran first, against the column's old type.
+  const uses = texts.map(withoutDropStatements)
 
   for (let provider = 0; provider < nodes.length; provider++) {
     for (const name of provides[provider]) {
       const matcher = identifierMatcher(name)
       for (let consumer = 0; consumer < nodes.length; consumer++) {
         if (consumer === provider || droppers[consumer]) continue
-        if (matcher.test(texts[consumer])) nodes[consumer].after.add(provider)
+        // A statement that creates `name` itself does not need another's:
+        // two column changes under one view each recreate it, and linking
+        // them both ways made a cycle, which the fallback resolves by
+        // report order rather than by phase.
+        if (provides[consumer].includes(name)) continue
+        if (matcher.test(uses[consumer])) nodes[consumer].after.add(provider)
       }
     }
   }
+}
+
+/** A statement batch with its DROP statements taken out. */
+function withoutDropStatements(sql: string): string {
+  if (!/\bDROP\b/i.test(sql)) return sql
+  return splitSqlStatements(sql).filter(s => !/^\s*DROP\b/i.test(sqlSkeleton(s))).join('\n')
 }
 
 /**

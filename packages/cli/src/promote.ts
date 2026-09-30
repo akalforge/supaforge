@@ -142,6 +142,7 @@ function isSelected(issueId: string, only: string[] | undefined): boolean {
 function classifyIssue(
   issue: { id: string; sql?: { up: string }; action?: SyncAction; manualOnly?: string },
   options: PlanOptions,
+  recreatedPolicies: ReadonlySet<string> = new Set(),
 ): { kind: 'sql'; sql: string } | { kind: 'api'; action: SyncAction } | { kind: 'skip'; reason: string } {
   if (!isSelected(issue.id, options.only)) {
     return { kind: 'skip', reason: 'Not selected by --only' }
@@ -155,7 +156,7 @@ function classifyIssue(
   }
 
   if (!options.allowDestructive) {
-    const why = destructiveReason(issue.sql.up)
+    const why = destructiveReason(issue.sql.up, recreatedPolicies)
     if (why) {
       return { kind: 'skip', reason: `Destructive — ${why}; re-run with --allow-destructive to apply` }
     }
@@ -165,6 +166,35 @@ function classifyIssue(
   if (outOfScope) return { kind: 'skip', reason: outOfScope }
 
   return { kind: 'sql', sql: issue.sql.up }
+}
+
+/**
+ * Policies that fixes in this apply create — the ones that will actually run.
+ *
+ * Lets the destructive gate tell a policy being removed from one being
+ * replaced across two fixes: a column type change drops the policies reading
+ * the column, and the policy's own fix creates the new definition once the
+ * type has changed (they cannot be one statement, because the new definition
+ * is not valid until then). Counted only from fixes that are selected and not
+ * held back themselves, so `--only` a column change without its policy fix is
+ * still gated as the removal it would be.
+ */
+function policiesCreatedBySelectedFixes(checks: ScanResult['checks'], options: PlanOptions): Set<string> {
+  const created = new Set<string>()
+  for (const check of checks) {
+    // Posture fixes do not run unless asked for (see planWork), so what they
+    // would create cannot stand in for a policy another fix drops.
+    const askedForExplicitly = options.checks?.includes(check.check) ?? false
+    if (!isComparisonCheck(check.check) && !options.applyPosture && !askedForExplicitly) continue
+    for (const issue of check.issues) {
+      const sql = issue.sql?.up
+      if (!sql || !isSelected(issue.id, options.only)) continue
+      if (!options.allowDestructive && destructiveReason(sql)) continue
+      if (outOfScopeReason(sql, options.tableFilter)) continue
+      for (const key of createdPolicies(sql)) created.add(key)
+    }
+  }
+  return created
 }
 
 /**
@@ -184,6 +214,7 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
   const relevant = scanResult.checks.filter(
     c => c.status === 'drifted' && (!options.checks || options.checks.includes(c.check)),
   )
+  const recreatedPolicies = policiesCreatedBySelectedFixes(relevant, options)
 
   for (const checkResult of relevant) {
     // A posture check judges the target on its own and fires identically
@@ -212,7 +243,7 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
 
     for (const issue of checkResult.issues) {
       const at = { check: checkResult.check, issueId: issue.id }
-      const outcome = classifyIssue(issue, options)
+      const outcome = classifyIssue(issue, options, recreatedPolicies)
 
       if (outcome.kind === 'sql') plan.sqlStatements.push({ ...at, sql: outcome.sql })
       else if (outcome.kind === 'api') plan.apiActions.push({ ...at, action: outcome.action })

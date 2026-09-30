@@ -52,7 +52,7 @@ const PLATFORM_ROLES = [
  */
 const API_ROLES = ['anon', 'authenticated', 'service_role']
 
-const quoted = (names: string[]) => names.map(n => `'${n}'`).join(', ')
+const quoted = (names: string[]) => names.map(n => `'${n.replace(/'/g, "''")}'`).join(', ')
 
 const ROLES_SQL = `
   SELECT

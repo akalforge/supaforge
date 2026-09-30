@@ -114,18 +114,25 @@ export async function findExternalDependents(
 }
 
 const EXTERNAL_DEPENDENTS_SQL = `
-  WITH inside AS (
+  -- What clearing drops: everything in the schemas except extension members,
+  -- which dropSchemaContents leaves in place. Counting those would refuse a
+  -- --force over, say, an auth default calling public.uuid_generate_v4()
+  -- from an extension installed in public, which is never dropped.
+  WITH members AS (
+    SELECT objid FROM pg_depend WHERE deptype = 'e'
+  ),
+  inside AS (
     SELECT c.oid, 'pg_class'::regclass AS classid
       FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
-     WHERE n.nspname = ANY($1)
+     WHERE n.nspname = ANY($1) AND c.oid NOT IN (SELECT objid FROM members)
     UNION ALL
     SELECT p.oid, 'pg_proc'::regclass
       FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-     WHERE n.nspname = ANY($1)
+     WHERE n.nspname = ANY($1) AND p.oid NOT IN (SELECT objid FROM members)
     UNION ALL
     SELECT t.oid, 'pg_type'::regclass
       FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
-     WHERE n.nspname = ANY($1)
+     WHERE n.nspname = ANY($1) AND t.oid NOT IN (SELECT objid FROM members)
   ),
   dependents AS (
     SELECT DISTINCT d.classid, d.objid, d.objsubid

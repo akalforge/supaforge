@@ -698,18 +698,39 @@ const SUPABASE_ONLY_SCHEMAS = [
   ...new Set([...SUPABASE_PLATFORM_SCHEMAS, ...PLATFORM_OWNED_SCHEMAS]),
 ].filter(s => s !== 'pg_catalog' && s !== 'information_schema')
 
-/** Does the statement name an object in a schema only Supabase has? */
-export function mentionedPlatformSchema(sql: string): string | undefined {
+/**
+ * The Supabase-only schema a statement names that the target lacks, if any.
+ */
+export function mentionedPlatformSchema(
+  sql: string,
+  targetSchemas: ReadonlySet<string>,
+): string | undefined {
   const skeleton = sqlSkeleton(sql)
   return SUPABASE_ONLY_SCHEMAS.find(schema =>
-    new RegExp(String.raw`(?:"${schema}"|\b${schema})\s*\.`, 'i').test(skeleton))
+    !targetSchemas.has(schema)
+    && new RegExp(String.raw`(?:"${schema}"|\b${schema})\s*\.`, 'i').test(skeleton))
 }
 
 /**
  * SQLSTATEs meaning "that does not exist here": a relation, function, schema
- * or object missing, or an extension the server does not ship.
+ * or object missing.
  */
-const ABSENT_ON_TARGET = new Set(['42P01', '42883', '3F000', '42704', '0A000', '58P01'])
+const ABSENT_ON_TARGET = new Set(['42P01', '42883', '3F000', '42704'])
+
+/** SQLSTATEs for an extension the server does not ship. */
+const EXTENSION_UNAVAILABLE = new Set(['0A000', '58P01'])
+
+/**
+ * Statements that attach to an object rather than define one: a grant, a
+ * policy, a trigger, a view, a comment, a foreign key, publication
+ * membership, a cron call. Only these may be skipped — a table or a column
+ * that cannot be created fails the restore, however it fails.
+ */
+const ATTACHMENT = new RegExp(String.raw`^\s*(?:`
+  + String.raw`GRANT|REVOKE|COMMENT\s+ON|SELECT|ALTER\s+PUBLICATION|ALTER\s+DEFAULT\s+PRIVILEGES|`
+  + String.raw`ALTER\s+POLICY|ALTER\s+TABLE\s+(?:ONLY\s+)?\S+\s+ADD\s+CONSTRAINT\b[\s\S]*\bFOREIGN\s+KEY|`
+  + String.raw`CREATE\s+(?:OR\s+REPLACE\s+)?(?:POLICY|(?:CONSTRAINT\s+)?TRIGGER|VIEW|MATERIALIZED\s+VIEW|RULE)`
+  + String.raw`)\b`, 'i')
 
 /**
  * Why a failed statement can be skipped instead of failing the restore, or
@@ -718,25 +739,39 @@ const ABSENT_ON_TARGET = new Set(['42P01', '42883', '3F000', '42704', '0A000', '
  * A Supabase snapshot restored into plain PostgreSQL carries things that
  * cannot exist there: `pg_graphql`, a Database Webhook calling
  * `supabase_functions.http_request`, a grant on `storage.objects`, a policy
- * calling `auth.uid()`. In one transaction, the first of them rolled back the
- * whole restore — nothing applied at all. They are skipped by name instead,
- * but only when both hold: the statement names a Supabase-only schema (or
- * creates an extension), and PostgreSQL's error says something is missing.
- * Any other failure still fails the restore, so on a Supabase target, where
- * these all exist, nothing is quietly dropped.
+ * calling `auth.uid()`, a foreign key to `auth.users`. In one transaction the
+ * first of them rolled back the whole restore — nothing applied at all.
+ *
+ * So they are skipped by name, under three conditions together: the
+ * statement only attaches to something (ATTACHMENT), PostgreSQL's error says
+ * something is missing, and the Supabase schema it names does not exist on
+ * this target at all. On a Supabase target every such schema exists, so
+ * nothing there is ever skipped this way; and a table that cannot be created
+ * fails the restore wherever it is. An extension the server does not ship is
+ * skipped on its own terms.
+ *
+ * @param targetSchemas the schemas the target has, read after the failure
  */
-export function tolerableFailure(sql: string, err: unknown): string | undefined {
+export function tolerableFailure(
+  sql: string,
+  err: unknown,
+  targetSchemas: ReadonlySet<string>,
+): string | undefined {
   const code = (err as { code?: string } | null)?.code
-  if (!code || !ABSENT_ON_TARGET.has(code)) return undefined
+  if (!code) return undefined
+  const skeleton = sqlSkeleton(sql)
 
-  if (/^\s*CREATE\s+EXTENSION\b/i.test(sqlSkeleton(sql))) {
-    return `extension not available on this server: ${errMsg(err)}`
+  if (/^\s*CREATE\s+EXTENSION\b/i.test(skeleton)) {
+    return EXTENSION_UNAVAILABLE.has(code)
+      ? `extension not available on this server: ${errMsg(err)}`
+      : undefined
   }
-  const schema = mentionedPlatformSchema(sql)
-  if (schema) {
-    return `depends on ${schema}, which this target does not have (${errMsg(err)})`
-  }
-  return undefined
+  if (!ABSENT_ON_TARGET.has(code) || !ATTACHMENT.test(skeleton)) return undefined
+
+  const schema = mentionedPlatformSchema(sql, targetSchemas)
+  return schema
+    ? `depends on ${schema}, which this target does not have (${errMsg(err)})`
+    : undefined
 }
 
 /**
@@ -768,16 +803,18 @@ async function applyStatement(
     if (transactional) await client.query('RELEASE SAVEPOINT sf_restore_statement')
     result.applied.push({ type: 'sql', label: summarizeStatement(sql) })
   } catch (err) {
-    const tolerated = tolerableFailure(sql, err)
+    // Back to the savepoint first: until then the transaction accepts no
+    // query, and deciding needs one.
+    if (transactional) await client.query('ROLLBACK TO SAVEPOINT sf_restore_statement')
+    const { rows } = await client.query<{ nspname: string }>('SELECT nspname FROM pg_namespace')
+    const tolerated = tolerableFailure(sql, err, new Set(rows.map(r => r.nspname)))
     if (tolerated) {
-      if (transactional) await client.query('ROLLBACK TO SAVEPOINT sf_restore_statement')
       result.skipped.push({ type: 'sql', label: summarizeStatement(sql), reason: tolerated })
       return
     }
     result.errors.push({ type: 'sql', label: summarizeStatement(sql), error: errMsg(err) })
-    // In a transaction the first failure aborts it, and every statement after
-    // reports `current transaction is aborted` — noise that buries the one
-    // error that matters. Stop here and let the rollback handle it.
+    // In a transaction, stop at the first real failure and let the rollback
+    // handle it: everything after would only report the transaction aborted.
     if (transactional) throw new RestoreAborted()
   }
 }

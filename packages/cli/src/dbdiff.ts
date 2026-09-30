@@ -355,12 +355,18 @@ export function isDestructiveSql(sql: string): boolean {
 /**
  * Why this statement is gated, in the words the skip line should use.
  *
+ * `recreatedElsewhere` holds the policies (`table.policy`, as createdPolicies
+ * keys them) that other fixes applied alongside this one create.
+ *
  * "Destructive (drops data)" was printed for every case once policies joined
  * the list, which is wrong for a policy — nothing is lost from a table, and
  * saying so obscures the part that matters, that removing a RESTRICTIVE policy
  * opens access up.
  */
-export function destructiveReason(sql: string): string | undefined {
+export function destructiveReason(
+  sql: string,
+  recreatedElsewhere: ReadonlySet<string> = new Set(),
+): string | undefined {
   const skeleton = sqlSkeleton(sql).toUpperCase()
 
   if (/\bDROP\s+SCHEMA\b/.test(skeleton)) return 'drops a schema and everything in it'
@@ -373,7 +379,10 @@ export function destructiveReason(sql: string): string | undefined {
   if (/\bDROP\s+COLUMN\b/.test(skeleton)) return 'drops a column and its values'
   if (/\bDELETE\s+FROM\b/.test(skeleton)) return 'deletes rows'
 
-  const policies = policiesRemoved(sql)
+  // A policy another fix in the same apply creates again is being replaced,
+  // not removed: a column type change drops the policies reading the column
+  // and the policy's own fix puts the new one back once the type has changed.
+  const policies = policiesRemoved(sql).filter(key => !recreatedElsewhere.has(key))
   if (policies.length > 0) {
     return policies.length === 1
       ? `removes the policy ${policies[0]}, which may widen access`
@@ -449,11 +458,17 @@ export function sqlToIssues(
 
   if (upStatements.length === 0) return []
 
+  upStatements = groupColumnTypeChanges(upStatements)
+  downStatements = groupColumnTypeChanges(downStatements)
+
   const merged = mergeReplacements(upStatements, downStatements)
 
   // Generate one issue per UP statement, paired with its DOWN counterpart
   return merged.map(({ up: upSql, down: downSql, modified }, i) => {
-    const type = classifyStatement(upSql)
+    // A grouped column type change is named by its ALTER, not by the DROP
+    // that opens the group.
+    const lead = columnTypeChangeOf(upSql) ?? upSql
+    const type = classifyStatement(lead)
 
     if (modified) {
       const report = REPLACEABLE_REPORT[modified.kind]
@@ -473,11 +488,135 @@ export function sqlToIssues(
       severity: DROP_TYPES.includes(type) ? 'critical' : 'warning',
       // The DOWN counterpart is passed so a title can recover a schema the UP
       // statement does not carry — see routineLabel (issue #47).
-      title: summariseStatement(upSql, check, downSql),
+      title: summariseStatement(lead, check, downSql),
       description: `${check === 'schema' ? 'Schema' : 'Data'} difference detected by @dbdiff/cli.`,
       sql: { up: upSql, down: downSql },
     }
   })
+}
+
+/** `ALTER TABLE t ALTER COLUMN c TYPE ...`, capturing the table and column. */
+const ALTER_COLUMN_TYPE = /^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?((?:"[^"]+"|[\w$]+)(?:\.(?:"[^"]+"|[\w$]+))?)\s+ALTER\s+COLUMN\s+("[^"]+"|[\w$]+)\s+(?:SET\s+DATA\s+)?TYPE\b/i
+
+/** The ALTER ... TYPE statement inside a grouped column change, if this is one. */
+function columnTypeChangeOf(sql: string): string | undefined {
+  if (!/^\s*DROP\s+/i.test(sql)) return undefined
+  return splitStatements(sql).find(s => ALTER_COLUMN_TYPE.test(s))
+}
+
+/** An identifier without quotes or a `public.` qualifier, for comparing names. */
+function plainName(identifier: string): string {
+  return identifier.replace(/"/g, '').replace(/^public\./i, '').trim()
+}
+
+/**
+ * Keep a column type change together with the dependants dbdiff drops and
+ * recreates around it.
+ *
+ * PostgreSQL refuses `ALTER COLUMN ... TYPE` while a view, policy or trigger
+ * condition reads the column, so @dbdiff/cli brackets the change: drop them,
+ * retype, recreate them with their grants and comments. As separate issues
+ * that bracket came apart — the DROP POLICY was held back by the destructive
+ * gate as a removal while the ALTER went ahead and failed, and two column
+ * changes under one view each became a CREATE VIEW, the second of which
+ * failed on the first. One change, one issue.
+ *
+ * Recognised by shape: the DROP ... IF EXISTS statements immediately before
+ * the ALTER, and after it the rest of that column's change and the statements
+ * that recreate, grant, comment on or index what was dropped. A plain type
+ * change with nothing around it is left exactly as it was.
+ */
+export function groupColumnTypeChanges(statements: string[]): string[] {
+  const out: string[] = []
+  let i = 0
+
+  while (i < statements.length) {
+    const alter = ALTER_COLUMN_TYPE.exec(statements[i])
+    if (!alter) {
+      out.push(statements[i])
+      i++
+      continue
+    }
+
+    const [, table, column] = alter
+    const views = new Set<string>()
+    const attached = new Set<string>()    // `name@table` for policies and triggers
+
+    // Walk back over the drops dbdiff emitted for this change.
+    const drops: Array<{ index: number; view?: string; attached?: string; table?: string }> = []
+    let start = out.length
+    while (start > 0) {
+      const drop = /^\s*DROP\s+(?:(MATERIALIZED\s+VIEW|VIEW)|(POLICY|TRIGGER))\s+IF\s+EXISTS\s+((?:"[^"]+"|[\w$]+)(?:\.(?:"[^"]+"|[\w$]+))?)(?:\s+ON\s+((?:"[^"]+"|[\w$]+)(?:\.(?:"[^"]+"|[\w$]+))?))?\s*;?\s*$/i
+        .exec(out[start - 1])
+      if (!drop) break
+      if (drop[1]) {
+        views.add(plainName(drop[3]))
+        drops.unshift({ index: start - 1, view: plainName(drop[3]) })
+      } else {
+        const key = `${plainName(drop[3])}@${plainName(drop[4] ?? '')}`
+        attached.add(key)
+        drops.unshift({ index: start - 1, attached: key, table: plainName(drop[4] ?? '') })
+      }
+      start--
+    }
+    if (drops.length === 0) {
+      out.push(statements[i])
+      i++
+      continue
+    }
+
+    const onView = (name: string) => views.has(plainName(name))
+    const recreated = new Set<string>()
+    const belongs = (sql: string): boolean => {
+      const sameColumn = ALTER_COLUMN_TYPE.exec(sql)
+        ?? /^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?((?:"[^"]+"|[\w$]+)(?:\.(?:"[^"]+"|[\w$]+))?)\s+ALTER\s+COLUMN\s+("[^"]+"|[\w$]+)\s+(?:SET|DROP)\b/i.exec(sql)
+      if (sameColumn) return plainName(sameColumn[1]) === plainName(table) && plainName(sameColumn[2]) === plainName(column)
+
+      let m = /^\s*CREATE\s+(?:MATERIALIZED\s+)?VIEW\s+((?:"[^"]+"|[\w$]+)(?:\.(?:"[^"]+"|[\w$]+))?)/i.exec(sql)
+      if (m) return onView(m[1])
+      m = /^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\b[\s\S]*?\bON\s+(?:ONLY\s+)?((?:"[^"]+"|[\w$]+)(?:\.(?:"[^"]+"|[\w$]+))?)/i.exec(sql)
+      if (m) return onView(m[1])
+      m = /^\s*(?:GRANT|REVOKE)\b[\s\S]*?\bON\s+(?:TABLE\s+)?((?:"[^"]+"|[\w$]+)(?:\.(?:"[^"]+"|[\w$]+))?)\s+(?:TO|FROM)\b/i.exec(sql)
+      if (m) return onView(m[1])
+      m = /^\s*COMMENT\s+ON\s+(?:MATERIALIZED\s+VIEW|VIEW)\s+((?:"[^"]+"|[\w$]+)(?:\.(?:"[^"]+"|[\w$]+))?)/i.exec(sql)
+      if (m) return onView(m[1])
+      m = /^\s*COMMENT\s+ON\s+COLUMN\s+((?:"[^"]+"|[\w$]+)(?:\.(?:"[^"]+"|[\w$]+))?)\.(?:"[^"]+"|[\w$]+)\s+IS\b/i.exec(sql)
+      if (m) return onView(m[1])
+      m = /^\s*CREATE\s+(?:POLICY|(?:CONSTRAINT\s+)?TRIGGER)\s+("[^"]+"|[\w$]+)[\s\S]*?\bON\s+((?:"[^"]+"|[\w$]+)(?:\.(?:"[^"]+"|[\w$]+))?)/i.exec(sql)
+      if (m) {
+        const key = `${plainName(m[1])}@${plainName(m[2])}`
+        if (attached.has(key)) { recreated.add(key); return true }
+        return onView(m[2])
+      }
+      return false
+    }
+
+    let end = i + 1
+    while (end < statements.length && belongs(statements[end])) end++
+
+    // A policy or trigger drop that is neither on the altered table nor put
+    // back here belongs to another diff that happened to land next to this
+    // one — a policy genuinely being removed. Grouping it would put the whole
+    // column change behind the destructive gate with it, so the run is
+    // trimmed from its far end until only this change's own drops remain.
+    const foreign = (d: typeof drops[number]) =>
+      d.attached !== undefined && d.table !== plainName(table) && !recreated.has(d.attached)
+    while (drops.length > 0 && foreign(drops[0])) {
+      drops.shift()
+      start++
+    }
+    if (drops.length === 0) {
+      out.push(statements[i])
+      i++
+      continue
+    }
+
+    const group = [...out.splice(start), ...statements.slice(i, end)]
+    out.push(group.join('\n'))
+    i = end
+  }
+
+  return out
 }
 
 interface MergedStatement {
@@ -494,13 +633,15 @@ interface MergedStatement {
  * same way — an enum whose values changed arrives as `DROP TYPE` + `CREATE
  * TYPE` — and needed the same treatment for the same two reasons (issue #81).
  */
-type ReplaceableKind = 'routine' | 'type' | 'sequence'
+type ReplaceableKind = 'routine' | 'type' | 'sequence' | 'policy'
 
 /** How each kind's identifier is read out of a statement. */
 const REPLACEABLE_NAME: Record<ReplaceableKind, (sql: string) => string> = {
   routine: extractRoutineName,
   type: (sql) => extractQualifiedName(sql, /\b(?:TYPE|DOMAIN)\s+(?:IF\s+EXISTS\s+)?/i),
   sequence: (sql) => extractQualifiedName(sql, /\bSEQUENCE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?/i),
+  // `table.policy`: a policy name is unique only per table.
+  policy: (sql) => policyLabel(sql),
 }
 
 /** How a merged pair of each kind is reported. */
@@ -508,10 +649,17 @@ const REPLACEABLE_REPORT: Record<ReplaceableKind, { idPart: string; label: strin
   routine:  { idPart: 'function', label: 'Function modified', what: 'Function body' },
   type:     { idPart: 'type',     label: 'Type modified',     what: 'Type definition' },
   sequence: { idPart: 'sequence', label: 'Sequence modified', what: 'Sequence definition' },
+  policy:   { idPart: 'policy',   label: 'Policy modified',   what: 'Policy definition' },
 }
 
 /** Whether a statement drops or creates a replaceable object, and of which kind. */
 function replaceablePart(sql: string): { kind: ReplaceableKind; drop: boolean } | undefined {
+  // dbdiff renders a changed policy as DROP POLICY + CREATE POLICY, adjacent.
+  // Apart, the DROP read as a policy *removed* and was held back by the
+  // destructive gate (issue #88), leaving the CREATE to fail on the policy
+  // still there. Together they are a replacement, which the gate allows.
+  if (/^\s*DROP\s+POLICY\b/i.test(sql)) return { kind: 'policy', drop: true }
+  if (/^\s*CREATE\s+POLICY\b/i.test(sql)) return { kind: 'policy', drop: false }
   switch (classifyStatement(sql)) {
     case CREATE_FUNCTION:   return { kind: 'routine',  drop: false }
     case DROP_FUNCTION:     return { kind: 'routine',  drop: true }
@@ -526,6 +674,7 @@ function replaceablePart(sql: string): { kind: ReplaceableKind; drop: boolean } 
 /** Kind and bare name together, so a function and a type of one name cannot pair. */
 function replacementKey(kind: ReplaceableKind, sql: string): string {
   const name = REPLACEABLE_NAME[kind](sql)
+  if (kind === 'policy') return `policy:${name.replace(/"/g, '').toLowerCase()}`
   return `${kind}:${name.slice(name.lastIndexOf('.') + 1).toLowerCase()}`
 }
 

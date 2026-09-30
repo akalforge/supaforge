@@ -599,6 +599,12 @@ Webhook, a grant on `storage.objects`, a policy calling `auth.uid()` — are
 skipped and listed, as is an extension the server does not ship. A table that
 cannot be created still fails the restore.
 
+Grants come back exactly as captured. The schema is dumped without privileges,
+so a recreated table or view first gets whatever the target's default
+privileges give (on Supabase, everything to `anon`); those are cleared before
+the captured grants are replayed, so a view that had been revoked from `anon`
+stays revoked.
+
 **Snapshot pruning**: Use `--prune` to delete old snapshots, keeping the most
 recent 7 (configurable with `--keep`). Preview mode by default — add `--apply`
 to execute. A snapshot an incremental migration was generated against is

@@ -249,6 +249,12 @@ foreign key to `auth.users`, a Database Webhook, a policy calling `auth.uid()`,
 an extension the server does not ship — is skipped and listed by name. A table
 that cannot be created still fails the restore.
 
+Grants come back exactly as captured. The schema is dumped without privileges,
+so a recreated table or view first gets whatever the target's default
+privileges give (on Supabase, everything to `anon`); those are cleared before
+the captured grants are replayed, so a view that had been revoked from `anon`
+stays revoked.
+
 `restore --from-migrations` replays your migration files instead, tracking them
 in `supabase_migrations.schema_migrations` — the table the Supabase CLI uses,
 rather than one in `public`.

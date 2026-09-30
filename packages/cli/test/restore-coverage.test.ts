@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
   previewSnapshotRestore,
+  summarizeStatement,
   grantTargetRole,
   createRoleIfMissing,
   conditionalPublicationMembership,
@@ -108,6 +109,21 @@ describe('previewSnapshotRestore: layer coverage', () => {
 
     expect(byLayer.get('realtime')).toContain('ALTER PUBLICATION')
     expect(byLayer.get('roles')).toContain('GRANT SELECT')
+  })
+
+  it('summarises every layer as SQL, not as the file header', async () => {
+    // Each layer file opens with a `-- SupaForge … Snapshot` header, and it
+    // lands in the same chunk as the first statement. The preview printed the
+    // statement's first *line*, so every layer's first entry read
+    // `-- SupaForge Role Grants Snapshot` instead of the GRANT — a preview you
+    // cannot read, which is the one thing a preview must not be.
+    const preview = await previewSnapshotRestore(dir)
+
+    for (const { layer, statements } of preview) {
+      const summary = summarizeStatement(statements[0])
+      expect(summary.startsWith('--'), `${layer}: ${summary}`).toBe(false)
+      expect(summary.length, layer).toBeGreaterThan(0)
+    }
   })
 
   it('skips a layer the snapshot did not capture', async () => {

@@ -7,6 +7,7 @@ import {
   previewSnapshotRestore,
   previewMigrationRestore,
   getPublicTables,
+  summarizeStatement,
 } from '../restore'
 import { warn, cmd } from '../ui.js'
 import { renderTip } from '../tips.js'
@@ -142,9 +143,14 @@ export default class Restore extends BaseCommand {
 
       for (const { layer, statements } of preview) {
         this.log(`  Layer: ${layer} (${statements.length} statements)`)
+        // `summarizeStatement`, not the first line: a statement carrying a
+        // leading comment — which every layer file's first one does, since the
+        // header lands in the same chunk — showed the comment instead of the
+        // SQL. A preview you cannot read is the one thing a preview must not
+        // be. It is also what the apply path prints, so the two now describe
+        // the same statement the same way.
         for (const stmt of statements.slice(0, 3)) {
-          const summary = stmt.split('\n')[0].slice(0, 80)
-          this.log(`    ${summary}`)
+          this.log(`    ${summarizeStatement(stmt)}`)
         }
         if (statements.length > 3) {
           this.log(`    ... and ${statements.length - 3} more`)

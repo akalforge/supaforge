@@ -5,15 +5,16 @@ import { join } from 'node:path'
 import {
   loadMigrations,
   listMigrationFiles,
-  MIGRATIONS_TABLE,
 } from '../src/migration.js'
 import type { MigrationFile } from '../src/types/config.js'
 
-describe('MIGRATIONS_TABLE', () => {
-  it('is the expected table name', () => {
-    expect(MIGRATIONS_TABLE).toBe('_supaforge_migrations')
-  })
-})
+/**
+ * The tracking table's name lives in constants.ts and is asserted there and in
+ * restore.test.ts. `migration.ts` used to export a second one reading
+ * `_supaforge_migrations`, which nothing used and which named the table in
+ * `public` that issue #93 moved out of it — so anyone reading this module
+ * believed the old, world-readable location was still the live one.
+ */
 
 describe('loadMigrations', () => {
   let tempDir: string

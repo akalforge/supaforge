@@ -6,9 +6,6 @@ import { SUPAFORGE_DIR, MIGRATIONS_SUBDIR } from './constants'
 import { splitSqlStatements, isCommentOnly } from './utils/sql-split.js'
 import { slugify } from './utils/strings'
 
-/** Migration tracking table name */
-export const MIGRATIONS_TABLE = '_supaforge_migrations'
-
 export interface BackupOptions extends Omit<SnapshotOptions, 'cwd'> {
   cwd?: string
   description?: string

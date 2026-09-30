@@ -273,14 +273,16 @@ export class Preflight {
       // Named before the wait, not after: a connection that is merely slow
       // otherwise leaves the header on screen with no clue which of the two
       // environments is holding things up (issue #44).
-      this.pending(`      ${dim(`… connecting to ${db.label.toLowerCase()} database`)}`)
+      // The label is already the noun — "Database", "Target", "Source" — so
+      // appending "database" gave "Database database reachable" (issue #97).
+      this.pending(`      ${dim(`… connecting to ${db.label.toLowerCase()}`)}`)
       const result = await checkConnection(db.dbUrl)
       this.pending(null)
       if (result.reachable) {
-        log(`      ${ok('✓')} ${db.label} database reachable ${dim(`(PostgreSQL ${result.version})`)}`)
+        log(`      ${ok('✓')} ${db.label} reachable ${dim(`(PostgreSQL ${result.version})`)}`)
         entries.push({ label: db.label, passed: true, detail: `PostgreSQL ${result.version}` })
       } else {
-        log(`      ${warn('✗')} ${db.label} database not reachable: ${redactUrls(describeFailure(result.error))}`)
+        log(`      ${warn('✗')} ${db.label} not reachable: ${redactUrls(describeFailure(result.error))}`)
         const hints = await buildConnectionHints(db.dbUrl, result.error)
         if (hints.length > 0) {
           log(`\n      ${dim('Hints:')}`)

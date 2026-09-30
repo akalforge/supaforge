@@ -489,8 +489,35 @@ describe('summariseStatement', () => {
     // Named by the index, not the table it is on, and not the schema (issue #47).
     ['CREATE INDEX idx_bio ON users(bio);', 'schema', 'Index missing: public.idx_bio'],
     ['DROP INDEX idx_bio;', 'schema', 'Extra index: public.idx_bio'],
+    // Policies, keyed `table.policy` because a policy name is unique only per
+    // table — the same identity the rls check uses, so the two checks now name
+    // the same policy the same way (issue #97).
+    ['CREATE POLICY "own_rows" ON "public"."orders" FOR SELECT USING (true);', 'schema', 'Policy missing: public.orders.own_rows'],
+    ['DROP POLICY IF EXISTS "own_rows" ON "public"."orders";', 'schema', 'Extra policy: public.orders.own_rows'],
+    ['ALTER POLICY "own_rows" ON "public"."orders" USING (false);', 'schema', 'Policy altered: public.orders.own_rows'],
+    // The table is qualified inside the policy rule: the caller only qualifies
+    // a name with no dot in it, and `orders.own_rows` already has one.
+    ['CREATE POLICY own_rows ON orders FOR ALL USING (true);', 'schema', 'Policy missing: public.orders.own_rows'],
   ] as const)('summarises %j (%s) → %s', (sql, check, expected) => {
     expect(summariseStatement(sql, check)).toBe(expected)
+  })
+
+  it('never titles a policy statement "unknown"', () => {
+    // These fell through every rule to the catch-all, which looks for a TABLE /
+    // INTO / FROM / UPDATE keyword a policy statement does not have. They were
+    // the one finding in a report that named no object at all (issue #97).
+    for (const sql of [
+      'CREATE POLICY "p" ON "public"."orders" FOR SELECT USING (true);',
+      'DROP POLICY IF EXISTS "p" ON "public"."orders";',
+      'ALTER POLICY "p" ON "public"."orders" USING (true);',
+    ]) {
+      expect(summariseStatement(sql, 'schema'), sql).not.toContain('unknown')
+    }
+  })
+
+  it('names the policy even when the table cannot be read', () => {
+    // Better a bare policy name than "unknown".
+    expect(summariseStatement('CREATE POLICY "p";', 'schema')).toBe('Policy missing: public.p')
   })
 
   it.each([

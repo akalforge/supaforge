@@ -847,11 +847,31 @@ const AFTER = {
   sequence: /\bSEQUENCE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?/i,
   table: /\bTABLE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:ONLY\s+)?/i,
   index: /\bINDEX\s+(?:CONCURRENTLY\s+)?(?:IF\s+(?:NOT\s+)?EXISTS\s+)?/i,
+  policy: /\bPOLICY\s+(?:IF\s+EXISTS\s+)?/i,
   on: /\bON\s+(?:ONLY\s+)?/i,
 }
 
 /** Name an object by the identifier following `head`. */
 const named = (head: RegExp) => (sql: string) => extractQualifiedName(sql, head)
+
+/**
+ * `table.policy` for a policy statement.
+ *
+ * A policy name is unique only per table, so the table is part of its
+ * identity — the same keying the RLS check uses, which means the two checks
+ * now name the same policy the same way.
+ */
+function policyLabel(sql: string): string {
+  const policy = extractQualifiedName(sql, AFTER.policy)
+  const table = extractQualifiedName(sql, AFTER.on)
+
+  if (policy === UNKNOWN_NAME) return UNKNOWN_NAME
+  if (table === UNKNOWN_NAME) return policy
+
+  // The table is qualified here rather than by the caller: the caller only
+  // qualifies a name with no dot in it, and `orders.p` already has one.
+  return `${qualifySchemaName(table)}.${policy}`
+}
 
 /**
  * The schema @dbdiff/cli compares.
@@ -929,6 +949,15 @@ const SCHEMA_RULES: SummaryRule[] = [
 
   { match: /^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\b/i, label: 'Index missing', name: indexLabel },
   { match: /^\s*DROP\s+INDEX\b/i, label: 'Extra index', name: named(AFTER.index) },
+
+  // Policies. Without these, dbdiff's own CREATE/DROP POLICY statements fell
+  // through to the catch-all and were titled "Schema change: unknown" — the
+  // one finding in a report that named no object at all (issue #97). Keyed
+  // `table.policy`, which is how a policy is identified and how the RLS check
+  // names the same one.
+  { match: /^\s*CREATE\s+POLICY\b/i, label: 'Policy missing', name: policyLabel },
+  { match: /^\s*ALTER\s+POLICY\b/i, label: 'Policy altered', name: policyLabel },
+  { match: /^\s*DROP\s+POLICY\b/i, label: 'Extra policy', name: policyLabel },
 
   { match: /^\s*CREATE\s+SEQUENCE\b/i, label: 'Sequence missing', name: named(AFTER.sequence) },
   { match: /^\s*ALTER\s+SEQUENCE\b/i, label: 'Sequence altered', name: named(AFTER.sequence) },

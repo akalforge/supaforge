@@ -25,10 +25,12 @@ import { errMsg, redactUrls } from '../utils/error.js'
 import type { SupaForgeConfig } from '../types/config.js'
 
 /** Combined list of schemas to exclude from pg_dump when cloning. */
-const CLONE_EXCLUDE_SCHEMAS = [
+// De-duplicated: `_realtime` is in both lists, so it was excluded — and
+// printed — twice (issue #97).
+const CLONE_EXCLUDE_SCHEMAS = [...new Set([
   ...DEFAULT_IGNORE_SCHEMAS,
   ...CLONE_EXTRA_EXCLUDE_SCHEMAS,
-]
+])]
 
 /**
  * Clone a remote environment to a local database and manage clones.

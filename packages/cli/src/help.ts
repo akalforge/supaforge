@@ -19,7 +19,12 @@ function envVarsOf(command: Command.Loadable): CommandWithEnvVars['envVars'] {
 
 /**
  * Desired command order — matches the natural workflow:
- * setup → detect → snapshot → clone → restore → easter egg
+ * setup → detect → snapshot → clone → restore → migrate, then the tools.
+ *
+ * Everything is named rather than only the first few: an unlisted command falls
+ * to the alphabetical tail, which is how `migrate` — a topic of four
+ * commands — ended up printed after `report` and `mcp`, and `help` in the
+ * middle of the workflow (issue #97).
  */
 const ORDER = [
   'init',
@@ -28,7 +33,11 @@ const ORDER = [
   'snapshot',
   'clone',
   'restore',
+  'migrate',
+  'report',
+  'mcp',
   'hukam',
+  'help',
 ]
 
 export default class CustomHelp extends Help {

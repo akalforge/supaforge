@@ -40,6 +40,11 @@
       "strategy": "pattern",
       "target": "./dist/commands"
     },
+    "topics": {
+      "migrate": {
+        "description": "Create, list and run versioned SQL migrations"
+      }
+    },
     "helpClass": "./dist/help",
     "topicSeparator": " "
   },

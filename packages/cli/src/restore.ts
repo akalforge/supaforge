@@ -18,7 +18,7 @@ import { quoteIdent, quoteLiteral } from './utils/sql.js'
 import { sqlSkeleton, statementSubject } from './sql-deps.js'
 import {
   replaceableSchemas, findExternalDependents, dropSchemaContents, recreateExternalDependents,
-  type ExternalDependent,
+  resetRelationGrants, type ExternalDependent,
 } from './restore-replace.js'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
@@ -132,6 +132,15 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
   /** Triggers and policies outside the cleared schemas, to put back — see restore-replace. */
   let external: ExternalDependent[] = []
 
+  // schema.sql is a pg_dump, which empties search_path for the rest of the
+  // session. Every later layer holds names as the catalog rendered them —
+  // unqualified where they resolved through the default path — so a storage
+  // policy calling `is_admin()` failed with "function is_admin() does not
+  // exist" and, in one transaction, took the whole restore with it. The
+  // session's own path is put back after each layer.
+  const { rows: [{ search_path: sessionSearchPath }] } =
+    await client.query<{ search_path: string }>('SHOW search_path')
+
   try {
     // `--force` means replace, not "carry on regardless". Skipping the
     // not-empty check and then failing on every object that already exists
@@ -191,6 +200,16 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
 
         let statements = extractExecutableStatements(content)
 
+        // Grants are restored exactly, not added to whatever default
+        // privileges gave the recreated objects — see resetRelationGrants.
+        if (layer === 'roles') {
+          const reset = await resetRelationGrants(
+            client, replaceableSchemas(await schemasInSnapshot(options.snapshotDir)))
+          if (reset > 0) {
+            result.applied.push({ type: 'sql', label: `Reset grants on ${reset} relation(s) before replaying the captured ones` })
+          }
+        }
+
         // Objects the platform owns cannot be recreated by `postgres`, and a
         // snapshot of a Supabase project carries several: `pgbouncer.get_auth`
         // in the schema dump, pg_cron's own policies on `cron.job` in the RLS
@@ -234,6 +253,7 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
         if (err instanceof RestoreAborted) throw err
         result.skipped.push({ type: 'sql', label: `Layer: ${layer}`, reason: 'File not readable' })
       }
+      await client.query(`SELECT set_config('search_path', $1, false)`, [sessionSearchPath])
     }
 
     // Apply data if present
@@ -343,8 +363,8 @@ const MANUAL_LAYERS: ReadonlyArray<{
     layer: 'storage',
     type: 'api',
     label: 'Storage buckets',
-    reason: 'Bucket rows are created via the Storage API — the policies on them were restored. '
-      + 'Objects are never transferred',
+    reason: 'Bucket rows are created via the Storage API. The policies on them are replayed from '
+      + 'storage-policies.sql where the target has a storage schema; objects are never transferred',
   },
   {
     layer: 'vault',

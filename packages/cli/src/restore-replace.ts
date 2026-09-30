@@ -171,7 +171,31 @@ const EXTERNAL_DEPENDENTS_SQL = `
     LEFT JOIN pg_policy p     ON dep.classid = 'pg_policy'::regclass AND p.oid = dep.objid
     LEFT JOIN pg_class pc     ON pc.oid = p.polrelid
     LEFT JOIN pg_namespace pn ON pn.oid = pc.relnamespace
-   WHERE o.schema IS NULL OR NOT (o.schema = ANY($1))
+    -- The schema an object lives in. pg_identify_object reports none for a
+    -- trigger, policy, rule or column default, which belong to their
+    -- relation's schema: read as "no schema", every view, default, policy and
+    -- trigger inside the cleared schemas looked like an outside dependent —
+    -- refusing a --force over any table with a serial column, and putting
+    -- back policies the snapshot had removed.
+    CROSS JOIN LATERAL (
+      SELECT COALESCE(
+        tn.nspname,
+        pn.nspname,
+        (SELECT n.nspname FROM pg_attrdef ad JOIN pg_class c ON c.oid = ad.adrelid
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE dep.classid = 'pg_attrdef'::regclass AND ad.oid = dep.objid),
+        (SELECT n.nspname FROM pg_rewrite r JOIN pg_class c ON c.oid = r.ev_class
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE dep.classid = 'pg_rewrite'::regclass AND r.oid = dep.objid),
+        (SELECT n.nspname FROM pg_constraint k
+           LEFT JOIN pg_class c ON c.oid = k.conrelid
+           LEFT JOIN pg_type ty ON ty.oid = k.contypid
+           JOIN pg_namespace n ON n.oid = COALESCE(c.relnamespace, ty.typnamespace)
+          WHERE dep.classid = 'pg_constraint'::regclass AND k.oid = dep.objid),
+        o.schema
+      ) AS schema
+    ) owner
+   WHERE owner.schema IS NULL OR NOT (owner.schema = ANY($1))
    ORDER BY o.type, o.identity
 `
 
@@ -259,4 +283,40 @@ export async function recreateExternalDependents(
   }
 
   return recreated
+}
+
+/**
+ * Strip every grant but the owner's from the tables and views in `schemas`,
+ * so the roles layer that follows leaves exactly the grants it captured.
+ *
+ * The schema layer is a dump taken with --no-privileges, so each object it
+ * creates starts with whatever the target's default privileges give — on
+ * Supabase, everything to `anon` and `authenticated` — and the roles layer
+ * only ever *adds* grants. A view whose grants had been narrowed (`REVOKE ALL
+ * ON v FROM anon`, the usual way to keep a view off the public API) came back
+ * wide open, and nothing reported it.
+ *
+ * Only the kinds the roles layer captures — tables, views, foreign tables.
+ * Materialized views and sequences are not in information_schema's grant
+ * view, so their default grants are left as they are rather than stripped
+ * with nothing to put back.
+ *
+ * @returns how many relations were reset
+ */
+export async function resetRelationGrants(client: pg.Client, schemas: string[]): Promise<number> {
+  if (schemas.length === 0) return 0
+  const { rows } = await client.query<{ statement: string }>(`
+    SELECT format('REVOKE ALL ON %s FROM %s', c.oid::regclass,
+             string_agg(DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC'
+                                      ELSE quote_ident(pg_get_userbyid(a.grantee)) END, ', ')) AS statement
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      CROSS JOIN LATERAL aclexplode(c.relacl) a
+     WHERE n.nspname = ANY($1)
+       AND c.relkind IN ('r', 'p', 'v', 'f')
+       AND a.grantee <> c.relowner
+     GROUP BY c.oid
+  `, [schemas])
+  for (const { statement } of rows) await client.query(statement)
+  return rows.length
 }

@@ -116,6 +116,7 @@ afterAll(async () => {
     })
   }
   await admin(c => c.query('DROP ROLE IF EXISTS sf_rv_anon'))
+  await admin(c => c.query('DROP ROLE IF EXISTS sf_rv_reader'))
   for (const dir of dirs) await rm(dir, { recursive: true, force: true })
 })
 
@@ -206,6 +207,31 @@ describe('restore --force', () => {
     expect(await one(db, `SELECT has_table_privilege('sf_rv_anon', 'public.profiles', 'SELECT')`)).toBe(true)
   })
 
+  it.skipIf(skip)('clears a schema whose own objects depend on each other, and brings back nothing it removed', async () => {
+    // Defaults, views, policies and triggers inside the cleared schema were
+    // read as outside it (PostgreSQL reports no schema for them), which
+    // refused any --force over a serial column and would have put back a
+    // policy the snapshot no longer has.
+    const inside = `
+      CREATE FUNCTION public.is_admin() RETURNS boolean LANGUAGE sql STABLE AS $$ SELECT true $$;
+      CREATE FUNCTION public.touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+      CREATE TABLE public.items (id serial PRIMARY KEY, flag boolean DEFAULT public.is_admin());
+      CREATE VIEW public.item_ids AS SELECT id FROM public.items WHERE public.is_admin();
+      CREATE TRIGGER items_touch BEFORE UPDATE ON public.items FOR EACH ROW EXECUTE FUNCTION public.touch();
+      ALTER TABLE public.items ENABLE ROW LEVEL SECURITY;
+    `
+    const db = await scratch('inside', `${inside}
+      CREATE POLICY removed_since ON public.items USING (public.is_admin());`)
+    const dir = await snapshot({ 'schema.sql': `SET check_function_bodies = false;\n${inside}` })
+
+    const result = await restoreFromSnapshot({ snapshotDir: dir, targetUrl: dbUrl(db), replace: true })
+
+    expect(result.errors).toEqual([])
+    expect(await one(db, `SELECT count(*)::int FROM pg_policies WHERE policyname = 'removed_since'`)).toBe(0)
+    expect(await one(db, `SELECT count(*)::int FROM pg_trigger WHERE tgname = 'items_touch'`)).toBe(1)
+    expect(await one(db, `SELECT count(*)::int FROM pg_views WHERE viewname = 'item_ids'`)).toBe(1)
+  })
+
   it.skipIf(skip)('refuses, changing nothing, when an outside object cannot be put back', async () => {
     const db = await scratch('refuse', `
       CREATE TYPE public.status AS ENUM ('a', 'b');
@@ -220,6 +246,56 @@ describe('restore --force', () => {
     expect(result.errors.map(e => e.error).join()).toMatch(/other\.uses_it/)
     expect(await one(db, `SELECT count(*)::int FROM information_schema.columns WHERE table_schema = 'other' AND column_name = 's'`)).toBe(1)
     expect(await one(db, `SELECT count(*)::int FROM pg_type WHERE typname = 'status'`)).toBe(1)
+  })
+})
+
+describe('restore: layers after a pg_dump schema', () => {
+  it.skipIf(skip)('resolve unqualified names, though the dump emptied search_path', async () => {
+    // pg_dump ends its preamble by emptying search_path for the session, and
+    // the RLS and storage-policy layers hold names as the catalog rendered
+    // them — unqualified. Replayed after it, `is_admin()` did not resolve and
+    // the whole restore rolled back.
+    const db = await scratch('searchpath')
+    const dir = await snapshot({
+      'schema.sql': `SELECT pg_catalog.set_config('search_path', '', false);
+        CREATE FUNCTION public.is_admin() RETURNS boolean LANGUAGE sql STABLE AS $$ SELECT true $$;
+        CREATE TABLE public.docs (id int);
+        ALTER TABLE public.docs ENABLE ROW LEVEL SECURITY;`,
+      'rls.sql': 'CREATE POLICY admins ON public.docs USING (is_admin());',
+    })
+
+    const result = await restoreFromSnapshot({ snapshotDir: dir, targetUrl: dbUrl(db) })
+
+    expect(result.errors).toEqual([])
+    expect(await one(db, `SELECT count(*)::int FROM pg_policies WHERE policyname = 'admins'`)).toBe(1)
+  })
+})
+
+describe('restore: grants come back exactly as captured', () => {
+  it.skipIf(skip)('does not let default privileges widen a narrowed view', async () => {
+    // The dump is taken without privileges, so a recreated view picks up the
+    // target's default privileges — on Supabase, everything to anon — and the
+    // roles layer only adds grants. A view revoked from anon came back open.
+    const db = await scratch('grants', `
+      DO $$ BEGIN CREATE ROLE sf_rv_anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+      DO $$ BEGIN CREATE ROLE sf_rv_reader NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+      ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO sf_rv_anon;
+    `)
+    const dir = await snapshot({
+      'schema.sql': `CREATE TABLE public.orders (id int);
+        CREATE VIEW public.paid AS SELECT id FROM public.orders;`,
+      'roles.sql': `GRANT SELECT ON "public"."paid" TO "sf_rv_reader";
+        GRANT SELECT ON "public"."orders" TO "sf_rv_anon";`,
+    })
+
+    const result = await restoreFromSnapshot({ snapshotDir: dir, targetUrl: dbUrl(db) })
+
+    expect(result.errors).toEqual([])
+    expect(await one(db, `SELECT has_table_privilege('sf_rv_anon', 'public.paid', 'SELECT')`)).toBe(false)
+    expect(await one(db, `SELECT has_table_privilege('sf_rv_reader', 'public.paid', 'SELECT')`)).toBe(true)
+    expect(await one(db, `SELECT has_table_privilege('sf_rv_anon', 'public.orders', 'SELECT')`)).toBe(true)
+    // Exactly what was captured: SELECT, not the INSERT the default gave.
+    expect(await one(db, `SELECT has_table_privilege('sf_rv_anon', 'public.orders', 'INSERT')`)).toBe(false)
   })
 })
 

@@ -11,11 +11,15 @@ import { loadSnapshot } from './snapshot'
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
 import { errMsg } from './utils/error'
-import { DEFAULT_IGNORE_SCHEMAS } from './defaults'
+import { DEFAULT_IGNORE_SCHEMAS, SUPABASE_PLATFORM_SCHEMAS } from './defaults'
 import { dropUnsupportedSetStatements, knownParameters } from './prove'
 import { splitSqlStatements, isCommentOnly, isPsqlMetaCommand, stripPsqlMetaCommands } from './utils/sql-split'
 import { quoteIdent, quoteLiteral } from './utils/sql.js'
-import { sqlSkeleton } from './sql-deps.js'
+import { sqlSkeleton, statementSubject } from './sql-deps.js'
+import {
+  replaceableSchemas, findExternalDependents, dropSchemaContents, recreateExternalDependents,
+  type ExternalDependent,
+} from './restore-replace.js'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
@@ -125,15 +129,33 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
   /** Webhook triggers the schema dump creates, so the webhooks layer can skip them. */
   const createdBySchemaLayer = new Set<string>()
 
+  /** Triggers and policies outside the cleared schemas, to put back — see restore-replace. */
+  let external: ExternalDependent[] = []
+
   try {
     // `--force` means replace, not "carry on regardless". Skipping the
     // not-empty check and then failing on every object that already exists
-    // replaced nothing at all.
+    // replaced nothing at all. What it clears, and what it must not, is in
+    // restore-replace.ts.
     if (options.replace) {
-      for (const schema of await schemasInSnapshot(options.snapshotDir)) {
-        await client.query(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`)
-        result.applied.push({ type: 'sql', label: `Dropped schema ${schema} (--force)` })
+      const schemas = replaceableSchemas(await schemasInSnapshot(options.snapshotDir))
+      const dependents = await findExternalDependents(client, schemas)
+      if (dependents.blockers.length > 0) {
+        result.errors.push({
+          type: 'sql',
+          label: 'Restore --force',
+          error: `clearing ${schemas.join(', ')} would also drop objects outside them that `
+            + `this restore cannot put back: ${dependents.blockers.join('; ')}. `
+            + 'Nothing was changed. Remove or move those first, or restore into an empty database.',
+        })
+        throw new RestoreAborted()
       }
+      external = dependents.recreate
+      const dropped = await dropSchemaContents(client, schemas)
+      result.applied.push({
+        type: 'sql',
+        label: `Cleared ${dropped} object(s) from ${schemas.join(', ')} (--force)`,
+      })
     }
 
     for (const layer of sqlOrder) {
@@ -206,39 +228,7 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
         }
 
         for (const sql of statements) {
-          try {
-            // `CREATE EXTENSION ... WITH SCHEMA "extensions"` needs that schema
-            // to exist, and on plain PostgreSQL it does not — every Supabase
-            // extension then failed with `schema "extensions" does not exist`
-            // (issue #95). Creating it first costs nothing where it already
-            // exists.
-            const needed = extensionTargetSchema(sql)
-            if (needed) {
-              await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(needed)}`)
-            }
-
-            // `GRANT … TO anon` needs the role to exist, and on plain
-            // PostgreSQL — the usual restore target — none of Supabase's Data
-            // API roles do. Same shape as the extension schema above: without
-            // it the first grant fails with `role "anon" does not exist` and
-            // takes the whole transactional restore with it.
-            const grantee = grantTargetRole(sql)
-            if (grantee) await client.query(createRoleIfMissing(grantee))
-
-            await client.query(conditionalPublicationMembership(sql))
-            result.applied.push({ type: 'sql', label: summarizeStatement(sql) })
-          } catch (err) {
-            result.errors.push({
-              type: 'sql',
-              label: summarizeStatement(sql),
-              error: errMsg(err),
-            })
-            // In a transaction the first failure aborts it, and every statement
-            // after reports `current transaction is aborted` — noise that
-            // buries the one error that matters. Stop here and let the rollback
-            // below handle it.
-            if (transactional) throw new RestoreAborted()
-          }
+          await applyStatement(client, sql, transactional, result)
         }
       } catch (err) {
         if (err instanceof RestoreAborted) throw err
@@ -265,10 +255,26 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
                 label: `Data: ${file}`,
                 error: errMsg(err),
               })
+              // As for the SQL layers: in a transaction everything after the
+              // first failure only reports that the transaction is aborted.
+              if (transactional) throw new RestoreAborted()
             }
           }
         }
-      } catch { /* no data dir */ }
+      } catch (err) {
+        if (err instanceof RestoreAborted) throw err
+        /* no data dir */
+      }
+    }
+
+    // What clearing the schemas took with it from outside them — the auth
+    // trigger that calls a public function, a storage policy that does —
+    // goes back once everything it depends on exists again.
+    for (const dep of await recreateExternalDependents(client, external)) {
+      result.applied.push({
+        type: 'sql',
+        label: `Recreated ${dep.kind} ${dep.name} on ${dep.schema}.${dep.table} (outside the snapshot, dropped by --force)`,
+      })
     }
 
     if (transactional) {
@@ -668,29 +674,112 @@ async function schemasInSnapshot(snapshotDir: string): Promise<string[]> {
 const PLATFORM_OWNED_SCHEMAS = ['pgbouncer', 'cron', 'pgsodium', 'vault', '_realtime', 'supabase_functions']
 
 /**
- * The platform-owned object a statement touches, if any.
+ * The platform-owned object a statement creates or changes, if any.
  *
- * Returns the schema name so the skip can say which it was. Read off the
- * skeleton, so the words inside a routine body or a literal cannot match.
+ * Decided by the statement's *subject* — what it acts on — not by every schema
+ * it mentions. `CREATE TRIGGER ... ON public.orders EXECUTE FUNCTION
+ * supabase_functions.http_request(...)` is a Database Webhook, the project's
+ * own, and matching by mention skipped every one of them on restore, along
+ * with any view that reads `cron.job_run_details` or `vault.decrypted_secrets`.
+ *
+ * Returns the schema so the skip can say which it was.
  */
 export function platformOwnedObject(sql: string): string | undefined {
+  const subject = statementSubject(sql)
+  if (!subject?.schema) return undefined
+  return PLATFORM_OWNED_SCHEMAS.includes(subject.schema) ? subject.schema : undefined
+}
+
+/**
+ * Schemas only a Supabase instance has. A statement naming one of them can
+ * fail on plain PostgreSQL for no reason but that — see `tolerableFailure`.
+ */
+const SUPABASE_ONLY_SCHEMAS = [
+  ...new Set([...SUPABASE_PLATFORM_SCHEMAS, ...PLATFORM_OWNED_SCHEMAS]),
+].filter(s => s !== 'pg_catalog' && s !== 'information_schema')
+
+/** Does the statement name an object in a schema only Supabase has? */
+export function mentionedPlatformSchema(sql: string): string | undefined {
   const skeleton = sqlSkeleton(sql)
+  return SUPABASE_ONLY_SCHEMAS.find(schema =>
+    new RegExp(String.raw`(?:"${schema}"|\b${schema})\s*\.`, 'i').test(skeleton))
+}
 
-  for (const schema of PLATFORM_OWNED_SCHEMAS) {
-    // `schema.object` or `"schema"."object"`, after a DDL verb rather than
-    // anywhere: a policy *on* cron.job counts, a comment mentioning cron does
-    // not.
-    const pattern = new RegExp(
-      // The \b belongs only on the unquoted alternative: before a `"` there is
-      // no word boundary to find, since a space and a quote are both non-word
-      // characters — which is why the quoted form never matched.
-      String.raw`\b(?:CREATE|DROP|ALTER)\b[\s\S]{0,200}?(?:"${schema}"|\b${schema})\s*\.`,
-      'i',
-    )
-    if (pattern.test(skeleton)) return schema
+/**
+ * SQLSTATEs meaning "that does not exist here": a relation, function, schema
+ * or object missing, or an extension the server does not ship.
+ */
+const ABSENT_ON_TARGET = new Set(['42P01', '42883', '3F000', '42704', '0A000', '58P01'])
+
+/**
+ * Why a failed statement can be skipped instead of failing the restore, or
+ * undefined when it cannot.
+ *
+ * A Supabase snapshot restored into plain PostgreSQL carries things that
+ * cannot exist there: `pg_graphql`, a Database Webhook calling
+ * `supabase_functions.http_request`, a grant on `storage.objects`, a policy
+ * calling `auth.uid()`. In one transaction, the first of them rolled back the
+ * whole restore — nothing applied at all. They are skipped by name instead,
+ * but only when both hold: the statement names a Supabase-only schema (or
+ * creates an extension), and PostgreSQL's error says something is missing.
+ * Any other failure still fails the restore, so on a Supabase target, where
+ * these all exist, nothing is quietly dropped.
+ */
+export function tolerableFailure(sql: string, err: unknown): string | undefined {
+  const code = (err as { code?: string } | null)?.code
+  if (!code || !ABSENT_ON_TARGET.has(code)) return undefined
+
+  if (/^\s*CREATE\s+EXTENSION\b/i.test(sqlSkeleton(sql))) {
+    return `extension not available on this server: ${errMsg(err)}`
   }
-
+  const schema = mentionedPlatformSchema(sql)
+  if (schema) {
+    return `depends on ${schema}, which this target does not have (${errMsg(err)})`
+  }
   return undefined
+}
+
+/**
+ * Run one restore statement, with what it needs prepared first.
+ *
+ * In a transaction each statement runs under a savepoint, so a failure that
+ * `tolerableFailure` accepts is undone on its own and the restore continues;
+ * any other failure aborts the lot.
+ */
+async function applyStatement(
+  client: pg.Client,
+  sql: string,
+  transactional: boolean,
+  result: RestoreResult,
+): Promise<void> {
+  if (transactional) await client.query('SAVEPOINT sf_restore_statement')
+  try {
+    // `CREATE EXTENSION ... WITH SCHEMA "extensions"` needs that schema to
+    // exist, and on plain PostgreSQL it does not (issue #95).
+    const needed = extensionTargetSchema(sql)
+    if (needed) await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(needed)}`)
+
+    // `GRANT … TO anon` needs the role to exist, and on plain PostgreSQL none
+    // of Supabase's Data API roles do.
+    const grantee = grantTargetRole(sql)
+    if (grantee) await client.query(createRoleIfMissing(grantee))
+
+    await client.query(conditionalPublicationMembership(sql))
+    if (transactional) await client.query('RELEASE SAVEPOINT sf_restore_statement')
+    result.applied.push({ type: 'sql', label: summarizeStatement(sql) })
+  } catch (err) {
+    const tolerated = tolerableFailure(sql, err)
+    if (tolerated) {
+      if (transactional) await client.query('ROLLBACK TO SAVEPOINT sf_restore_statement')
+      result.skipped.push({ type: 'sql', label: summarizeStatement(sql), reason: tolerated })
+      return
+    }
+    result.errors.push({ type: 'sql', label: summarizeStatement(sql), error: errMsg(err) })
+    // In a transaction the first failure aborts it, and every statement after
+    // reports `current transaction is aborted` — noise that buries the one
+    // error that matters. Stop here and let the rollback handle it.
+    if (transactional) throw new RestoreAborted()
+  }
 }
 
 /**

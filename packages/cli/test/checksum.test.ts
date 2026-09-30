@@ -171,13 +171,16 @@ describe('getTableFingerprint: the query it runs', () => {
     expect(sql).not.toContain('pg_total_relation_size')
   })
 
-  it('orders the row digests, so physical order does not matter', async () => {
+  it('combines the row digests by summing, so physical order does not matter', async () => {
     // Otherwise an identical table fingerprints differently after a VACUUM
-    // FULL, and every run reports drift that is not there.
+    // FULL, and every run reports drift that is not there. A sum rather than
+    // an ordered string_agg, which grew with the table and failed at 1 GB.
     const queryFn = vi.fn(async (_url: string, _sql: string) => [{ row_count: 0, content: '' }])
     await getTableFingerprint('postgres://x', 'public.plans', queryFn)
 
-    expect(queryFn.mock.calls[0][1]).toContain('ORDER BY row_digest')
+    const sql = queryFn.mock.calls[0][1]
+    expect(sql).toContain('sum(')
+    expect(sql).not.toContain('string_agg')
   })
 
   it('digests a whole row, so it covers every column', async () => {

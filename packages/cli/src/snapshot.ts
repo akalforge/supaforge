@@ -13,6 +13,7 @@ import type { SchemaSnapshot } from './schema-introspect'
 import { getServerMajorVersion, resolvePgDumpPath } from './pg-tools'
 import { errMsg } from './utils/error'
 import { ok, warn, dim } from './ui'
+import { SUPABASE_PLATFORM_SCHEMAS } from './defaults'
 import { SUPABASE_MGMT_API, SUPAFORGE_DIR, SNAPSHOTS_SUBDIR, MIGRATIONS_SUBDIR } from './constants'
 
 const execFile = promisify(execFileCb)
@@ -576,27 +577,46 @@ async function captureRoleGrants(
   queryFn: QueryFn,
 ): Promise<SnapshotLayerInfo> {
   const file = 'roles.sql'
+  // Supabase's own schemas are left out: their grants are the platform's, and
+  // replaying them into plain PostgreSQL — the usual restore target — fails on
+  // a schema that does not exist there. A snapshot of a test stack held 348
+  // grants, 201 of them on storage, realtime, supabase_functions and vault.
+  const excluded = SUPABASE_PLATFORM_SCHEMAS.map(quoteLiteral).join(', ')
   try {
     const rows = await queryFn(dbUrl, `
-      SELECT grantee, table_schema, table_name, privilege_type
+      SELECT grantee, table_schema, table_name, NULL::text AS column_name,
+             privilege_type, (is_grantable = 'YES') AS is_grantable
       FROM information_schema.role_table_grants
       WHERE grantee NOT IN (
         'postgres','supabase_admin','authenticator','supabase_auth_admin',
         'supabase_storage_admin','dashboard_user','pgbouncer','supavisor'
       )
         AND grantee NOT LIKE 'pg\\_%'
-        AND table_schema NOT IN ('pg_catalog', 'information_schema')
-      ORDER BY grantee, table_schema, table_name, privilege_type
+        AND table_schema NOT IN (${excluded})
+      UNION ALL
+      SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END,
+             n.nspname, c.relname, att.attname, a.privilege_type, a.is_grantable
+      FROM pg_attribute att
+      JOIN pg_class c ON c.oid = att.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      CROSS JOIN LATERAL aclexplode(att.attacl) a
+      WHERE att.attacl IS NOT NULL AND att.attnum > 0 AND NOT att.attisdropped
+        AND a.grantee <> c.relowner
+        AND n.nspname NOT IN (${excluded})
+      ORDER BY 1, 2, 3, 4, 5
     `) as unknown as Array<{
-      grantee: string; table_schema: string; table_name: string; privilege_type: string
+      grantee: string; table_schema: string; table_name: string
+      column_name: string | null; privilege_type: string; is_grantable: boolean
     }>
 
-    // Grants held by the Data API roles included: revoking anon's access to a
-    // table is exactly the drift worth recording, which is the same reason the
-    // roles check compares them (issue #90).
     const statements = rows.map(row =>
-      `GRANT ${row.privilege_type} ON ${quoteIdent(row.table_schema)}.${quoteIdent(row.table_name)}`
-      + ` TO ${quoteIdent(row.grantee)};`)
+      `GRANT ${row.privilege_type}`
+      + (row.column_name ? ` (${quoteIdent(row.column_name)})` : '')
+      + ` ON ${quoteIdent(row.table_schema)}.${quoteIdent(row.table_name)}`
+      // PUBLIC is a keyword; quoted, it names a role that does not exist.
+      + ` TO ${row.grantee === 'PUBLIC' ? 'PUBLIC' : quoteIdent(row.grantee)}`
+      + (row.is_grantable ? ' WITH GRANT OPTION' : '')
+      + ';')
 
     const output = statements.length > 0
       ? `-- SupaForge Role Grants Snapshot\n-- ${rows.length} grant(s)\n\n${statements.join('\n')}\n`

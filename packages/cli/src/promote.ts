@@ -7,7 +7,9 @@ import {
   orderStatements, referencedTables,
   createdPolicies, createsOnlyPolicies,
   createdTriggers, createsOnlyTriggers,
+  sqlSkeleton,
 } from './sql-deps.js'
+import { splitSqlStatements, isCommentOnly } from './utils/sql-split.js'
 import { applyTableFilter, isFiltered, type TableFilter } from './utils/table-filter.js'
 import { isComparisonCheck } from './types/drift.js'
 import { matchesGlob } from './utils/strings.js'
@@ -327,16 +329,54 @@ async function runIndependently(
 }
 
 /**
+ * Does this fix consist only of `ALTER TYPE ... ADD VALUE`?
+ *
+ * PostgreSQL lets that run inside a transaction but not the new label be
+ * *used* there until it commits:
+ *
+ *     ERROR:  unsafe use of new value "refunded" of enum type order_state
+ *     HINT:  New enum values must be committed before they can be used.
+ *
+ * and the same apply often uses it straight away — a column default, or a
+ * reference-data row the data check inserts.
+ */
+export function isEnumValueAddition(sql: string): boolean {
+  const statements = splitSqlStatements(sql).filter(s => !isCommentOnly(s))
+  return statements.length > 0
+    && statements.every(s => /^\s*ALTER\s+TYPE\s+\S+\s+ADD\s+VALUE\b/i.test(sqlSkeleton(s)))
+}
+
+/**
  * All statements in one transaction: the first failure rolls back everything.
  *
  * What ran before the failure moves to `rolledBack` rather than `applied`,
  * because none of it is in the target any more.
+ *
+ * Enum label additions are the exception: they go first, in a transaction of
+ * their own that commits, so the rest can use the new labels — see
+ * isEnumValueAddition. They are additive and idempotent (`IF NOT EXISTS`), so
+ * keeping them when the rest rolls back leaves nothing half-done; they are
+ * reported as applied because they are.
  */
 async function runInTransaction(
   client: pg.Client,
   statements: PlannedSql[],
   result: PromoteResult,
 ): Promise<void> {
+  const additions = statements.filter(s => isEnumValueAddition(s.sql))
+  const rest = statements.filter(s => !isEnumValueAddition(s.sql))
+
+  if (additions.length > 0 && !(await runBatch(client, additions, result))) return
+  await runBatch(client, rest, result)
+}
+
+/** One transaction; true when it committed. */
+async function runBatch(
+  client: pg.Client,
+  statements: PlannedSql[],
+  result: PromoteResult,
+): Promise<boolean> {
+  if (statements.length === 0) return true
   const done: PromoteResult['applied'] = []
   await client.query('BEGIN')
 
@@ -347,13 +387,14 @@ async function runInTransaction(
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {})
       result.errors.push({ check: stmt.check, issueId: stmt.issueId, error: errMsg(err) })
-      result.rolledBack = done
-      return
+      result.rolledBack = [...(result.rolledBack ?? []), ...done]
+      return false
     }
   }
 
   await client.query('COMMIT')
   result.applied.push(...done)
+  return true
 }
 
 /** Run the planned API-based sync actions, recording per-action failures. */

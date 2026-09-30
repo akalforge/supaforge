@@ -136,7 +136,7 @@ describe('RolesCheck', () => {
     expect(grantIssue!.sql?.up).toContain('REVOKE INSERT')
   })
 
-  it('runs all 4 queries (roles x2, grants x2)', async () => {
+  it('runs all 6 queries (roles, table grants and column grants, per side)', async () => {
     const calls: string[] = []
     const queryFn: QueryFn = async (_dbUrl, sql) => {
       calls.push(sql)
@@ -144,7 +144,7 @@ describe('RolesCheck', () => {
     }
     const check = new RolesCheck(queryFn)
     await check.scan(mockContext())
-    expect(calls).toHaveLength(4)
+    expect(calls).toHaveLength(6)
     const roleQueries  = calls.filter(s => s.includes('pg_roles'))
     const grantQueries = calls.filter(s => s.includes('role_table_grants'))
     expect(roleQueries).toHaveLength(2)

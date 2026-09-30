@@ -21,11 +21,12 @@ export interface TableFingerprint {
   table: string
   rowCount: number
   /**
-   * md5 over every row, order-independent.
+   * A digest of every row, order-independent.
    *
    * Two databases can hold the same rows in different physical order, so the
-   * per-row digests are sorted before being combined — otherwise an identical
-   * table would fingerprint differently after a VACUUM FULL.
+   * per-row digests are combined by summing rather than in scan order —
+   * otherwise an identical table would fingerprint differently after a
+   * VACUUM FULL.
    */
   content: string
 }
@@ -48,10 +49,17 @@ export async function getTableFingerprint(
   table: string,
   queryFn: QueryFn = pgQuery,
 ): Promise<TableFingerprint> {
+  // Two running sums over the halves of each row's md5, rather than one md5
+  // over every row's digest concatenated in order. Both are order-independent
+  // and count a duplicated row twice; the sums need constant memory, where the
+  // concatenation built a 32-byte-per-row string and failed at PostgreSQL's
+  // 1 GB limit — about 33 million rows.
   const sql = `
     SELECT count(*)::int AS row_count,
-           coalesce(md5(string_agg(row_digest, '' ORDER BY row_digest)), '') AS content
-    FROM (SELECT md5(t::text) AS row_digest FROM ${quoteIdent(table)} t) s
+           coalesce(sum(('x' || substr(d, 1, 16))::bit(64)::bigint::numeric), 0)::text
+             || ':' ||
+           coalesce(sum(('x' || substr(d, 17, 16))::bit(64)::bigint::numeric), 0)::text AS content
+    FROM (SELECT md5(t::text) AS d FROM ${quoteIdent(table)} t) s
   `
   const [row] = await queryFn(dbUrl, sql) as unknown as [{ row_count: number; content: string }]
   return {

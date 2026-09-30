@@ -365,7 +365,11 @@ export function destructiveReason(sql: string): string | undefined {
 
   if (/\bDROP\s+SCHEMA\b/.test(skeleton)) return 'drops a schema and everything in it'
   if (/\bDROP\s+TABLE\b/.test(skeleton)) return 'drops a table and its rows'
-  if (/\bTRUNCATE\b/.test(skeleton)) return 'deletes every row in a table'
+  // At the start of a statement only. TRUNCATE is also a privilege and a
+  // trigger event, so `GRANT TRUNCATE ON t TO anon` and `BEFORE TRUNCATE ON t`
+  // were held back as though they emptied the table — and Supabase's default
+  // `GRANT ALL` includes TRUNCATE, so every grant fix for a new table tripped it.
+  if (/(?:^|;)\s*TRUNCATE\b/.test(skeleton)) return 'deletes every row in a table'
   if (/\bDROP\s+COLUMN\b/.test(skeleton)) return 'drops a column and its values'
   if (/\bDELETE\s+FROM\b/.test(skeleton)) return 'deletes rows'
 

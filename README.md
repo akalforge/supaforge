@@ -42,13 +42,12 @@ supaforge hukam
 Only have one Supabase project? SupaForge works as a snapshot, audit and cloning tool for a single remote database — no second environment needed.
 
 > **Not a substitute for database backups.** A snapshot records your
-> *configuration* — policies, cron jobs, webhooks, extensions, storage settings
-> — so you can see what changed and replay it elsewhere. It holds no table data
-> beyond the reference tables you list in `checks.data.tables`, and
-> `restore --from-snapshot` does not currently recreate the schema
-> ([#80](https://github.com/akalforge/supaforge/issues/80)). Use
-> `supaforge clone` to copy a database, and your provider's backups to protect
-> one.
+> *structure and configuration* — tables, policies, cron jobs, webhooks,
+> extensions, publications, grants, storage settings — and `restore` replays
+> them, so you can rebuild a database's shape elsewhere. What it does **not**
+> hold is your data: no table rows beyond the reference tables you list in
+> `checks.data.tables`, and no storage objects. Use your provider's backups to
+> protect data, and `supaforge clone` to copy a database including its rows.
 
 ```bash
 npm install -g @akalforge/supaforge
@@ -71,6 +70,9 @@ EOF
 
 # Capture a full snapshot (schema, RLS, cron, storage, auth, etc.)
 supaforge snapshot --env=prod --apply
+
+# Rebuild that structure in an empty database
+supaforge restore --env=local --from-snapshot=latest --apply
 
 # Clone remote to local for development
 supaforge clone --env=prod --apply
@@ -98,11 +100,11 @@ supaforge snapshot --env=prod --migration --apply
 | Cron Jobs | `cron.job` table | ✅ Ready |
 | Webhooks | `pg_trigger` + `pg_net` | ✅ Ready |
 | Realtime | `pg_publication` + `pg_publication_tables`, and `pg_policies` on `realtime` | ✅ Ready — publications and Realtime Authorization policies |
-| Vault Secrets | `vault.secrets` | ✅ Ready |
+| Vault Secrets | `vault.secrets` | ✅ Ready — reported with the command to run; values cannot be synced |
 | Postgres Extensions | `pg_extension` | ✅ Ready |
 | RLS Coverage | `pg_class.relrowsecurity` | ✅ Ready — target only, scored as posture |
 | Migration History | `supabase_migrations.schema_migrations` | ✅ Ready — target only, scored as posture |
-| Postgres Roles & Grants | `pg_roles` + `information_schema` grants | ✅ Ready |
+| Postgres Roles & Grants | `pg_roles` + `information_schema` grants | ✅ Ready — custom role attributes, and grants including those held by `anon` / `authenticated` / `service_role` |
 
 ## Supabase Feature Coverage
 
@@ -114,8 +116,8 @@ How SupaForge maps to every standard Supabase module (see [Supabase Features](ht
 | | Reference / seed data | ✅ Data | Row-level diff for all public tables (configurable) |
 | | Database webhooks | ✅ Webhooks | The triggers that call `supabase_functions.http_request`, read via `pg_get_triggerdef` — so a webhook's URL, method, headers, params and timeout are compared too — plus the `pg_net` extension |
 | | Postgres extensions | ✅ Extensions | Enabled/disabled detection via `pg_extension` |
-| | Vault / Secrets | ✅ Vault | Secret name/description drift; values are environment-specific |
-| | Postgres roles | ✅ Roles | Custom role attributes and table grants. Supabase's own service roles are excluded |
+| | Vault / Secrets | ✅ Vault | Secret name/description drift. A value cannot be read out of Vault, so a missing secret is reported with the `vault.create_secret` call to run — never applied with a placeholder |
+| | Postgres roles | ✅ Roles | Custom role attributes and table grants. Supabase's platform roles are excluded throughout; the Data API roles (`anon`, `authenticated`, `service_role`) are excluded from *attribute* comparison but their grants are compared — revoking `anon`'s access to a table is exactly the drift worth catching |
 | | Realtime publications | ✅ Realtime | Which tables are published for Realtime |
 | | PostgREST config | ⬜ Not planned | Managed by Supabase platform; not user-configurable per environment |
 | | Replication | ⬜ Not planned | Private alpha; not accessible via standard APIs |
@@ -156,11 +158,11 @@ supaforge diff --ci --fail-on=warning     Fail on WARNING as well as CRITICAL
 supaforge sync                            Alias for diff --apply
 supaforge hukam                           Alias for diff 🙏
 
-supaforge snapshot                        Preview what a 9-layer snapshot would capture
+supaforge snapshot                        Preview what a 12-layer snapshot would capture
 supaforge snapshot --apply                Capture it
 supaforge snapshot --migration --apply    Also generate incremental migration diff
 supaforge snapshot --list                 List all snapshots
-supaforge snapshot --prune --apply        Delete old snapshots
+supaforge snapshot --prune --apply        Delete old snapshots (keeps the last 7)
 
 supaforge clone --env=prod                Preflight checks
 supaforge clone --env=prod --apply        Clone remote to local
@@ -169,19 +171,22 @@ supaforge clone --env=prod --start-local  Auto-start a local PostgreSQL containe
 supaforge clone --list                    List existing clones
 supaforge clone --delete=<name> --apply   Remove a clone
 
-supaforge restore --env=local --from-snapshot=latest --apply   Replay a snapshot's SQL layers
+supaforge restore --env=local --from-snapshot=latest --apply   Rebuild from a snapshot
 supaforge restore --env=local --from-migrations --apply        Replay migrations
+supaforge restore --env=local --from-snapshot=latest --force   Restore into a non-empty database
 
 supaforge migrate create --name=add_orders   Generate a migration file from schema drift
 supaforge migrate list                    List local migrations, applied and pending
 supaforge migrate run --dry-run           Preview which migrations would run
 supaforge migrate run                     Execute pending migrations
+supaforge migrate run --allow-destructive Permit migrations that drop or delete
 supaforge migrate baseline                Mark local migrations applied without running them
 
 supaforge report                          Show recent command history from the local run log
 supaforge report --send                   Choose entries to send as anonymous bug reports
 
 supaforge mcp                             Start MCP stdio server for AI agents
+supaforge help <command>                  Help for any command, e.g. `help migrate create`
 ```
 
 > `diff`, `clone`, `restore` and `snapshot` preview by default — add `--apply`
@@ -189,20 +194,70 @@ supaforge mcp                             Start MCP stdio server for AI agents
 > executes unless you pass `--dry-run`, and `migrate baseline` only writes
 > tracking rows, so it has no preview mode.
 >
-> Fixes that destroy rows — dropping a table or a column — are always reported
-> but never applied by `--apply` alone. They are listed as skipped unless you
-> also pass `--allow-destructive`.
+> Fixes that destroy data — dropping a table, schema or column, deleting rows,
+> truncating, or removing an RLS policy — are always reported but never applied
+> by `--apply` alone. They are listed as skipped unless you also pass
+> `--allow-destructive`. The same gate applies to `migrate run`.
 >
 > `report` reads a local run log and prints it. Only `report --send` leaves the
 > machine, and only for the entries you pick: it shows exactly what would be
 > transmitted and asks first. No SQL, table names or schema content is included.
->
-> `restore --from-snapshot` replays a snapshot's **SQL** layers — RLS policies,
-> cron jobs, webhooks, extensions, storage policies. The schema layer is
-> captured as JSON for diffing rather than as replayable SQL, so it is *not*
-> recreated ([#80](https://github.com/akalforge/supaforge/issues/80)): restore
-> into a database that already has the tables, and use `supaforge clone` to
-> build one that does.
+
+### What a restore puts back
+
+`restore --from-snapshot` rebuilds a database's structure. These are replayed as
+SQL, in dependency order:
+
+| Replayed | From |
+| --- | --- |
+| Extensions | `extensions.sql` |
+| Schema — tables, columns, indexes, constraints, views, functions, triggers, types | `schema.sql` |
+| RLS policies | `rls.sql` |
+| Cron jobs | `cron.sql` |
+| Webhooks | `webhooks.sql` |
+| Storage policies | `storage-policies.sql` |
+| Realtime publications | `realtime.sql` |
+| Role grants | `roles.sql` |
+| Reference data — the tables in `checks.data.tables` | `data/*.sql` |
+
+Four things it cannot put back are named in the output rather than passed over
+in silence, each with what to do instead:
+
+| Not replayed | What to do |
+| --- | --- |
+| Auth config | Needs `--project-ref` and `--api-key` for the Management API |
+| Edge Functions | `supabase functions deploy` from your functions directory |
+| Storage **buckets** | Created over the Storage API. The policies *on* them are restored; objects are never transferred |
+| Vault secrets | `vault.sql` holds the names only — a secret's value cannot be read out of Vault, so each is recreated by hand |
+
+A restore runs in **one transaction**, so a failure leaves the target exactly as
+it was rather than half-rebuilt. `--no-transaction` keeps whatever succeeds.
+
+It restores into an **empty** database by default and refuses otherwise, since
+replaying a schema over existing tables fails on the first one. `--force`
+replaces instead: it clears the objects in the snapshot's own schemas — never a
+Supabase schema such as `auth`, `storage` or `graphql` — and keeps the schemas
+themselves, so their grants and default privileges survive. A trigger or policy
+elsewhere that depends on what it clears, such as the `auth.users` trigger that
+calls `public.handle_new_user()`, is put back afterwards; anything else that
+would be lost makes it refuse before changing anything.
+
+Restoring into plain PostgreSQL is the ordinary case: the schemas Supabase
+extensions expect are created first, and a grant's role is created (as
+`NOLOGIN`) if the target has never heard of it. What cannot exist there — a
+foreign key to `auth.users`, a Database Webhook, a policy calling `auth.uid()`,
+an extension the server does not ship — is skipped and listed by name. A table
+that cannot be created still fails the restore.
+
+Grants come back exactly as captured. The schema is dumped without privileges,
+so a recreated table or view first gets whatever the target's default
+privileges give (on Supabase, everything to `anon`); those are cleared before
+the captured grants are replayed, so a view that had been revoked from `anon`
+stays revoked.
+
+`restore --from-migrations` replays your migration files instead, tracking them
+in `supabase_migrations.schema_migrations` — the table the Supabase CLI uses,
+rather than one in `public`.
 
 ### How `--apply` executes
 
@@ -216,14 +271,14 @@ destructive drops go last. `@dbdiff/cli` emits statements in the order it walks
 the catalogue, which carries no such guarantee — applying that order directly
 failed on fix sets that were perfectly valid.
 
-> **Known limitation.** Sending drops to the end is wrong for the one case
-> where a drop and a create are two halves of *replacing the same object*: an
-> enum whose values changed arrives as `DROP TYPE` + `CREATE TYPE`, and the
-> create is currently ordered first, so it fails with `type … already exists`
-> and the transaction rolls back
-> ([#81](https://github.com/akalforge/supaforge/issues/81)). `supaforge migrate
-> create` writes the same fix set in a working order, so that is the way through
-> in the meantime. Routine replacement is already handled correctly.
+Sending drops to the end would be wrong for the one case where a drop and a
+create are two halves of *replacing the same object*. An enum whose values
+changed arrives from `@dbdiff/cli` as `DROP TYPE` + `CREATE TYPE`, and ordering
+the create first failed with `type … already exists`, rolling the transaction
+back ([#81](https://github.com/akalforge/supaforge/issues/81)). Such a pair is
+recognised and merged into a single fix that drops and recreates in that order,
+so it is never split across the ordering. This covers functions, procedures,
+types, domains and sequences.
 
 **Atomicity.** The whole SQL fix set runs in one transaction. PostgreSQL
 supports transactional DDL, so if any statement fails the rest are rolled back
@@ -312,10 +367,27 @@ The MCP server exposes:
 | Tool | Description |
 |------|-------------|
 | `scan_drift` | Scan for drift and return a structured report |
-| `apply_fixes` | Apply SQL fixes (supports `dryRun=true` preview) |
+| `apply_fixes` | Apply SQL fixes. **Previews by default** — pass `dryRun: false` to write |
 | `take_snapshot` | Capture a point-in-time environment snapshot |
 | `create_migration` | Generate a migration file from snapshot diff |
 | `get_check_result` | Retrieve the result for a specific check from the last scan |
+
+Every tool carries annotations, so a client can tell which is which before
+running one: `scan_drift` and `get_check_result` are marked read-only,
+`apply_fixes` is the only one marked destructive, and `take_snapshot` and
+`create_migration` are marked neither — they write files rather than databases,
+so a client treating "read-only" as "safe to run unattended" should not be told
+they are.
+
+`apply_fixes` **previews unless asked to write**, matching the rest of
+SupaForge, where writing needs `--apply`.
+
+The server reads the config in the directory it was started in, and refuses a
+`configPath` a client asks for — a tool call, or a prompt injected into one,
+could otherwise point it at any config on disk, including one holding production
+credentials. The refusal names the directory it will read instead, so a client
+that asked for another project knows which one it got. `supaforge mcp
+--allow-config-path` turns the guard off where that is genuinely wanted.
 
 Resources: `supaforge://config`, `supaforge://last-scan`, `supaforge://migrations`
 
@@ -531,7 +603,7 @@ const result = await scan(registry, { config }, bus)
 packages/cli/
 ├── src/
 │   ├── commands/        # init, diff, sync, hukam, snapshot, clone, restore,
-│   │                    #   migrate/, report, mcp
+│   │                    #   migrate/, report, mcp, help
 │   ├── checks/          # The 14 drift checks
 │   │   ├── base.ts      # Abstract Check class
 │   │   ├── registry.ts  # CheckRegistry
@@ -550,7 +622,7 @@ packages/cli/
 │   ├── prove.ts         # Replay a fix set on a throwaway clone
 │   ├── scoring.ts       # Drift and posture scores (0–100)
 │   └── render.ts        # Terminal output
-└── test/                # 1341 tests across 62 files
+└── test/                # 1518 tests across 71 files
 ```
 
 ## Development
@@ -559,7 +631,7 @@ packages/cli/
 git clone https://github.com/akalforge/supaforge.git
 cd supaforge/packages/cli
 npm install
-npm test       # Run all tests (1341 across 62 files)
+npm test       # Run all tests (1518 across 71 files)
 npm run lint   # Type-check
 npm run build  # Build with tsup
 

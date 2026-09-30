@@ -98,10 +98,18 @@ export function diffVaultSecrets(source: VaultSecret[], target: VaultSecret[]): 
         title: `Missing vault secret: ${key}`,
         description: `Secret "${key}" exists in source but not in target. The secret value cannot be auto-synced — it must be recreated manually in the target environment.`,
         sourceValue: { name: s.name, description: s.description, unique_name: s.unique_name },
-        sql: {
-          up: `SELECT vault.create_secret('PLACEHOLDER_VALUE', ${quoteLiteral(s.unique_name ?? s.name)}${s.description ? `, ${quoteLiteral(s.description)}` : ''});`,
-          down: `-- Remove secret "${key}" from target (manual action required)`,
-        },
+        // No `sql`. The value exists only in the source and Vault will not give
+        // it up, so there is nothing to generate — and what was generated was
+        // `vault.create_secret('PLACEHOLDER_VALUE', …)`, which `--apply` ran.
+        // The target then held a live secret with a bogus value, so anything
+        // reading it failed at runtime instead of failing loudly as absent; and
+        // because the secret now existed, the next diff stopped asking for the
+        // manual step at all (issue #91).
+        manualOnly:
+          'the secret value exists only in the source and cannot be read out of Vault. '
+          + `Create it in the target with the real value:  SELECT vault.create_secret('<value>', `
+          + `${quoteLiteral(s.unique_name ?? s.name)}`
+          + `${s.description ? `, ${quoteLiteral(s.description)}` : ''});`,
       })
     }
   }

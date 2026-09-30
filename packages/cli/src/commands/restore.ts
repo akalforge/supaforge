@@ -7,6 +7,7 @@ import {
   previewSnapshotRestore,
   previewMigrationRestore,
   getPublicTables,
+  summarizeStatement,
 } from '../restore'
 import { warn, cmd } from '../ui.js'
 import { renderTip } from '../tips.js'
@@ -44,6 +45,13 @@ export default class Restore extends BaseCommand {
     }),
     apply: Flags.boolean({
       description: 'Actually execute the restore (default: dry-run preview)',
+      default: false,
+    }),
+    'no-transaction': Flags.boolean({
+      description:
+        'Apply each statement on its own, keeping whatever succeeds. Off by default: '
+        + 'a snapshot restore runs in one transaction, so a failure leaves the target '
+        + 'exactly as it was rather than half-restored. Applies to --from-snapshot.',
       default: false,
     }),
     force: Flags.boolean({
@@ -85,7 +93,7 @@ export default class Restore extends BaseCommand {
         }
         this.log(`\n  Restore replays SQL into the target and may conflict with existing data.`)
         this.log(`  → Use ${cmd('supaforge sync')} to apply only the differences instead.`)
-        this.log(`  → Add ${cmd('--force')} to proceed anyway.\n`)
+        this.log(`  → Add ${cmd('--force')} to drop and replace the schemas this snapshot covers.\n`)
         // --apply was asked for and refused, so this is not success. Returning
         // 0 made `supaforge restore ... --apply && deploy` continue as though
         // the restore had happened, which is the worst possible reading of a
@@ -135,9 +143,14 @@ export default class Restore extends BaseCommand {
 
       for (const { layer, statements } of preview) {
         this.log(`  Layer: ${layer} (${statements.length} statements)`)
+        // `summarizeStatement`, not the first line: a statement carrying a
+        // leading comment — which every layer file's first one does, since the
+        // header lands in the same chunk — showed the comment instead of the
+        // SQL. A preview you cannot read is the one thing a preview must not
+        // be. It is also what the apply path prints, so the two now describe
+        // the same statement the same way.
         for (const stmt of statements.slice(0, 3)) {
-          const summary = stmt.split('\n')[0].slice(0, 80)
-          this.log(`    ${summary}`)
+          this.log(`    ${summarizeStatement(stmt)}`)
         }
         if (statements.length > 3) {
           this.log(`    ... and ${statements.length - 3} more`)
@@ -153,6 +166,12 @@ export default class Restore extends BaseCommand {
     const result = await restoreFromSnapshot({
       targetUrl,
       snapshotDir,
+      noTransaction: flags['no-transaction'] as boolean,
+      // --force means replace: the schemas the snapshot covers are dropped
+      // before it is replayed. It used to only skip the not-empty check, so a
+      // restore over an existing database failed on every object already there
+      // and replaced nothing (issue #95).
+      replace: flags.force as boolean,
     })
 
     this.renderResult(result, flags.json as boolean)
@@ -186,6 +205,11 @@ export default class Restore extends BaseCommand {
 
     this.log(`\nRestoring from migrations...\n`)
 
+    // --no-transaction is deliberately not forwarded: the migration path
+    // applies and records one migration at a time, so wrapping the set in a
+    // single transaction would roll back migrations that had already been
+    // recorded as applied. Per-migration transactions belong with the rest of
+    // the migration work in #92 rather than here.
     const result = await restoreFromMigrations({
       targetUrl,
       toVersion,
@@ -221,10 +245,20 @@ export default class Restore extends BaseCommand {
       }
     }
 
+    if (result.rolledBack && result.rolledBack.length > 0) {
+      // Reported apart from `applied`, which is empty: a restore that rolled
+      // back applied nothing, and saying otherwise would be the most
+      // misleading thing this command could print (issue #95).
+      this.log(`\n↩  Rolled back ${result.rolledBack.length} operation(s) — the target is unchanged.`)
+    }
+
     if (result.errors.length > 0) {
       this.log(`\n❌ ${result.errors.length} error(s):`)
       for (const op of result.errors) {
         this.log(`  ✖ [${op.type}] ${op.label}: ${op.error}`)
+      }
+      if (result.rolledBack && result.rolledBack.length > 0) {
+        this.log(`\n  Nothing was written. Re-run with ${cmd('--no-transaction')} to keep the parts that work.`)
       }
       this.exit(1)
     }

@@ -20,6 +20,22 @@ export const DEFAULT_IGNORE_SCHEMAS = [
   'information_schema',
 ]
 
+/**
+ * Every schema whose contents belong to Supabase rather than the project.
+ *
+ * DEFAULT_IGNORE_SCHEMAS plus the ones a scan never lists because nothing in
+ * them is diffed, but which still hold objects and grants a project cannot
+ * recreate: pg_cron's `cron`, the pooler's `pgbouncer`, and pg_graphql's
+ * `graphql`. Grants in these differ between Supabase versions, not between
+ * anybody's decisions, and a restore must never clear them.
+ */
+export const SUPABASE_PLATFORM_SCHEMAS = [
+  ...DEFAULT_IGNORE_SCHEMAS,
+  'cron',
+  'pgbouncer',
+  'graphql',
+]
+
 /** Hint text shown during `supaforge init` to guide users through the Supabase UI. */
 export const INIT_HINTS = {
   DB_URL: [

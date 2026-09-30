@@ -2,12 +2,14 @@ import pg from 'pg'
 import { pgClientConfig } from './db.js'
 import type { ScanResult, SyncAction } from './types/drift'
 import { errMsg } from './utils/error'
-import { isDestructiveSql } from './dbdiff'
+import { destructiveReason } from './dbdiff'
 import {
   orderStatements, referencedTables,
   createdPolicies, createsOnlyPolicies,
   createdTriggers, createsOnlyTriggers,
+  sqlSkeleton,
 } from './sql-deps.js'
+import { splitSqlStatements, isCommentOnly } from './utils/sql-split.js'
 import { applyTableFilter, isFiltered, type TableFilter } from './utils/table-filter.js'
 import { isComparisonCheck } from './types/drift.js'
 import { matchesGlob } from './utils/strings.js'
@@ -138,8 +140,9 @@ function isSelected(issueId: string, only: string[] | undefined): boolean {
  * branch, and so the decision can be asserted directly in tests.
  */
 function classifyIssue(
-  issue: { id: string; sql?: { up: string }; action?: SyncAction },
+  issue: { id: string; sql?: { up: string }; action?: SyncAction; manualOnly?: string },
   options: PlanOptions,
+  recreatedPolicies: ReadonlySet<string> = new Set(),
 ): { kind: 'sql'; sql: string } | { kind: 'api'; action: SyncAction } | { kind: 'skip'; reason: string } {
   if (!isSelected(issue.id, options.only)) {
     return { kind: 'skip', reason: 'Not selected by --only' }
@@ -147,17 +150,51 @@ function classifyIssue(
 
   if (!issue.sql?.up) {
     if (issue.action) return { kind: 'api', action: issue.action }
-    return { kind: 'skip', reason: 'No SQL fix or API action available' }
+    // A check that knows why it cannot offer a fix says so; "nothing
+    // available" on its own leaves the user with no next step.
+    return { kind: 'skip', reason: issue.manualOnly ?? 'No SQL fix or API action available' }
   }
 
-  if (!options.allowDestructive && isDestructiveSql(issue.sql.up)) {
-    return { kind: 'skip', reason: 'Destructive (drops data) — re-run with --allow-destructive to apply' }
+  if (!options.allowDestructive) {
+    const why = destructiveReason(issue.sql.up, recreatedPolicies)
+    if (why) {
+      return { kind: 'skip', reason: `Destructive — ${why}; re-run with --allow-destructive to apply` }
+    }
   }
 
   const outOfScope = outOfScopeReason(issue.sql.up, options.tableFilter)
   if (outOfScope) return { kind: 'skip', reason: outOfScope }
 
   return { kind: 'sql', sql: issue.sql.up }
+}
+
+/**
+ * Policies that fixes in this apply create — the ones that will actually run.
+ *
+ * Lets the destructive gate tell a policy being removed from one being
+ * replaced across two fixes: a column type change drops the policies reading
+ * the column, and the policy's own fix creates the new definition once the
+ * type has changed (they cannot be one statement, because the new definition
+ * is not valid until then). Counted only from fixes that are selected and not
+ * held back themselves, so `--only` a column change without its policy fix is
+ * still gated as the removal it would be.
+ */
+function policiesCreatedBySelectedFixes(checks: ScanResult['checks'], options: PlanOptions): Set<string> {
+  const created = new Set<string>()
+  for (const check of checks) {
+    // Posture fixes do not run unless asked for (see planWork), so what they
+    // would create cannot stand in for a policy another fix drops.
+    const askedForExplicitly = options.checks?.includes(check.check) ?? false
+    if (!isComparisonCheck(check.check) && !options.applyPosture && !askedForExplicitly) continue
+    for (const issue of check.issues) {
+      const sql = issue.sql?.up
+      if (!sql || !isSelected(issue.id, options.only)) continue
+      if (!options.allowDestructive && destructiveReason(sql)) continue
+      if (outOfScopeReason(sql, options.tableFilter)) continue
+      for (const key of createdPolicies(sql)) created.add(key)
+    }
+  }
+  return created
 }
 
 /**
@@ -177,6 +214,7 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
   const relevant = scanResult.checks.filter(
     c => c.status === 'drifted' && (!options.checks || options.checks.includes(c.check)),
   )
+  const recreatedPolicies = policiesCreatedBySelectedFixes(relevant, options)
 
   for (const checkResult of relevant) {
     // A posture check judges the target on its own and fires identically
@@ -205,7 +243,7 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
 
     for (const issue of checkResult.issues) {
       const at = { check: checkResult.check, issueId: issue.id }
-      const outcome = classifyIssue(issue, options)
+      const outcome = classifyIssue(issue, options, recreatedPolicies)
 
       if (outcome.kind === 'sql') plan.sqlStatements.push({ ...at, sql: outcome.sql })
       else if (outcome.kind === 'api') plan.apiActions.push({ ...at, action: outcome.action })
@@ -322,16 +360,54 @@ async function runIndependently(
 }
 
 /**
+ * Does this fix consist only of `ALTER TYPE ... ADD VALUE`?
+ *
+ * PostgreSQL lets that run inside a transaction but not the new label be
+ * *used* there until it commits:
+ *
+ *     ERROR:  unsafe use of new value "refunded" of enum type order_state
+ *     HINT:  New enum values must be committed before they can be used.
+ *
+ * and the same apply often uses it straight away — a column default, or a
+ * reference-data row the data check inserts.
+ */
+export function isEnumValueAddition(sql: string): boolean {
+  const statements = splitSqlStatements(sql).filter(s => !isCommentOnly(s))
+  return statements.length > 0
+    && statements.every(s => /^\s*ALTER\s+TYPE\s+\S+\s+ADD\s+VALUE\b/i.test(sqlSkeleton(s)))
+}
+
+/**
  * All statements in one transaction: the first failure rolls back everything.
  *
  * What ran before the failure moves to `rolledBack` rather than `applied`,
  * because none of it is in the target any more.
+ *
+ * Enum label additions are the exception: they go first, in a transaction of
+ * their own that commits, so the rest can use the new labels — see
+ * isEnumValueAddition. They are additive and idempotent (`IF NOT EXISTS`), so
+ * keeping them when the rest rolls back leaves nothing half-done; they are
+ * reported as applied because they are.
  */
 async function runInTransaction(
   client: pg.Client,
   statements: PlannedSql[],
   result: PromoteResult,
 ): Promise<void> {
+  const additions = statements.filter(s => isEnumValueAddition(s.sql))
+  const rest = statements.filter(s => !isEnumValueAddition(s.sql))
+
+  if (additions.length > 0 && !(await runBatch(client, additions, result))) return
+  await runBatch(client, rest, result)
+}
+
+/** One transaction; true when it committed. */
+async function runBatch(
+  client: pg.Client,
+  statements: PlannedSql[],
+  result: PromoteResult,
+): Promise<boolean> {
+  if (statements.length === 0) return true
   const done: PromoteResult['applied'] = []
   await client.query('BEGIN')
 
@@ -342,13 +418,14 @@ async function runInTransaction(
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {})
       result.errors.push({ check: stmt.check, issueId: stmt.issueId, error: errMsg(err) })
-      result.rolledBack = done
-      return
+      result.rolledBack = [...(result.rolledBack ?? []), ...done]
+      return false
     }
   }
 
   await client.query('COMMIT')
   result.applied.push(...done)
+  return true
 }
 
 /** Run the planned API-based sync actions, recording per-action failures. */

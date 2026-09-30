@@ -277,3 +277,93 @@ function highestSeverity(lr: CheckResult): string | null {
   if (lr.issues.some(i => i.severity === 'info')) return 'info'
   return null
 }
+
+/** One skipped fix, as `promote` reports it. */
+export interface SkippedFix {
+  check: string
+  issueId: string
+  reason: string
+}
+
+/** Skipped fixes sharing a check and a reason. */
+export interface SkipGroup {
+  check: string
+  reason: string
+  issueIds: string[]
+}
+
+/**
+ * Collapse skipped fixes that share a check and a reason (issue #84).
+ *
+ * The reason is a property of the *rule*, not of the issue, so a rule that
+ * declines a whole check repeated itself once per issue. A posture check on a
+ * project with 47 tables lacking RLS printed the same 150-character sentence
+ * 47 times, and the result of the apply — the thing being looked for —
+ * scrolled off the top.
+ *
+ * Grouped by reason rather than by check alone: one check can skip different
+ * issues for different reasons, and merging those would misreport why.
+ *
+ * Insertion-ordered, so the output still follows the order the fixes were
+ * planned in.
+ */
+export function groupSkips(skipped: readonly SkippedFix[]): SkipGroup[] {
+  const groups = new Map<string, SkipGroup>()
+
+  for (const item of skipped) {
+    const key = `${item.check} ${item.reason}`
+    const existing = groups.get(key)
+    if (existing) existing.issueIds.push(item.issueId)
+    else groups.set(key, { check: item.check, reason: item.reason, issueIds: [item.issueId] })
+  }
+
+  return [...groups.values()]
+}
+
+/** How many issue ids a collapsed group names before saying "and N more". */
+export const SKIP_IDS_SHOWN = 6
+
+/**
+ * An issue id with its leading check name removed.
+ *
+ * Only when the whole segment matches, so an id that merely begins with the
+ * same letters keeps all of it, and never down to nothing.
+ */
+function shortIssueId(issueId: string, check: string): string {
+  for (const separator of ['-', ':']) {
+    const prefix = `${check}${separator}`
+    if (issueId.startsWith(prefix) && issueId.length > prefix.length) {
+      return issueId.slice(prefix.length)
+    }
+  }
+  return issueId
+}
+
+/**
+ * Render collapsed skips, without colour so it can be asserted on.
+ *
+ * A group of one renders exactly as it always did — `id: reason` — so the
+ * common case reads unchanged and only the repetitive case is collapsed.
+ */
+export function formatSkips(skipped: readonly SkippedFix[]): string[] {
+  const lines: string[] = []
+
+  for (const group of groupSkips(skipped)) {
+    if (group.issueIds.length === 1) {
+      lines.push(`○ [${group.check}] ${group.issueIds[0]}: ${group.reason}`)
+      continue
+    }
+
+    // Count first: it is the part that changes between runs, and the reason
+    // after it is the part that does not.
+    lines.push(`○ [${group.check}] ${group.issueIds.length} issues: ${group.reason}`)
+
+    // Issue ids are prefixed with their check, which is already in brackets on
+    // the line above; dropping it keeps the list readable at terminal width.
+    const shown = group.issueIds.slice(0, SKIP_IDS_SHOWN).map(id => shortIssueId(id, group.check))
+    const rest = group.issueIds.length - shown.length
+    lines.push(`    ${shown.join(', ')}${rest > 0 ? `, …and ${rest} more` : ''}`)
+  }
+
+  return lines
+}

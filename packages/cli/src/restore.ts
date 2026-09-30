@@ -4,14 +4,22 @@ import { join } from 'node:path'
 import pg from 'pg'
 import { pgClientConfig } from './db.js'
 import type { MigrationFile, SnapshotManifest } from './types/config'
-import { MIGRATIONS_TABLE, loadMigrations } from './migration'
+import { loadMigrations } from './migration'
+import { MIGRATIONS_TABLE } from './constants.js'
+import { ensureMigrationsTable, getAppliedVersions } from './migrate.js'
 import { loadSnapshot } from './snapshot'
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
 import { errMsg } from './utils/error'
-import { DEFAULT_IGNORE_SCHEMAS } from './defaults'
+import { DEFAULT_IGNORE_SCHEMAS, SUPABASE_PLATFORM_SCHEMAS } from './defaults'
 import { dropUnsupportedSetStatements, knownParameters } from './prove'
 import { splitSqlStatements, isCommentOnly, isPsqlMetaCommand, stripPsqlMetaCommands } from './utils/sql-split'
+import { quoteIdent, quoteLiteral } from './utils/sql.js'
+import { sqlSkeleton, statementSubject } from './sql-deps.js'
+import {
+  replaceableSchemas, findExternalDependents, dropSchemaContents, recreateExternalDependents,
+  resetRelationGrants, type ExternalDependent,
+} from './restore-replace.js'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
 
@@ -34,6 +42,23 @@ export interface RestoreOptions {
   queryFn?: QueryFn
   /** Fetch function for API operations. */
   fetchFn?: FetchFn
+  /**
+   * Apply each statement on its own, keeping whatever succeeds.
+   *
+   * Off by default. A restore used to run this way always, so a failure part
+   * way through left a half-restored database and the errors were listed only
+   * at the end (issue #95). PostgreSQL has transactional DDL, so the whole
+   * restore now succeeds or leaves the target exactly as it was.
+   */
+  noTransaction?: boolean
+  /**
+   * Drop the schemas the snapshot covers before replaying into them.
+   *
+   * What `--force` now means. It used to only skip the "target is not empty"
+   * check, so restoring over an existing database failed on every object that
+   * was already there and replaced nothing (issue #95).
+   */
+  replace?: boolean
 }
 
 export interface RestoreResult {
@@ -41,6 +66,15 @@ export interface RestoreResult {
   skipped: { type: 'sql' | 'api'; label: string; reason: string }[]
   errors: { type: 'sql' | 'api'; label: string; error: string }[]
   mode: 'snapshot' | 'migrations'
+  /**
+   * Statements that ran and were then rolled back, when the restore was
+   * transactional and something failed.
+   *
+   * Reported apart from `applied`, which is emptied: a restore that rolled
+   * back applied nothing, and saying it applied 60 operations would be the
+   * most misleading thing this command could tell anyone (issue #95).
+   */
+  rolledBack?: { type: 'sql' | 'api'; label: string }[]
 }
 
 // ─── Safety Check ────────────────────────────────────────────────────────────
@@ -80,11 +114,59 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
   const manifest = await loadSnapshot(options.snapshotDir)
 
   // Apply SQL layers in dependency order
-  const sqlOrder = ['extensions', 'schema', 'rls', 'cron', 'webhooks', 'storage-policies']
+  const sqlOrder = RESTORE_SQL_ORDER
   const client = new pg.Client(pgClientConfig(options.targetUrl))
   await client.connect()
 
+  // One transaction for the lot, unless asked otherwise. A restore that fails
+  // half way used to leave a database matching neither the snapshot nor its own
+  // previous state, with the errors reported only at the end (issue #95).
+  // PostgreSQL has transactional DDL, so this is the same guarantee `--apply`
+  // gives in promote().
+  const transactional = !options.noTransaction
+  if (transactional) await client.query('BEGIN')
+
+  /** Webhook triggers the schema dump creates, so the webhooks layer can skip them. */
+  const createdBySchemaLayer = new Set<string>()
+
+  /** Triggers and policies outside the cleared schemas, to put back — see restore-replace. */
+  let external: ExternalDependent[] = []
+
+  // schema.sql is a pg_dump, which empties search_path for the rest of the
+  // session. Every later layer holds names as the catalog rendered them —
+  // unqualified where they resolved through the default path — so a storage
+  // policy calling `is_admin()` failed with "function is_admin() does not
+  // exist" and, in one transaction, took the whole restore with it. The
+  // session's own path is put back after each layer.
+  const { rows: [{ search_path: sessionSearchPath }] } =
+    await client.query<{ search_path: string }>('SHOW search_path')
+
   try {
+    // `--force` means replace, not "carry on regardless". Skipping the
+    // not-empty check and then failing on every object that already exists
+    // replaced nothing at all. What it clears, and what it must not, is in
+    // restore-replace.ts.
+    if (options.replace) {
+      const schemas = replaceableSchemas(await schemasInSnapshot(options.snapshotDir))
+      const dependents = await findExternalDependents(client, schemas)
+      if (dependents.blockers.length > 0) {
+        result.errors.push({
+          type: 'sql',
+          label: 'Restore --force',
+          error: `clearing ${schemas.join(', ')} would also drop objects outside them that `
+            + `this restore cannot put back: ${dependents.blockers.join('; ')}. `
+            + 'Nothing was changed. Remove or move those first, or restore into an empty database.',
+        })
+        throw new RestoreAborted()
+      }
+      external = dependents.recreate
+      const dropped = await dropSchemaContents(client, schemas)
+      result.applied.push({
+        type: 'sql',
+        label: `Cleared ${dropped} object(s) from ${schemas.join(', ')} (--force)`,
+      })
+    }
+
     for (const layer of sqlOrder) {
       const file = layerRestoreFile(layer)
       const info = manifest.layers[layer === 'storage-policies' ? 'storage' : layer]
@@ -115,22 +197,63 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
         const content = layer === 'schema'
           ? await replayableSchemaSql(raw, options.targetUrl)
           : raw
-        const statements = extractExecutableStatements(content)
-        for (const sql of statements) {
-          try {
-            await client.query(sql)
-            result.applied.push({ type: 'sql', label: summarizeStatement(sql) })
-          } catch (err) {
-            result.errors.push({
-              type: 'sql',
-              label: summarizeStatement(sql),
-              error: errMsg(err),
-            })
+
+        let statements = extractExecutableStatements(content)
+
+        // Grants are restored exactly, not added to whatever default
+        // privileges gave the recreated objects — see resetRelationGrants.
+        if (layer === 'roles') {
+          const reset = await resetRelationGrants(
+            client, replaceableSchemas(await schemasInSnapshot(options.snapshotDir)))
+          if (reset > 0) {
+            result.applied.push({ type: 'sql', label: `Reset grants on ${reset} relation(s) before replaying the captured ones` })
           }
         }
-      } catch {
+
+        // Objects the platform owns cannot be recreated by `postgres`, and a
+        // snapshot of a Supabase project carries several: `pgbouncer.get_auth`
+        // in the schema dump, pg_cron's own policies on `cron.job` in the RLS
+        // dump. They failed on every single restore (issue #95).
+        statements = statements.filter(sql => {
+          const owner = platformOwnedObject(sql)
+          if (owner === undefined) return true
+          result.skipped.push({
+            type: 'sql',
+            label: summarizeStatement(sql),
+            reason: `${owner} is managed by the platform and cannot be recreated here`,
+          })
+          return false
+        })
+
+        // The webhooks layer re-creates triggers the schema dump already made
+        // — the restore-side twin of the overlap #77 settled for `diff --apply`.
+        if (layer === 'webhooks') {
+          statements = statements.filter(sql => {
+            if (!createdBySchemaLayer.has(webhookTriggerKey(sql) ?? '')) return true
+            result.skipped.push({
+              type: 'sql',
+              label: summarizeStatement(sql),
+              reason: 'already created by the schema layer',
+            })
+            return false
+          })
+        }
+
+        if (layer === 'schema') {
+          for (const sql of statements) {
+            const key = webhookTriggerKey(sql)
+            if (key) createdBySchemaLayer.add(key)
+          }
+        }
+
+        for (const sql of statements) {
+          await applyStatement(client, sql, transactional, result)
+        }
+      } catch (err) {
+        if (err instanceof RestoreAborted) throw err
         result.skipped.push({ type: 'sql', label: `Layer: ${layer}`, reason: 'File not readable' })
       }
+      await client.query(`SELECT set_config('search_path', $1, false)`, [sessionSearchPath])
     }
 
     // Apply data if present
@@ -152,33 +275,105 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
                 label: `Data: ${file}`,
                 error: errMsg(err),
               })
+              // As for the SQL layers: in a transaction everything after the
+              // first failure only reports that the transaction is aborted.
+              if (transactional) throw new RestoreAborted()
             }
           }
         }
-      } catch { /* no data dir */ }
+      } catch (err) {
+        if (err instanceof RestoreAborted) throw err
+        /* no data dir */
+      }
+    }
+
+    // What clearing the schemas took with it from outside them — the auth
+    // trigger that calls a public function, a storage policy that does —
+    // goes back once everything it depends on exists again.
+    for (const dep of await recreateExternalDependents(client, external)) {
+      result.applied.push({
+        type: 'sql',
+        label: `Recreated ${dep.kind} ${dep.name} on ${dep.schema}.${dep.table} (outside the snapshot, dropped by --force)`,
+      })
+    }
+
+    if (transactional) {
+      if (result.errors.length > 0) {
+        await client.query('ROLLBACK')
+        // Nothing was written, so nothing was applied. Reporting otherwise
+        // would be the most misleading thing this command could say.
+        result.rolledBack = result.applied
+        result.applied = []
+      } else {
+        await client.query('COMMIT')
+      }
+    }
+  } catch (err) {
+    if (transactional) {
+      await client.query('ROLLBACK').catch(() => undefined)
+      result.rolledBack = result.applied
+      result.applied = []
+    }
+    // A RestoreAborted carries no message of its own: the statement that failed
+    // has already been recorded, and adding a second entry for the same
+    // failure would only make it harder to read.
+    if (!(err instanceof RestoreAborted)) {
+      result.errors.push({ type: 'sql', label: 'Restore', error: errMsg(err) })
     }
   } finally {
     await client.end()
   }
 
-  // Note API layers that need manual action
-  if (manifest.layers.auth?.captured) {
-    result.skipped.push({
-      type: 'api',
-      label: 'Auth config',
-      reason: 'Requires --project-ref and --api-key to restore via Management API',
-    })
-  }
-  if (manifest.layers['edge-functions']?.captured) {
-    result.skipped.push({
-      type: 'api',
-      label: 'Edge Functions',
-      reason: 'Deploy via "supabase functions deploy" from your local functions directory',
-    })
+  // Layers that were captured and cannot be replayed as SQL. Named
+  // individually rather than left out: a restore that lists what it did and
+  // says nothing about four of the twelve layers reads as complete when it is
+  // not, which is the thing a restore most needs to be honest about.
+  for (const note of MANUAL_LAYERS) {
+    if (manifest.layers[note.layer]?.captured) {
+      result.skipped.push({ type: note.type, label: note.label, reason: note.reason })
+    }
   }
 
   return result
 }
+
+/** Captured layers a restore cannot replay, and what to do about each. */
+const MANUAL_LAYERS: ReadonlyArray<{
+  layer: string
+  type: 'api' | 'sql'
+  label: string
+  reason: string
+}> = [
+  {
+    layer: 'auth',
+    type: 'api',
+    label: 'Auth config',
+    reason: 'Requires --project-ref and --api-key to restore via Management API',
+  },
+  {
+    layer: 'edge-functions',
+    type: 'api',
+    label: 'Edge Functions',
+    reason: 'Deploy via "supabase functions deploy" from your local functions directory',
+  },
+  {
+    // storage-policies.sql *is* replayed; the bucket rows are not. They are
+    // created over the Storage API, which needs credentials a restore into a
+    // plain PostgreSQL database does not have.
+    layer: 'storage',
+    type: 'api',
+    label: 'Storage buckets',
+    reason: 'Bucket rows are created via the Storage API. The policies on them are replayed from '
+      + 'storage-policies.sql where the target has a storage schema; objects are never transferred',
+  },
+  {
+    layer: 'vault',
+    type: 'sql',
+    label: 'Vault secrets',
+    reason: 'vault.sql lists the secret names only — a value cannot be read out of Vault, '
+      + 'so each must be recreated by hand with vault.create_secret',
+  },
+]
 
 // ─── Restore from Migrations ─────────────────────────────────────────────────
 
@@ -211,17 +406,30 @@ export async function restoreFromMigrations(options: RestoreOptions): Promise<Re
   await client.connect()
 
   try {
-    await client.query(`
-      CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE} (
-        version TEXT PRIMARY KEY,
-        description TEXT,
-        applied_at TIMESTAMPTZ DEFAULT NOW()
-      )
-    `)
+    // Tracked in `supabase_migrations.schema_migrations` — the same table
+    // `migrate run` uses, in a schema the Data API does not expose.
+    //
+    // It used to be `public._supaforge_migrations`, created unqualified. On
+    // Supabase a table in `public` receives the project's default grants to
+    // `anon` and `authenticated`, and this one was created with RLS off — so
+    // anyone holding the public anon key could read it, insert into it and
+    // delete from it through the Data API, and thereby decide which migrations
+    // a later restore believed were already applied (issue #93). It was also a
+    // second, disagreeing record of the same thing.
+    await ensureMigrationsTable(options.targetUrl, queryFn)
 
-    // Get already-applied versions
-    const { rows } = await client.query(`SELECT version FROM ${MIGRATIONS_TABLE}`)
-    const applied = new Set(rows.map(r => (r as { version: string }).version))
+    const legacy = await findLegacyTrackingTable(client)
+    if (legacy) {
+      result.skipped.push({
+        type: 'sql',
+        label: 'public._supaforge_migrations',
+        reason: 'left over from an earlier version and reachable with the anon key — '
+          + 'tracking has moved to supabase_migrations.schema_migrations. '
+          + 'Drop it: DROP TABLE public._supaforge_migrations;',
+      })
+    }
+
+    const applied = await getAppliedVersions(options.targetUrl, queryFn)
 
     for (const migration of filtered) {
       if (applied.has(migration.version)) {
@@ -230,10 +438,12 @@ export async function restoreFromMigrations(options: RestoreOptions): Promise<Re
       }
 
       // Apply SQL statements
+      let ran = 0
       for (const sql of migration.up.sql) {
-        if (sql.startsWith('--')) continue // Skip comment-only markers
+        if (isCommentOnly(sql)) continue // marker text, not a statement
         try {
           await client.query(sql)
+          ran++
           result.applied.push({ type: 'sql', label: summarizeStatement(sql) })
         } catch (err) {
           result.errors.push({
@@ -244,9 +454,30 @@ export async function restoreFromMigrations(options: RestoreOptions): Promise<Re
         }
       }
 
-      // Track migration
-      await client.query(
-        `INSERT INTO ${MIGRATIONS_TABLE} (version, description) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+      // A migration that applied nothing is not applied.
+      //
+      // `snapshot --migration` writes files whose schema layer is the comment
+      // `-- Schema changed. Use @dbdiff/cli to generate migration SQL.`, and
+      // the baseline `clone` writes has no statements at all. Recording those
+      // as done meant a restore into an empty database built nothing and then
+      // reported success — and left the tracking table asserting the schema
+      // was in place (issue #93).
+      if (ran === 0) {
+        result.skipped.push({
+          type: 'sql',
+          label: `v${migration.version}`,
+          reason: 'carries no SQL to apply, so it was not recorded as applied. '
+            + 'Snapshot-derived migrations hold no schema DDL — use '
+            + '`supaforge clone`, or restore from a snapshot, to build structure.',
+        })
+        continue
+      }
+
+      await queryFn(
+        options.targetUrl,
+        `INSERT INTO ${MIGRATIONS_TABLE} (version, name, statements)
+         VALUES ($1, $2, '{}')
+         ON CONFLICT (version) DO NOTHING`,
         [migration.version, migration.description],
       )
     }
@@ -264,7 +495,7 @@ export async function previewSnapshotRestore(snapshotDir: string): Promise<{ lay
   const manifest = await loadSnapshot(snapshotDir)
   const preview: { layer: string; statements: string[] }[] = []
 
-  const sqlOrder = ['extensions', 'schema', 'rls', 'cron', 'webhooks', 'storage-policies']
+  const sqlOrder = RESTORE_SQL_ORDER
   for (const layer of sqlOrder) {
     const file = layerRestoreFile(layer)
     const info = manifest.layers[layer === 'storage-policies' ? 'storage' : layer]
@@ -321,6 +552,24 @@ async function replayableSchemaSql(sql: string, targetUrl: string): Promise<stri
     return sql
   }
 }
+
+/**
+ * The snapshot layers a restore replays, in dependency order.
+ *
+ * `realtime` and `roles` were captured as replayable SQL and then never
+ * replayed: the two layers were added to `snapshot` without being added here,
+ * so a restore silently dropped every publication membership and every table
+ * grant the snapshot held. Both come after `schema`, because a publication can
+ * only add a table that exists and a grant can only name one.
+ *
+ * `vault` is deliberately absent — its file is a comment-only list of secret
+ * names, because a secret's value cannot be read out of Vault and inventing one
+ * is worse than leaving it absent (issue #91). It is reported as needing manual
+ * action instead, alongside the API layers.
+ */
+const RESTORE_SQL_ORDER = [
+  'extensions', 'schema', 'rls', 'cron', 'webhooks', 'storage-policies', 'realtime', 'roles',
+]
 
 function layerRestoreFile(layer: string): string {
   switch (layer) {
@@ -390,3 +639,320 @@ export function summarizeStatement(sql: string): string {
     ?? sql.trim()
   return first.length > 80 ? `${first.slice(0, 77)}...` : first
 }
+
+/**
+ * The `public._supaforge_migrations` table an earlier version created.
+ *
+ * Worth naming rather than ignoring: it is reachable with the project's anon
+ * key, so it should be dropped rather than merely abandoned (issue #93).
+ */
+async function findLegacyTrackingTable(client: pg.Client): Promise<boolean> {
+  try {
+    const { rows } = await client.query(
+      `SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = '_supaforge_migrations'`,
+    )
+    return rows.length > 0
+  } catch {
+    return false
+  }
+}
+
+/**
+ * The schemas a snapshot's `schema.sql` creates.
+ *
+ * Used by `--force` to clear the ground before replaying. Read from the dump
+ * rather than assumed to be `public`, so a snapshot covering `reporting` as
+ * well does not leave half of it behind — and so nothing outside the snapshot
+ * is touched.
+ */
+async function schemasInSnapshot(snapshotDir: string): Promise<string[]> {
+  try {
+    const sql = await readFile(join(snapshotDir, 'schema.sql'), 'utf-8')
+    const found = new Set<string>()
+
+    for (const match of sql.matchAll(/^\s*CREATE SCHEMA (?:IF NOT EXISTS )?("[^"]+"|[A-Za-z_][\w$]*)/gim)) {
+      found.add(match[1].replace(/"/g, ''))
+    }
+
+    // A dump scoped to public may not carry a CREATE SCHEMA for it at all.
+    found.add('public')
+    return [...found]
+  } catch {
+    return ['public']
+  }
+}
+
+
+/**
+ * Schemas whose contents belong to the platform, not the project.
+ *
+ * A Supabase snapshot captures objects in these that `postgres` cannot
+ * recreate — `pgbouncer.get_auth()` needs the `pgbouncer` role, and pg_cron
+ * owns its own policies on `cron.job` — so every restore failed on them
+ * (issue #95). They are the project's to read, never to rebuild.
+ */
+const PLATFORM_OWNED_SCHEMAS = ['pgbouncer', 'cron', 'pgsodium', 'vault', '_realtime', 'supabase_functions']
+
+/**
+ * The platform-owned object a statement creates or changes, if any.
+ *
+ * Decided by the statement's *subject* — what it acts on — not by every schema
+ * it mentions. `CREATE TRIGGER ... ON public.orders EXECUTE FUNCTION
+ * supabase_functions.http_request(...)` is a Database Webhook, the project's
+ * own, and matching by mention skipped every one of them on restore, along
+ * with any view that reads `cron.job_run_details` or `vault.decrypted_secrets`.
+ *
+ * Returns the schema so the skip can say which it was.
+ */
+export function platformOwnedObject(sql: string): string | undefined {
+  const subject = statementSubject(sql)
+  if (!subject?.schema) return undefined
+  return PLATFORM_OWNED_SCHEMAS.includes(subject.schema) ? subject.schema : undefined
+}
+
+/**
+ * Schemas only a Supabase instance has. A statement naming one of them can
+ * fail on plain PostgreSQL for no reason but that — see `tolerableFailure`.
+ */
+const SUPABASE_ONLY_SCHEMAS = [
+  ...new Set([...SUPABASE_PLATFORM_SCHEMAS, ...PLATFORM_OWNED_SCHEMAS]),
+].filter(s => s !== 'pg_catalog' && s !== 'information_schema')
+
+/**
+ * The Supabase-only schema a statement names that the target lacks, if any.
+ */
+export function mentionedPlatformSchema(
+  sql: string,
+  targetSchemas: ReadonlySet<string>,
+): string | undefined {
+  const skeleton = sqlSkeleton(sql)
+  return SUPABASE_ONLY_SCHEMAS.find(schema =>
+    !targetSchemas.has(schema)
+    && new RegExp(String.raw`(?:"${schema}"|\b${schema})\s*\.`, 'i').test(skeleton))
+}
+
+/**
+ * SQLSTATEs meaning "that does not exist here": a relation, function, schema
+ * or object missing.
+ */
+const ABSENT_ON_TARGET = new Set(['42P01', '42883', '3F000', '42704'])
+
+/** SQLSTATEs for an extension the server does not ship. */
+const EXTENSION_UNAVAILABLE = new Set(['0A000', '58P01'])
+
+/**
+ * Statements that attach to an object rather than define one: a grant, a
+ * policy, a trigger, a view, a comment, a foreign key, publication
+ * membership, a cron call. Only these may be skipped — a table or a column
+ * that cannot be created fails the restore, however it fails.
+ */
+const ATTACHMENT = new RegExp(String.raw`^\s*(?:`
+  + String.raw`GRANT|REVOKE|COMMENT\s+ON|SELECT|ALTER\s+PUBLICATION|ALTER\s+DEFAULT\s+PRIVILEGES|`
+  + String.raw`ALTER\s+POLICY|ALTER\s+TABLE\s+(?:ONLY\s+)?\S+\s+ADD\s+CONSTRAINT\b[\s\S]*\bFOREIGN\s+KEY|`
+  + String.raw`CREATE\s+(?:OR\s+REPLACE\s+)?(?:POLICY|(?:CONSTRAINT\s+)?TRIGGER|VIEW|MATERIALIZED\s+VIEW|RULE)`
+  + String.raw`)\b`, 'i')
+
+/**
+ * Why a failed statement can be skipped instead of failing the restore, or
+ * undefined when it cannot.
+ *
+ * A Supabase snapshot restored into plain PostgreSQL carries things that
+ * cannot exist there: `pg_graphql`, a Database Webhook calling
+ * `supabase_functions.http_request`, a grant on `storage.objects`, a policy
+ * calling `auth.uid()`, a foreign key to `auth.users`. In one transaction the
+ * first of them rolled back the whole restore — nothing applied at all.
+ *
+ * So they are skipped by name, under three conditions together: the
+ * statement only attaches to something (ATTACHMENT), PostgreSQL's error says
+ * something is missing, and the Supabase schema it names does not exist on
+ * this target at all. On a Supabase target every such schema exists, so
+ * nothing there is ever skipped this way; and a table that cannot be created
+ * fails the restore wherever it is. An extension the server does not ship is
+ * skipped on its own terms.
+ *
+ * @param targetSchemas the schemas the target has, read after the failure
+ */
+export function tolerableFailure(
+  sql: string,
+  err: unknown,
+  targetSchemas: ReadonlySet<string>,
+): string | undefined {
+  const code = (err as { code?: string } | null)?.code
+  if (!code) return undefined
+  const skeleton = sqlSkeleton(sql)
+
+  if (/^\s*CREATE\s+EXTENSION\b/i.test(skeleton)) {
+    return EXTENSION_UNAVAILABLE.has(code)
+      ? `extension not available on this server: ${errMsg(err)}`
+      : undefined
+  }
+  if (!ABSENT_ON_TARGET.has(code) || !ATTACHMENT.test(skeleton)) return undefined
+
+  const schema = mentionedPlatformSchema(sql, targetSchemas)
+  return schema
+    ? `depends on ${schema}, which this target does not have (${errMsg(err)})`
+    : undefined
+}
+
+/**
+ * Run one restore statement, with what it needs prepared first.
+ *
+ * In a transaction each statement runs under a savepoint, so a failure that
+ * `tolerableFailure` accepts is undone on its own and the restore continues;
+ * any other failure aborts the lot.
+ */
+async function applyStatement(
+  client: pg.Client,
+  sql: string,
+  transactional: boolean,
+  result: RestoreResult,
+): Promise<void> {
+  if (transactional) await client.query('SAVEPOINT sf_restore_statement')
+  try {
+    // `CREATE EXTENSION ... WITH SCHEMA "extensions"` needs that schema to
+    // exist, and on plain PostgreSQL it does not (issue #95).
+    const needed = extensionTargetSchema(sql)
+    if (needed) await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(needed)}`)
+
+    // `GRANT … TO anon` needs the role to exist, and on plain PostgreSQL none
+    // of Supabase's Data API roles do.
+    const grantee = grantTargetRole(sql)
+    if (grantee) await client.query(createRoleIfMissing(grantee))
+
+    await client.query(conditionalPublicationMembership(sql))
+    if (transactional) await client.query('RELEASE SAVEPOINT sf_restore_statement')
+    result.applied.push({ type: 'sql', label: summarizeStatement(sql) })
+  } catch (err) {
+    // Back to the savepoint first: until then the transaction accepts no
+    // query, and deciding needs one.
+    if (transactional) await client.query('ROLLBACK TO SAVEPOINT sf_restore_statement')
+    const { rows } = await client.query<{ nspname: string }>('SELECT nspname FROM pg_namespace')
+    const tolerated = tolerableFailure(sql, err, new Set(rows.map(r => r.nspname)))
+    if (tolerated) {
+      result.skipped.push({ type: 'sql', label: summarizeStatement(sql), reason: tolerated })
+      return
+    }
+    result.errors.push({ type: 'sql', label: summarizeStatement(sql), error: errMsg(err) })
+    // In a transaction, stop at the first real failure and let the rollback
+    // handle it: everything after would only report the transaction aborted.
+    if (transactional) throw new RestoreAborted()
+  }
+}
+
+/**
+ * `schema.table.trigger` for a statement creating a webhook trigger, else null.
+ *
+ * A trigger name is unique only per table, which is the same keying the
+ * webhooks check settled on in #77.
+ */
+export function webhookTriggerKey(sql: string): string | null {
+  const match = /CREATE\s+TRIGGER\s+("[^"]+"|[\w$]+)[\s\S]*?\bON\s+((?:"[^"]+"|[\w$]+)(?:\s*\.\s*(?:"[^"]+"|[\w$]+))?)/i
+    .exec(sqlSkeleton(sql))
+  if (!match) return null
+
+  const bare = (s: string) => s.replace(/"/g, '').trim()
+  return `${bare(match[2])}.${bare(match[1])}`.toLowerCase()
+}
+
+/**
+ * A schema that already exists everywhere and cannot be created.
+ *
+ * PostgreSQL rejects a name beginning with `pg_` before it even evaluates
+ * `IF NOT EXISTS`, so asking for one is an error rather than a no-op — the
+ * same trap as issue #94, which is where `--prove` used to abort.
+ */
+export function isSystemSchema(schema: string): boolean {
+  return schema === 'pg_catalog' || schema === 'information_schema' || schema.startsWith('pg_')
+}
+
+/**
+ * The schema a `CREATE EXTENSION ... WITH SCHEMA x` needs creating first, if any.
+ *
+ * A Supabase snapshot puts its extensions in `extensions`, which plain
+ * PostgreSQL has never heard of, so every one of them failed there with
+ * `schema "extensions" does not exist` (issue #95).
+ *
+ * System schemas are excluded. `plpgsql` lives in `pg_catalog`, and asking for
+ * that one aborts the transaction and takes the whole restore with it — which
+ * is what a first attempt at this fix did.
+ */
+export function extensionTargetSchema(sql: string): string | undefined {
+  const match = /CREATE\s+EXTENSION\b[\s\S]*?\bWITH\s+SCHEMA\s+("[^"]+"|[\w$]+)/i
+    .exec(sqlSkeleton(sql))
+  if (!match) return undefined
+
+  const schema = match[1].replace(/"/g, '')
+  return isSystemSchema(schema) ? undefined : schema
+}
+
+/**
+ * The role a `GRANT … TO x` needs creating first, if any.
+ *
+ * A snapshot's `roles.sql` grants to Supabase's Data API roles — `anon`,
+ * `authenticated`, `service_role` — and the usual restore target is plain
+ * PostgreSQL, where none of them exist. Read off the skeleton, so a role named
+ * inside a function body or a string literal is not mistaken for a grantee.
+ *
+ * `PUBLIC` is not a role: it is the keyword for everyone, always present, and
+ * `CREATE ROLE public` is an error.
+ */
+export function grantTargetRole(sql: string): string | undefined {
+  const match = /^\s*GRANT\b[\s\S]*?\bTO\s+("[^"]+"|[\w$]+)/i.exec(sqlSkeleton(sql))
+  if (!match) return undefined
+
+  const role = match[1].replace(/"/g, '')
+  if (role.toLowerCase() === 'public') return undefined
+  // A `pg_` role is built in, so it either exists or cannot be created.
+  return role.startsWith('pg_') ? undefined : role
+}
+
+/**
+ * `CREATE ROLE` guarded on the role not already existing.
+ *
+ * PostgreSQL has no `CREATE ROLE IF NOT EXISTS`, so this is the DO-block form.
+ * `NOLOGIN`, deliberately: these are grant targets, and a restore quietly
+ * creating a role that can log in would be a worse outcome than a failed grant.
+ */
+export function createRoleIfMissing(role: string): string {
+  return `DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${quoteLiteral(role)}) THEN
+    CREATE ROLE ${quoteIdent(role)} NOLOGIN;
+  END IF;
+END $$;`
+}
+
+/**
+ * `ALTER PUBLICATION … ADD TABLE` guarded on the table not already being in it.
+ *
+ * Adding a table twice is an error — `relation "orders" is already member of
+ * publication` — so restoring the realtime layer into a database that already
+ * has the publication populated aborted the whole transaction. Every other
+ * statement a restore replays is either idempotent or made so (the same reason
+ * `CREATE SCHEMA` is rewritten), and this is the one that was not.
+ *
+ * Anything that is not such a statement is returned unchanged.
+ */
+export function conditionalPublicationMembership(sql: string): string {
+  const match = /^\s*ALTER\s+PUBLICATION\s+("[^"]+"|[\w$]+)\s+ADD\s+TABLE\s+(?:ONLY\s+)?([^;]+?)\s*;?\s*$/i
+    .exec(sql)
+  if (!match) return sql
+
+  const [, publication, table] = match
+  const parts = table.split('.').map(p => p.replace(/"/g, '').trim())
+  if (parts.length !== 2) return sql
+
+  const [schema, name] = parts
+  return `DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = ${quoteLiteral(publication.replace(/"/g, ''))}
+      AND schemaname = ${quoteLiteral(schema)}
+      AND tablename = ${quoteLiteral(name)}
+  ) THEN
+    EXECUTE ${quoteLiteral(`ALTER PUBLICATION ${quoteIdent(publication.replace(/"/g, ''))} ADD TABLE ${quoteIdent(schema)}.${quoteIdent(name)}`)};
+  END IF;
+END $$;`
+}
+
+/** Thrown to unwind out of the layer loop once a transaction has aborted. */
+class RestoreAborted extends Error {}

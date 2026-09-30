@@ -4,7 +4,7 @@ import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
-import { quoteIdent } from './utils/sql'
+import { quoteIdent, quoteLiteral } from './utils/sql'
 import { normalizeRoles } from './utils/strings'
 import type { EnvironmentConfig, SupaForgeConfig, SnapshotManifest, SnapshotLayerInfo } from './types/config'
 import { DEFAULT_IGNORE_SCHEMAS, RELATION_NOT_FOUND } from './defaults'
@@ -13,7 +13,8 @@ import type { SchemaSnapshot } from './schema-introspect'
 import { getServerMajorVersion, resolvePgDumpPath } from './pg-tools'
 import { errMsg } from './utils/error'
 import { ok, warn, dim } from './ui'
-import { SUPABASE_MGMT_API, SUPAFORGE_DIR, SNAPSHOTS_SUBDIR } from './constants'
+import { SUPABASE_PLATFORM_SCHEMAS } from './defaults'
+import { SUPABASE_MGMT_API, SUPAFORGE_DIR, SNAPSHOTS_SUBDIR, MIGRATIONS_SUBDIR } from './constants'
 
 const execFile = promisify(execFileCb)
 
@@ -98,6 +99,18 @@ export async function captureSnapshot(options: SnapshotOptions): Promise<Snapsho
 
   // Layer 9: Extensions
   layers.extensions = await captureExtensions(dir, options.env.dbUrl, queryFn)
+
+  // Layers 10-12: Realtime, Vault and roles.
+  //
+  // `diff` checks all three and a snapshot captured none of them, so a
+  // snapshot was not a record of what `diff` compares (issue #92). Realtime
+  // publications and role grants are ordinary DDL. Vault records the secrets'
+  // *names* only — the values cannot be read out of Vault across
+  // environments, which is the same reason the vault check offers no fix
+  // (issue #91) — so the file is a checklist rather than something to replay.
+  layers.realtime = await captureRealtime(dir, options.env.dbUrl, queryFn)
+  layers.vault = await captureVaultSecrets(dir, options.env.dbUrl, queryFn)
+  layers.roles = await captureRoleGrants(dir, options.env.dbUrl, queryFn)
 
   const manifest: SnapshotManifest = {
     version: 1,
@@ -472,6 +485,149 @@ async function captureWebhooks(
   }
 }
 
+async function captureRealtime(
+  dir: string,
+  dbUrl: string,
+  queryFn: QueryFn,
+): Promise<SnapshotLayerInfo> {
+  const file = 'realtime.sql'
+  try {
+    const rows = await queryFn(dbUrl, `
+      SELECT p.pubname, pt.schemaname, pt.tablename
+      FROM pg_publication p
+      LEFT JOIN pg_publication_tables pt ON p.pubname = pt.pubname
+      ORDER BY p.pubname, pt.schemaname, pt.tablename
+    `) as unknown as Array<{ pubname: string; schemaname: string | null; tablename: string | null }>
+
+    // One CREATE per publication, then the tables added to it. `supabase_realtime`
+    // exists on every Supabase project, so the CREATE is conditional and the
+    // membership is what actually carries the state.
+    const byPublication = new Map<string, string[]>()
+    for (const row of rows) {
+      const tables = byPublication.get(row.pubname) ?? []
+      if (row.schemaname && row.tablename) {
+        tables.push(`${quoteIdent(row.schemaname)}.${quoteIdent(row.tablename)}`)
+      }
+      byPublication.set(row.pubname, tables)
+    }
+
+    const statements: string[] = []
+    for (const [pubname, tables] of byPublication) {
+      statements.push(`-- Publication: ${pubname}`)
+      statements.push(`DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = ${quoteLiteral(pubname)}) THEN
+    EXECUTE ${quoteLiteral(`CREATE PUBLICATION ${quoteIdent(pubname)}`)};
+  END IF;
+END $$;`)
+      for (const table of tables) {
+        statements.push(`ALTER PUBLICATION ${quoteIdent(pubname)} ADD TABLE ${table};`)
+      }
+    }
+
+    const output = statements.length > 0
+      ? `-- SupaForge Realtime Snapshot\n-- ${byPublication.size} publication(s)\n\n${statements.join('\n')}\n`
+      : '-- No publications found\n'
+    await writeFile(join(dir, file), output)
+    return { captured: true, file, itemCount: byPublication.size }
+  } catch (err) {
+    return { captured: false, file, itemCount: 0, error: errMsg(err) }
+  }
+}
+
+async function captureVaultSecrets(
+  dir: string,
+  dbUrl: string,
+  queryFn: QueryFn,
+): Promise<SnapshotLayerInfo> {
+  const file = 'vault.sql'
+  try {
+    const rows = await queryFn(dbUrl, `
+      SELECT name, description, coalesce(unique_name, name) AS unique_name
+      FROM vault.decrypted_secrets
+      ORDER BY coalesce(unique_name, name)
+    `) as unknown as Array<{ name: string; description: string | null; unique_name: string }>
+
+    // Names and descriptions only. A secret's value cannot be read out of
+    // Vault across environments, so this is a list of what to recreate by hand
+    // rather than SQL to replay — and deliberately not runnable, so a restore
+    // cannot create a secret with an invented value the way the vault check
+    // used to (issue #91).
+    const lines = rows.map(row =>
+      `--   ${row.unique_name}${row.description ? ` — ${row.description}` : ''}`)
+
+    const output = rows.length > 0
+      ? `-- SupaForge Vault Snapshot\n-- ${rows.length} secret(s), names only:\n`
+        + '-- the values cannot be read out of Vault and must be recreated by hand.\n'
+        + `${lines.join('\n')}\n`
+      : '-- No vault secrets found\n'
+    await writeFile(join(dir, file), output)
+    return { captured: true, file, itemCount: rows.length }
+  } catch (err) {
+    const msg = errMsg(err)
+    if (msg.includes(RELATION_NOT_FOUND) || msg.includes('schema "vault" does not exist')) {
+      return { captured: false, file, itemCount: 0, skipReason: 'vault extension not installed' }
+    }
+    return { captured: false, file, itemCount: 0, error: msg }
+  }
+}
+
+async function captureRoleGrants(
+  dir: string,
+  dbUrl: string,
+  queryFn: QueryFn,
+): Promise<SnapshotLayerInfo> {
+  const file = 'roles.sql'
+  // Supabase's own schemas are left out: their grants are the platform's, and
+  // replaying them into plain PostgreSQL — the usual restore target — fails on
+  // a schema that does not exist there. A snapshot of a test stack held 348
+  // grants, 201 of them on storage, realtime, supabase_functions and vault.
+  const excluded = SUPABASE_PLATFORM_SCHEMAS.map(quoteLiteral).join(', ')
+  try {
+    const rows = await queryFn(dbUrl, `
+      SELECT grantee, table_schema, table_name, NULL::text AS column_name,
+             privilege_type, (is_grantable = 'YES') AS is_grantable
+      FROM information_schema.role_table_grants
+      WHERE grantee NOT IN (
+        'postgres','supabase_admin','authenticator','supabase_auth_admin',
+        'supabase_storage_admin','dashboard_user','pgbouncer','supavisor'
+      )
+        AND grantee NOT LIKE 'pg\\_%'
+        AND table_schema NOT IN (${excluded})
+      UNION ALL
+      SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END,
+             n.nspname, c.relname, att.attname, a.privilege_type, a.is_grantable
+      FROM pg_attribute att
+      JOIN pg_class c ON c.oid = att.attrelid
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      CROSS JOIN LATERAL aclexplode(att.attacl) a
+      WHERE att.attacl IS NOT NULL AND att.attnum > 0 AND NOT att.attisdropped
+        AND a.grantee <> c.relowner
+        AND n.nspname NOT IN (${excluded})
+      ORDER BY 1, 2, 3, 4, 5
+    `) as unknown as Array<{
+      grantee: string; table_schema: string; table_name: string
+      column_name: string | null; privilege_type: string; is_grantable: boolean
+    }>
+
+    const statements = rows.map(row =>
+      `GRANT ${row.privilege_type}`
+      + (row.column_name ? ` (${quoteIdent(row.column_name)})` : '')
+      + ` ON ${quoteIdent(row.table_schema)}.${quoteIdent(row.table_name)}`
+      // PUBLIC is a keyword; quoted, it names a role that does not exist.
+      + ` TO ${row.grantee === 'PUBLIC' ? 'PUBLIC' : quoteIdent(row.grantee)}`
+      + (row.is_grantable ? ' WITH GRANT OPTION' : '')
+      + ';')
+
+    const output = statements.length > 0
+      ? `-- SupaForge Role Grants Snapshot\n-- ${rows.length} grant(s)\n\n${statements.join('\n')}\n`
+      : '-- No role grants found\n'
+    await writeFile(join(dir, file), output)
+    return { captured: true, file, itemCount: rows.length }
+  } catch (err) {
+    return { captured: false, file, itemCount: 0, error: errMsg(err) }
+  }
+}
+
 async function captureExtensions(
   dir: string,
   dbUrl: string,
@@ -545,6 +701,14 @@ export interface PruneResult {
   deleted: string[]
   /** Snapshot directories that were kept. */
   kept: string[]
+  /**
+   * Snapshots kept despite being outside the budget, because a migration
+   * names one as its `parent`.
+   *
+   * Deleting those broke the migration chain silently: the migration stayed,
+   * referring to a snapshot that was no longer there (issue #92).
+   */
+  retainedForMigrations?: string[]
 }
 
 /**
@@ -564,8 +728,16 @@ export async function pruneSnapshots(
   }
 
   // Snapshots come back sorted oldest-first from listSnapshots
-  const toDelete = snapshots.slice(0, snapshots.length - keep)
-  const toKeep = snapshots.slice(snapshots.length - keep)
+  const candidates = snapshots.slice(0, snapshots.length - keep)
+  const withinBudget = snapshots.slice(snapshots.length - keep)
+
+  // A snapshot a migration names as its `parent` is the other half of that
+  // migration's diff. Deleting it broke the chain silently — the migration
+  // stayed, referring to something that was no longer there (issue #92). Kept
+  // regardless of the budget, and reported so the count still makes sense.
+  const referenced = await snapshotVersionsReferencedByMigrations(cwd)
+  const toDelete = candidates.filter(s => !referenced.has(versionOf(s.dir)))
+  const retained = candidates.filter(s => referenced.has(versionOf(s.dir)))
 
   for (const snap of toDelete) {
     await rm(snap.dir, { recursive: true, force: true })
@@ -573,8 +745,37 @@ export async function pruneSnapshots(
 
   return {
     deleted: toDelete.map(s => s.dir),
-    kept: toKeep.map(s => s.dir),
+    kept: [...retained, ...withinBudget].map(s => s.dir),
+    retainedForMigrations: retained.map(s => s.dir),
   }
+}
+
+/** The timestamp a snapshot directory is named for. */
+function versionOf(dir: string): string {
+  return dir.split('/').filter(Boolean).pop() ?? dir
+}
+
+/**
+ * Snapshot versions that migration files name as their parent.
+ *
+ * Best-effort: an unreadable migrations directory means nothing is protected,
+ * which is the behaviour prune had before this existed.
+ */
+async function snapshotVersionsReferencedByMigrations(cwd: string): Promise<Set<string>> {
+  const referenced = new Set<string>()
+
+  try {
+    const dir = resolve(cwd, SUPAFORGE_DIR, MIGRATIONS_SUBDIR)
+    for (const name of await readdir(dir)) {
+      if (!name.endsWith('.json')) continue
+      try {
+        const migration = JSON.parse(await readFile(join(dir, name), 'utf-8')) as { parent?: string | null }
+        if (migration.parent) referenced.add(migration.parent)
+      } catch { /* a migration that will not parse protects nothing */ }
+    }
+  } catch { /* no migrations directory */ }
+
+  return referenced
 }
 
 

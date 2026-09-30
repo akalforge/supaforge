@@ -189,6 +189,61 @@ describe('isDestructiveSql', () => {
     expect(isDestructiveSql('ALTER TABLE "users" ALTER COLUMN "a" DROP DEFAULT;')).toBe(false)
     expect(isDestructiveSql('ALTER TABLE "users" ALTER COLUMN "a" DROP NOT NULL;')).toBe(false)
   })
+
+  // ── What used to go through --apply ungated (issue #88) ────────────────────
+
+  it('flags DELETE FROM, which is how the data check removes rows', () => {
+    expect(isDestructiveSql(`DELETE FROM "ref_codes" WHERE "id" = '4';`)).toBe(true)
+    expect(isDestructiveSql('delete from plans where id = 1;')).toBe(true)
+  })
+
+  it('flags TRUNCATE and DROP SCHEMA', () => {
+    expect(isDestructiveSql('TRUNCATE TABLE "events";')).toBe(true)
+    expect(isDestructiveSql('DROP SCHEMA "reporting" CASCADE;')).toBe(true)
+  })
+
+  it('flags a policy dropped and not put back', () => {
+    // Not recoverable from the schema, and for a RESTRICTIVE policy removing
+    // it *grants* access — so it belongs behind the same gate as losing rows.
+    expect(isDestructiveSql('DROP POLICY "target_only_guard" ON "public"."plans";')).toBe(true)
+    expect(isDestructiveSql('DROP POLICY IF EXISTS guard ON plans;')).toBe(true)
+  })
+
+  it('does not flag a policy being replaced', () => {
+    // The RLS check renders a *modified* policy as a drop and a create of the
+    // same name. Gating that would have broken policy sync entirely.
+    const replacement = [
+      'DROP POLICY IF EXISTS "users_select_own" ON "public"."users";',
+      'CREATE POLICY "users_select_own" ON "public"."users" FOR SELECT USING ((auth.uid() = id));',
+    ].join('\n')
+
+    expect(isDestructiveSql(replacement)).toBe(false)
+  })
+
+  it('still flags a drop of one policy alongside a replacement of another', () => {
+    const mixed = [
+      'DROP POLICY IF EXISTS "keep" ON "public"."t";',
+      'CREATE POLICY "keep" ON "public"."t" FOR SELECT USING (true);',
+      'DROP POLICY IF EXISTS "gone" ON "public"."t";',
+    ].join('\n')
+
+    expect(isDestructiveSql(mixed)).toBe(true)
+  })
+
+  it('ignores the words appearing inside a literal or a routine body', () => {
+    // Matching is no longer anchored to the start of the statement, so it runs
+    // over the skeleton to keep a body from tripping it.
+    expect(isDestructiveSql(`INSERT INTO audit (note) VALUES ('DROP TABLE users');`)).toBe(false)
+    expect(isDestructiveSql(
+      'CREATE FUNCTION f() RETURNS void AS $$ BEGIN DELETE FROM t; END; $$ LANGUAGE plpgsql;',
+    )).toBe(false)
+  })
+
+  it('flags a drop that is not the first statement', () => {
+    // A merged replacement pair puts the second statement mid-string, which an
+    // anchored match could not see.
+    expect(isDestructiveSql('ALTER TABLE "t" ADD COLUMN "c" text;\nDROP TABLE "old";')).toBe(true)
+  })
 })
 
 describe('parseDbDiffOutput', () => {
@@ -434,8 +489,35 @@ describe('summariseStatement', () => {
     // Named by the index, not the table it is on, and not the schema (issue #47).
     ['CREATE INDEX idx_bio ON users(bio);', 'schema', 'Index missing: public.idx_bio'],
     ['DROP INDEX idx_bio;', 'schema', 'Extra index: public.idx_bio'],
+    // Policies, keyed `table.policy` because a policy name is unique only per
+    // table — the same identity the rls check uses, so the two checks now name
+    // the same policy the same way (issue #97).
+    ['CREATE POLICY "own_rows" ON "public"."orders" FOR SELECT USING (true);', 'schema', 'Policy missing: public.orders.own_rows'],
+    ['DROP POLICY IF EXISTS "own_rows" ON "public"."orders";', 'schema', 'Extra policy: public.orders.own_rows'],
+    ['ALTER POLICY "own_rows" ON "public"."orders" USING (false);', 'schema', 'Policy altered: public.orders.own_rows'],
+    // The table is qualified inside the policy rule: the caller only qualifies
+    // a name with no dot in it, and `orders.own_rows` already has one.
+    ['CREATE POLICY own_rows ON orders FOR ALL USING (true);', 'schema', 'Policy missing: public.orders.own_rows'],
   ] as const)('summarises %j (%s) → %s', (sql, check, expected) => {
     expect(summariseStatement(sql, check)).toBe(expected)
+  })
+
+  it('never titles a policy statement "unknown"', () => {
+    // These fell through every rule to the catch-all, which looks for a TABLE /
+    // INTO / FROM / UPDATE keyword a policy statement does not have. They were
+    // the one finding in a report that named no object at all (issue #97).
+    for (const sql of [
+      'CREATE POLICY "p" ON "public"."orders" FOR SELECT USING (true);',
+      'DROP POLICY IF EXISTS "p" ON "public"."orders";',
+      'ALTER POLICY "p" ON "public"."orders" USING (true);',
+    ]) {
+      expect(summariseStatement(sql, 'schema'), sql).not.toContain('unknown')
+    }
+  })
+
+  it('names the policy even when the table cannot be read', () => {
+    // Better a bare policy name than "unknown".
+    expect(summariseStatement('CREATE POLICY "p";', 'schema')).toBe('Policy missing: public.p')
   })
 
   it.each([

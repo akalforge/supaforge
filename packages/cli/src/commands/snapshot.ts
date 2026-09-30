@@ -140,7 +140,13 @@ export default class Snapshot extends BaseCommand {
         return
       }
 
-      this.log(`  Deleted ${result.deleted.length} snapshot(s), ${result.kept.length} remaining.\n`)
+      this.log(`  Deleted ${result.deleted.length} snapshot(s), ${result.kept.length} remaining.`)
+      if (result.retainedForMigrations && result.retainedForMigrations.length > 0) {
+        // Kept past the budget on purpose: a migration names each of these as
+        // its parent, and deleting one breaks that migration's chain (#92).
+        this.log(`  ${result.retainedForMigrations.length} kept beyond --keep: a migration names each as its parent.`)
+      }
+      this.log('')
       return
     }
 

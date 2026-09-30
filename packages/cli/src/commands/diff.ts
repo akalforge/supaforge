@@ -3,7 +3,7 @@ import { BaseCommand } from '../base-command.js'
 import { createDefaultRegistry } from '../checks/index.js'
 import { scan } from '../scanner.js'
 import type { ScanProgressEvent } from '../scanner.js'
-import { renderSummary, renderDetailed } from '../render.js'
+import { renderSummary, renderDetailed, formatSkips } from '../render.js'
 import { promote, planWork, type PromoteResult } from '../promote.js'
 import type { CheckName } from '../types/drift.js'
 import { CHECK_NAMES, CHECK_META } from '../types/drift.js'
@@ -222,9 +222,10 @@ export default class Diff extends BaseCommand {
 
     if (result.skipped.length > 0) {
       this.log(`\n${dim(`Skipped ${result.skipped.length} issue(s):`)}`)
-      for (const item of result.skipped) {
-        this.log(`  ${dim('○')} ${dim(`[${item.check}]`)} ${item.issueId}: ${item.reason}`)
-      }
+      // Collapsed where several share a reason: a posture check on a project
+      // with 47 tables lacking RLS printed the same sentence 47 times, and
+      // pushed the result of the apply off the top of the screen (issue #84).
+      for (const line of formatSkips(result.skipped)) this.log(`  ${dim(line)}`)
     }
 
     // Printed before the errors: the first thing to know about a failed apply

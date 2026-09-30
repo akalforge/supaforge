@@ -11,9 +11,9 @@ export type RunDbDiffFn = (options: DbDiffOptions) => ReturnType<typeof runDbDif
 /**
  * Layer 7: Reference Data Drift — powered by @dbdiff/cli --type=data.
  *
- * Uses fast table fingerprinting (row count + relation size) to skip
- * unchanged tables, then invokes `@dbdiff/cli diff --type=data` only
- * for tables that actually differ between environments.
+ * Fingerprints each configured table on both sides — a digest of its contents,
+ * not its size — and invokes `@dbdiff/cli diff --type=data` only for the ones
+ * that differ. See src/checksum.ts for why the fingerprint reads the rows.
  *
  * Falls back gracefully when @dbdiff/cli is not installed.
  */

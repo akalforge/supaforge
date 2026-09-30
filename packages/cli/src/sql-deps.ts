@@ -1,3 +1,4 @@
+import { splitSqlStatements } from './utils/sql-split.js'
 import { escapeRegex } from './utils/strings.js'
 
 /**
@@ -66,6 +67,11 @@ export const PHASE = {
  * FUNCTION f()` is read as a trigger.
  */
 const PHASE_RULES: Array<[RegExp, number]> = [
+  // A column type change grouped with the dependants dbdiff drops and
+  // recreates around it (see groupColumnTypeChanges) runs as the column change
+  // it is — before a foreign key that needs the new type, for one — not as the
+  // view or policy it happens to recreate.
+  [/^\s*DROP\s+(?:POLICY|TRIGGER|(?:MATERIALIZED\s+)?VIEW)\b[\s\S]*\bALTER\s+TABLE\s+\S+\s+ALTER\s+COLUMN\s+\S+\s+(?:SET\s+DATA\s+)?TYPE\b/i, PHASE.ALTER_TABLE],
   [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b/i, PHASE.CREATE_DEPENDANT],
   [/\bCREATE\s+POLICY\b/i, PHASE.CREATE_DEPENDANT],
   [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\b/i, PHASE.CREATE_VIEW],
@@ -249,6 +255,34 @@ export function createdPolicies(sql: string): string[] {
  * be. Anything left once the CREATE POLICY statements are removed counts, which
  * errs towards keeping a statement rather than losing DDL.
  */
+/**
+ * The policies a statement drops, keyed as `createdPolicies` keys them.
+ *
+ * Needed to tell a policy being *removed* from one being *replaced*: the RLS
+ * check renders a modified policy as `DROP POLICY` + `CREATE POLICY` for the
+ * same name, and that is not a loss of access control (issue #88).
+ */
+export function droppedPolicies(sql: string): string[] {
+  const out: string[] = []
+  const re = /DROP\s+POLICY\s+(?:IF\s+EXISTS\s+)?("[^"]+"|[A-Za-z_][\w$]*)\s+ON\s+((?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))?)/gi
+  for (const m of sqlSkeleton(sql).matchAll(re)) {
+    out.push(`${bareName(m[2])}.${bareName(m[1])}`)
+  }
+  return out
+}
+
+/**
+ * Policies this statement drops without putting back.
+ *
+ * Dropping a policy is not recoverable from the schema the way dropping a view
+ * or a function is, and a dropped RESTRICTIVE policy *grants* access rather
+ * than removing it — so it belongs behind the same gate as losing rows.
+ */
+export function policiesRemoved(sql: string): string[] {
+  const recreated = new Set(createdPolicies(sql))
+  return droppedPolicies(sql).filter(key => !recreated.has(key))
+}
+
 export function createsOnlyPolicies(sql: string): boolean {
   if (createdPolicies(sql).length === 0) return false
   const withoutPolicies = sqlSkeleton(sql)
@@ -338,16 +372,32 @@ function identifierMatcher(name: string): RegExp {
  */
 function linkDependencies(nodes: Node[], texts: string[], provides: string[][]): void {
   const droppers = texts.map((sql, i) => isDropOnly(sql, provides[i]))
+  // What a statement *uses* is what it mentions outside its DROPs. A column
+  // type change grouped with the dependants it drops and recreates mentions
+  // the policy it drops, and was made to wait for the fix that creates that
+  // policy — which then ran first, against the column's old type.
+  const uses = texts.map(withoutDropStatements)
 
   for (let provider = 0; provider < nodes.length; provider++) {
     for (const name of provides[provider]) {
       const matcher = identifierMatcher(name)
       for (let consumer = 0; consumer < nodes.length; consumer++) {
         if (consumer === provider || droppers[consumer]) continue
-        if (matcher.test(texts[consumer])) nodes[consumer].after.add(provider)
+        // A statement that creates `name` itself does not need another's:
+        // two column changes under one view each recreate it, and linking
+        // them both ways made a cycle, which the fallback resolves by
+        // report order rather than by phase.
+        if (provides[consumer].includes(name)) continue
+        if (matcher.test(uses[consumer])) nodes[consumer].after.add(provider)
       }
     }
   }
+}
+
+/** A statement batch with its DROP statements taken out. */
+function withoutDropStatements(sql: string): string {
+  if (!/\bDROP\b/i.test(sql)) return sql
+  return splitSqlStatements(sql).filter(s => !/^\s*DROP\b/i.test(sqlSkeleton(s))).join('\n')
 }
 
 /**
@@ -405,4 +455,91 @@ export function orderStatements<T>(items: T[], sqlOf: (item: T) => string): T[] 
   }
 
   return ordered
+}
+
+// ─── Statement subject ───────────────────────────────────────────────────────
+
+/** A schema-qualified object name, unquoted. `schema` is null when unqualified. */
+export interface QualifiedName {
+  schema: string | null
+  name: string
+}
+
+function splitQualified(identifier: string): QualifiedName {
+  const parts = identifier.match(/"[^"]+"|[\w$]+/g) ?? []
+  const clean = parts.map(p => p.replace(/^"|"$/g, ''))
+  if (clean.length >= 2) return { schema: clean[clean.length - 2], name: clean[clean.length - 1] }
+  return { schema: null, name: clean[0] ?? '' }
+}
+
+/** A possibly three-part name (`schema.table.column`), as COMMENT ON COLUMN takes. */
+const IDENT3 = String.raw`(?:"[^"]+"|[\w$]+)(?:\s*\.\s*(?:"[^"]+"|[\w$]+)){0,2}`
+
+const OBJECT_KIND = String.raw`(?:TABLE|VIEW|MATERIALIZED\s+VIEW|FOREIGN\s+TABLE|FUNCTION|PROCEDURE|ROUTINE|AGGREGATE|SEQUENCE|TYPE|DOMAIN|INDEX|SCHEMA)`
+
+/**
+ * Subject patterns, most specific first, each with what its capture names:
+ * an object, a schema, or a `schema.table.column`. For a trigger, policy,
+ * rule or index the object is the table it belongs to rather than its own
+ * name, since that is what owns it.
+ */
+const SUBJECT_RULES: Array<[RegExp, 'object' | 'schema' | 'column']> = [
+  // CREATE/DROP/ALTER TRIGGER|POLICY name ... ON <table>
+  [new RegExp(String.raw`^\s*(?:CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?|DROP\s+|ALTER\s+)(?:TRIGGER|POLICY)\s+(?:IF\s+EXISTS\s+)?(?:"[^"]+"|[\w$]+)[\s\S]*?\bON\s+(?:ONLY\s+)?(${IDENT})`, 'i'), 'object'],
+  // CREATE RULE name AS ON <event> TO <table>
+  [new RegExp(String.raw`^\s*CREATE\s+(?:OR\s+REPLACE\s+)?RULE\s+(?:"[^"]+"|[\w$]+)\s+AS\s+ON\s+\w+\s+TO\s+(${IDENT})`, 'i'), 'object'],
+  // CREATE [UNIQUE] INDEX [CONCURRENTLY] [IF NOT EXISTS] [name] ON [ONLY] <table>
+  [new RegExp(String.raw`^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\b[\s\S]*?\bON\s+(?:ONLY\s+)?(${IDENT})`, 'i'), 'object'],
+  // COMMENT ON TRIGGER|POLICY|RULE|CONSTRAINT name ON <table>
+  [new RegExp(String.raw`^\s*COMMENT\s+ON\s+(?:TRIGGER|POLICY|RULE|CONSTRAINT)\s+(?:"[^"]+"|[\w$]+)\s+ON\s+(?:DOMAIN\s+)?(${IDENT})`, 'i'), 'object'],
+  [new RegExp(String.raw`^\s*COMMENT\s+ON\s+COLUMN\s+(${IDENT3})`, 'i'), 'column'],
+  [new RegExp(String.raw`^\s*COMMENT\s+ON\s+SCHEMA\s+((?:"[^"]+"|[\w$]+))`, 'i'), 'schema'],
+  [new RegExp(String.raw`^\s*COMMENT\s+ON\s+${OBJECT_KIND}\s+(${IDENT})`, 'i'), 'object'],
+  // GRANT/REVOKE ... ON SCHEMA <schema> | ON ALL <kind> IN SCHEMA <schema> | ON [kind] <name>
+  [new RegExp(String.raw`^\s*(?:GRANT|REVOKE)\b[\s\S]*?\bON\s+SCHEMA\s+((?:"[^"]+"|[\w$]+))`, 'i'), 'schema'],
+  [new RegExp(String.raw`^\s*(?:GRANT|REVOKE)\b[\s\S]*?\bON\s+ALL\s+\w+\s+IN\s+SCHEMA\s+((?:"[^"]+"|[\w$]+))`, 'i'), 'schema'],
+  [new RegExp(String.raw`^\s*(?:GRANT|REVOKE)\b[\s\S]*?\bON\s+(?:${OBJECT_KIND}\s+)?(${IDENT})`, 'i'), 'object'],
+  // ALTER DEFAULT PRIVILEGES ... IN SCHEMA <schema>
+  [new RegExp(String.raw`^\s*ALTER\s+DEFAULT\s+PRIVILEGES\b[\s\S]*?\bIN\s+SCHEMA\s+((?:"[^"]+"|[\w$]+))`, 'i'), 'schema'],
+  // CREATE|ALTER|DROP SCHEMA <schema>
+  [new RegExp(String.raw`^\s*(?:CREATE|ALTER|DROP)\s+SCHEMA\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?((?:"[^"]+"|[\w$]+))`, 'i'), 'schema'],
+  // CREATE [OR REPLACE] [modifiers] <kind> [IF NOT EXISTS] <name>
+  [new RegExp(String.raw`^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:TEMP|TEMPORARY|UNLOGGED|RECURSIVE)\s+)*${OBJECT_KIND}\s+(?:IF\s+NOT\s+EXISTS\s+)?(${IDENT})`, 'i'), 'object'],
+  // ALTER|DROP <kind> [IF EXISTS] [ONLY] <name>
+  [new RegExp(String.raw`^\s*(?:ALTER|DROP)\s+${OBJECT_KIND}\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?(${IDENT})`, 'i'), 'object'],
+]
+
+/**
+ * The object a statement acts on — its *subject*, not every name it mentions.
+ *
+ * `CREATE TRIGGER t ... ON public.orders EXECUTE FUNCTION
+ * supabase_functions.http_request(...)` acts on `public.orders`: it mentions a
+ * platform schema, but what it creates belongs to the project. Deciding
+ * ownership by mention skipped every Database Webhook on restore, and every
+ * view reading `cron` or `vault`. The subject is what decides who owns a
+ * statement's result.
+ *
+ * For `COMMENT ON COLUMN s.t.c` the subject is the table `s.t`; for a
+ * schema-level statement (`CREATE SCHEMA x`, `GRANT ... ON SCHEMA x`,
+ * `... IN SCHEMA x`) it is `{ schema: x, name: x }`. Undefined when the
+ * statement's shape is not one of these.
+ */
+export function statementSubject(sql: string): QualifiedName | undefined {
+  const skeleton = sqlSkeleton(sql)
+
+  for (const [rule, captures] of SUBJECT_RULES) {
+    const match = rule.exec(skeleton)
+    if (!match) continue
+
+    const parts = (match[1].match(/"[^"]+"|[\w$]+/g) ?? []).map(p => p.replace(/^"|"$/g, ''))
+    if (captures === 'schema') return { schema: parts[0], name: parts[0] }
+    if (captures === 'column') {
+      return parts.length >= 3
+        ? { schema: parts[parts.length - 3], name: parts[parts.length - 2] }
+        : { schema: null, name: parts[0] ?? '' }
+    }
+    return splitQualified(match[1])
+  }
+
+  return undefined
 }

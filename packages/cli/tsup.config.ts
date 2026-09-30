@@ -18,6 +18,7 @@ export default defineConfig({
     'src/commands/migrate/create.ts',
     'src/commands/migrate/list.ts',
     'src/commands/mcp.ts',
+    'src/commands/help.ts',
   ],
   format: ['esm'],
   dts: true,

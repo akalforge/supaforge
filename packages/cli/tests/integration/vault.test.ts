@@ -27,8 +27,16 @@ describe('integration: vault check', () => {
     expect(missing).toBeDefined()
     expect(missing!.severity).toBe('warning')
     expect(missing!.title).toContain('smtp_password')
-    expect(missing!.sql?.up).toContain('vault.create_secret')
-    expect(missing!.sql?.up).toContain('PLACEHOLDER_VALUE')
+
+    // No SQL: the value exists only in the source and Vault will not give it
+    // up. This used to emit `vault.create_secret('PLACEHOLDER_VALUE', …)` and
+    // `--apply` ran it, leaving the target with a live secret holding a bogus
+    // value — and, because the secret then existed, no further reminder to set
+    // the real one (issue #91).
+    expect(missing!.sql).toBeUndefined()
+    expect(missing!.manualOnly).toContain('vault.create_secret')
+    expect(missing!.manualOnly).toContain('<value>')
+    expect(JSON.stringify(missing)).not.toContain('PLACEHOLDER_VALUE')
   })
 
   it.skipIf(skipIfNoContainers())('should detect environment-specific secret differences', async () => {

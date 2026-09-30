@@ -3,10 +3,8 @@ import { join, resolve } from 'node:path'
 import type { MigrationFile, MigrationAction, SnapshotManifest } from './types/config'
 import { loadSnapshot, findLatestSnapshot, captureSnapshot, generateTimestamp, type SnapshotOptions, type SnapshotResult } from './snapshot'
 import { SUPAFORGE_DIR, MIGRATIONS_SUBDIR } from './constants'
+import { splitSqlStatements, isCommentOnly } from './utils/sql-split.js'
 import { slugify } from './utils/strings'
-
-/** Migration tracking table name */
-export const MIGRATIONS_TABLE = '_supaforge_migrations'
 
 export interface BackupOptions extends Omit<SnapshotOptions, 'cwd'> {
   cwd?: string
@@ -147,8 +145,27 @@ async function generateDiffMigration(
 
       if (added.length > 0 || removed.length > 0) {
         layers.push(layer === 'storage-policies' ? 'storage' : layer)
+
+        // Both directions get the inverse of the other's changes.
+        //
+        // `up` was the added statements alone and `down` the removed ones, so
+        // each direction only did half its job: applying a migration that
+        // *removed* a policy did not drop it, and reverting one that *added*
+        // a policy left it in place (issue #92). Undoing either is mechanical
+        // for these layers — a cron job is unscheduled, a policy, trigger or
+        // extension is dropped — and `inverseStatement` returns null rather
+        // than guessing for anything else.
         sqlUp.push(...added)
+        for (const statement of removed) {
+          const inverse = inverseStatement(statement)
+          if (inverse) sqlUp.push(inverse)
+        }
+
         sqlDown.push(...removed)
+        for (const statement of added) {
+          const inverse = inverseStatement(statement)
+          if (inverse) sqlDown.push(inverse)
+        }
       }
     } catch { /* skip */ }
   }
@@ -172,9 +189,14 @@ async function generateDiffMigration(
     const newSchema = await readFile(join(snapshot.dir, 'schema.json'), 'utf-8').catch(() => '')
     if (prevSchema !== newSchema) {
       layers.push('schema')
-      // Schema diffs are best computed by @dbdiff/cli at apply time
-      // Store a marker that schema changed
-      sqlUp.push('-- Schema changed. Use @dbdiff/cli to generate migration SQL.')
+      // No DDL here, and this says so rather than looking like a statement.
+      //
+      // Deriving a migration from two introspection documents means writing a
+      // schema differ, which is what @dbdiff/cli already is — and it wants two
+      // live databases, not two JSON files. What this *can* do is say which
+      // objects moved, so the reader knows where to look instead of being told
+      // only that something changed (issue #92).
+      sqlUp.push(...schemaChangeNotes(prevSchema, newSchema))
     }
   } catch { /* skip */ }
 
@@ -242,11 +264,116 @@ function layerToFile(layer: string): string {
 }
 
 /** Extract executable SQL statements from a snapshot file (skips comments). */
+/**
+ * The statements in a snapshot layer file.
+ *
+ * Split on `;\n` and then discarded any chunk beginning with `--`. Every layer
+ * file opens with a `-- SupaForge … Snapshot` header, and that header lands in
+ * the same chunk as the *first* statement — so the first statement of every
+ * layer was thrown away with it (issue #92). Adding or removing the
+ * alphabetically-first cron job, policy, webhook or extension was invisible,
+ * and the previous first statement then appeared as newly added.
+ *
+ * Uses the same scanner `restore` does: it respects dollar-quoted bodies and
+ * drops only chunks that are genuinely nothing but comments.
+ */
 function extractStatements(content: string): string[] {
   if (!content) return []
-  return content
-    .split(/;\s*\n/)
-    .map(s => s.trim())
-    .filter(s => s.length > 0 && !s.startsWith('--'))
-    .map(s => s.endsWith(';') ? s : `${s};`)
+
+  return splitSqlStatements(content)
+    .filter(statement => !isCommentOnly(statement))
+    .map(stripLeadingComments)
+    .filter(statement => statement.length > 0)
+    .map(statement => statement.endsWith(';') ? statement : `${statement};`)
+}
+
+/**
+ * A statement without the comment lines above it.
+ *
+ * The header a layer file opens with carries a count — `-- 2 policies` — and
+ * the splitter keeps a comment attached to the statement that follows it. So
+ * the first statement of every file would differ between two snapshots
+ * whenever the count changed, and be reported as both added and removed even
+ * though nothing about it moved. Comparing the SQL alone is what makes the
+ * diff mean anything.
+ */
+function stripLeadingComments(statement: string): string {
+  const lines = statement.split('\n')
+  let start = 0
+
+  while (start < lines.length) {
+    const line = lines[start].trim()
+    if (line === '' || line.startsWith('--')) {
+      start++
+      continue
+    }
+    break
+  }
+
+  return lines.slice(start).join('\n').trim()
+}
+
+/**
+ * The statement that undoes `statement`, where that is mechanical.
+ *
+ * Only for the shapes a snapshot layer emits: a scheduled cron job, a policy,
+ * a trigger, an extension. Anything else returns null rather than a guess —
+ * a wrong inverse in a `down` is worse than an absent one, because it looks
+ * like a revert and is not.
+ */
+export function inverseStatement(statement: string): string | null {
+  const sql = statement.trim()
+
+  const cron = /\bcron\.schedule\s*\(\s*('(?:[^']|'')*')/i.exec(sql)
+  if (cron) return `SELECT cron.unschedule(${cron[1]});`
+
+  const policy = /\bCREATE\s+POLICY\s+("[^"]+"|[\w$]+)\s+ON\s+((?:"[^"]+"|[\w$]+)(?:\s*\.\s*(?:"[^"]+"|[\w$]+))?)/i.exec(sql)
+  if (policy) return `DROP POLICY IF EXISTS ${policy[1]} ON ${policy[2]};`
+
+  const trigger = /\bCREATE\s+TRIGGER\s+("[^"]+"|[\w$]+)[\s\S]*?\bON\s+((?:"[^"]+"|[\w$]+)(?:\s*\.\s*(?:"[^"]+"|[\w$]+))?)/i.exec(sql)
+  if (trigger) return `DROP TRIGGER IF EXISTS ${trigger[1]} ON ${trigger[2]};`
+
+  const extension = /\bCREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?("[^"]+"|[\w$]+)/i.exec(sql)
+  if (extension) return `DROP EXTENSION IF EXISTS ${extension[1]};`
+
+  return null
+}
+
+/**
+ * What changed between two schema introspections, as comment lines.
+ *
+ * Not SQL, and shaped so it cannot be mistaken for any: the migration's schema
+ * layer carries no DDL, and the previous single line — "Schema changed. Use
+ * @dbdiff/cli to generate migration SQL." — told the reader nothing about
+ * *what* changed (issue #92).
+ */
+export function schemaChangeNotes(previousJson: string, currentJson: string): string[] {
+  const notes = [
+    '-- The schema changed. This migration carries no DDL for it: deriving one',
+    '-- from two introspection documents is what @dbdiff/cli does, and it needs',
+    '-- two live databases. Generate it with `supaforge migrate create`.',
+  ]
+
+  try {
+    const before = JSON.parse(previousJson) as Record<string, Array<{ schema?: string; name?: string }>>
+    const after = JSON.parse(currentJson) as Record<string, Array<{ schema?: string; name?: string }>>
+
+    for (const kind of ['tables', 'views', 'functions', 'triggers', 'sequences', 'enums']) {
+      const names = (list?: Array<{ schema?: string; name?: string }>) =>
+        new Set((list ?? []).map(o => `${o.schema ?? 'public'}.${o.name ?? '?'}`))
+
+      const from = names(before[kind])
+      const to = names(after[kind])
+
+      const added = [...to].filter(n => !from.has(n)).sort()
+      const removed = [...from].filter(n => !to.has(n)).sort()
+
+      if (added.length > 0) notes.push(`--   ${kind} added:   ${added.join(', ')}`)
+      if (removed.length > 0) notes.push(`--   ${kind} removed: ${removed.join(', ')}`)
+    }
+  } catch {
+    // An unreadable document just means no detail to add.
+  }
+
+  return notes
 }

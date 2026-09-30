@@ -1,7 +1,9 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { readFile, readdir } from 'node:fs/promises'
-import { resolve, join } from 'node:path'
+import { existsSync, readFileSync } from 'node:fs'
+import { resolve, join, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { resolveConfig, validateConfig } from '../config.js'
 import { createDefaultRegistry } from '../checks/index.js'
 import { scan } from '../scanner.js'
@@ -13,7 +15,35 @@ import type { ScanResult, CheckName } from '../types/drift.js'
 import { setLastScanResult, getLastScanResult } from './state.js'
 
 const SERVER_NAME = 'supaforge'
-const SERVER_VERSION = '0.0.4'
+
+/**
+ * The package's own version.
+ *
+ * Was a hardcoded '0.0.4' and had drifted fifteen releases behind (issue #82).
+ * An MCP client has no other way to know which SupaForge it is talking to, so
+ * an agent deciding whether a tool or argument exists was working from a
+ * version that had not been true for months. Read from package.json, with a
+ * fallback that says so rather than asserting a number.
+ */
+const SERVER_VERSION = resolveVersion()
+
+function resolveVersion(): string {
+  try {
+    const here = dirname(fileURLToPath(import.meta.url))
+    // dist/ at runtime, src/mcp/ from source: walk up until package.json.
+    for (const relative of ['../package.json', '../../package.json', '../../../package.json']) {
+      const candidate = resolve(here, relative)
+      if (!existsSync(candidate)) continue
+      const pkg = JSON.parse(readFileSync(candidate, 'utf-8'))
+      if (typeof pkg.version === 'string' && pkg.name?.includes('supaforge')) {
+        return pkg.version
+      }
+    }
+  } catch {
+    // Fall through.
+  }
+  return '0.0.0-unknown'
+}
 
 /** Masks sensitive fields (dbUrl, accessToken) in config output. */
 function maskConfig(config: unknown): unknown {
@@ -36,7 +66,43 @@ function maskConfig(config: unknown): unknown {
  *
  * @param cwd - Working directory to resolve config files from (defaults to process.cwd())
  */
-export function createServer(cwd = process.cwd()): McpServer {
+export interface ServerOptions {
+  /**
+   * Honour a `configPath` argument from the client.
+   *
+   * Off by default. Every tool accepted an arbitrary path and resolved its
+   * working directory from it, so a tool call — or a prompt injected into one —
+   * could point the server at any `supaforge.config.json` on disk, including
+   * one holding production credentials, bypassing the config the server was
+   * started with (issue #96). Enabled with `supaforge mcp --allow-config-path`
+   * for the case where an agent legitimately manages several projects.
+   */
+  allowConfigPath?: boolean
+}
+
+export function createServer(cwd = process.cwd(), options: ServerOptions = {}): McpServer {
+  const allowConfigPath = options.allowConfigPath ?? false
+
+  /**
+   * The directory to load the config from.
+   *
+   * Refuses a `configPath` unless the server was started with
+   * --allow-config-path, rather than ignoring it silently: a client that asked
+   * for a different project should be told it did not get one.
+   */
+  const resolveCwd = (configPath?: string): string => {
+    if (!configPath) return cwd
+    if (!allowConfigPath) {
+      throw new Error(
+        'configPath is not accepted by this server. It was started without '
+        + '--allow-config-path, so it reads only the config in its own working '
+        + `directory (${cwd}). Restart it with --allow-config-path to permit `
+        + 'other projects.',
+      )
+    }
+    return resolve(configPath, '..')
+  }
+
   const server = new McpServer({ name: SERVER_NAME, version: SERVER_VERSION })
 
   // ── Tools ──────────────────────────────────────────────────────────────────
@@ -47,6 +113,11 @@ export function createServer(cwd = process.cwd()): McpServer {
   server.registerTool(
     'scan_drift',
     {
+      // Reads both databases and writes nothing. Without annotations a client
+      // could not tell this from apply_fixes, so it could not ask for
+      // confirmation on the one that writes (issue #96).
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+
       description:
         'Scan for drift between Supabase environments and return a structured report. ' +
         'Results include per-check status, issues with SQL fixes, and a health score.',
@@ -54,7 +125,11 @@ export function createServer(cwd = process.cwd()): McpServer {
         configPath: z
           .string()
           .optional()
-          .describe('Absolute path to supaforge.config.json. Defaults to config in cwd.'),
+          .describe(
+            'Absolute path to supaforge.config.json. Rejected unless the server was '
+            + 'started with --allow-config-path; otherwise the config in the server\'s '
+            + 'own working directory is used.',
+          ),
         source: z
           .string()
           .optional()
@@ -79,7 +154,7 @@ export function createServer(cwd = process.cwd()): McpServer {
     },
     async ({ configPath, source, target, checks, skip }) => {
       try {
-        const effectiveCwd = configPath ? resolve(configPath, '..') : cwd
+        const effectiveCwd = resolveCwd(configPath)
         const raw = JSON.parse(await readFile(resolve(effectiveCwd, 'supaforge.config.json'), 'utf-8'))
         const config = resolveConfig({
           ...raw,
@@ -114,14 +189,22 @@ export function createServer(cwd = process.cwd()): McpServer {
   server.registerTool(
     'apply_fixes',
     {
+      // Writes to the target database, and destructively when
+      // allowDestructive is set. This is the one a client should confirm.
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+
       description:
         'Apply SQL fixes to resolve drift detected by scan_drift. ' +
-        'Set dryRun=true to preview SQL without executing it.',
+        'Previews by default — pass dryRun=false to actually write to the target database.',
       inputSchema: {
         configPath: z
           .string()
           .optional()
-          .describe('Absolute path to supaforge.config.json. Defaults to config in cwd.'),
+          .describe(
+            'Absolute path to supaforge.config.json. Rejected unless the server was '
+            + 'started with --allow-config-path; otherwise the config in the server\'s '
+            + 'own working directory is used.',
+          ),
         source: z.string().optional().describe('Source environment name.'),
         target: z.string().optional().describe('Target environment name.'),
         checks: z
@@ -131,13 +214,17 @@ export function createServer(cwd = process.cwd()): McpServer {
         dryRun: z
           .boolean()
           .optional()
-          .default(false)
-          .describe('Preview SQL without executing it (default: false).'),
+          .default(true)
+          .describe(
+            'Preview SQL without executing it. Defaults to true: writing is opt-in '
+            + 'here as it is everywhere else in supaforge, where it needs --apply. '
+            + 'Pass dryRun=false to actually apply the fixes.',
+          ),
       },
     },
     async ({ configPath, source, target, checks, dryRun }) => {
       try {
-        const effectiveCwd = configPath ? resolve(configPath, '..') : cwd
+        const effectiveCwd = resolveCwd(configPath)
         const raw = JSON.parse(await readFile(resolve(effectiveCwd, 'supaforge.config.json'), 'utf-8'))
         const config = resolveConfig({
           ...raw,
@@ -179,6 +266,10 @@ export function createServer(cwd = process.cwd()): McpServer {
   server.registerTool(
     'take_snapshot',
     {
+      // Reads the database and writes local files only — nothing in any
+      // database changes.
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+
       description:
         'Capture a point-in-time snapshot of a Supabase environment. ' +
         'Snapshots are stored under .supaforge/snapshots/ and can be used to restore state.',
@@ -186,7 +277,11 @@ export function createServer(cwd = process.cwd()): McpServer {
         configPath: z
           .string()
           .optional()
-          .describe('Absolute path to supaforge.config.json. Defaults to config in cwd.'),
+          .describe(
+            'Absolute path to supaforge.config.json. Rejected unless the server was '
+            + 'started with --allow-config-path; otherwise the config in the server\'s '
+            + 'own working directory is used.',
+          ),
         environment: z
           .string()
           .optional()
@@ -195,7 +290,7 @@ export function createServer(cwd = process.cwd()): McpServer {
     },
     async ({ configPath, environment }) => {
       try {
-        const effectiveCwd = configPath ? resolve(configPath, '..') : cwd
+        const effectiveCwd = resolveCwd(configPath)
         const raw = JSON.parse(await readFile(resolve(effectiveCwd, 'supaforge.config.json'), 'utf-8'))
         const config = resolveConfig(raw)
 
@@ -230,6 +325,9 @@ export function createServer(cwd = process.cwd()): McpServer {
   server.registerTool(
     'create_migration',
     {
+      // Local files only, as with take_snapshot.
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+
       description:
         'Capture a snapshot and generate a migration file containing the diff against the previous snapshot. ' +
         'Migration files are stored under .supaforge/migrations/.',
@@ -237,7 +335,11 @@ export function createServer(cwd = process.cwd()): McpServer {
         configPath: z
           .string()
           .optional()
-          .describe('Absolute path to supaforge.config.json. Defaults to config in cwd.'),
+          .describe(
+            'Absolute path to supaforge.config.json. Rejected unless the server was '
+            + 'started with --allow-config-path; otherwise the config in the server\'s '
+            + 'own working directory is used.',
+          ),
         environment: z
           .string()
           .optional()
@@ -250,7 +352,7 @@ export function createServer(cwd = process.cwd()): McpServer {
     },
     async ({ configPath, environment, description }) => {
       try {
-        const effectiveCwd = configPath ? resolve(configPath, '..') : cwd
+        const effectiveCwd = resolveCwd(configPath)
         const raw = JSON.parse(await readFile(resolve(effectiveCwd, 'supaforge.config.json'), 'utf-8'))
         const config = resolveConfig(raw)
 
@@ -301,6 +403,9 @@ export function createServer(cwd = process.cwd()): McpServer {
   server.registerTool(
     'get_check_result',
     {
+      // Reads the last scan held in memory.
+      annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+
       description:
         'Retrieve the result for a specific check from the most recent scan_drift call. ' +
         'Returns issues, status, and duration for the named check.',

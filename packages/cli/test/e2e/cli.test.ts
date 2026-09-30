@@ -848,3 +848,67 @@ describe('CLI e2e: clone --list discovery', () => {
     expect(found.discovered).toBe(true)
   })
 })
+
+/**
+ * `supaforge help [COMMAND]` and the `migrate` topic (issue #97).
+ *
+ * oclif's `helpClass` styles what `--help` prints; the `help` *command* comes
+ * from `@oclif/plugin-help`, which this CLI does not install. So the form
+ * people reach for first answered "command help:migrate:create not found",
+ * which reads as "no such command". And with no `topics` entry, oclif
+ * synthesised the `migrate` topic's description from its first subcommand, so
+ * the group was headed by a description of one quarter of it.
+ */
+describe('CLI e2e: help', () => {
+  it('answers `help` with the root help', async () => {
+    const { stdout } = await run(['help'])
+
+    expect(stdout).toContain('Diff and sync your Supabase environments')
+    expect(stdout).toContain('COMMANDS')
+  })
+
+  it('answers `help <command>`', async () => {
+    const { stdout } = await run(['help', 'diff'])
+
+    expect(stdout).toContain('Detect drift')
+    expect(stdout).toContain('--apply')
+  })
+
+  it('answers `help <topic> <command>`, not "not found"', async () => {
+    // Two arguments, which is why the command is non-strict and passes the
+    // whole argv through: oclif addresses `migrate create` as one command.
+    const { stdout } = await run(['help', 'migrate', 'create'])
+
+    expect(stdout).toContain('--name')
+    expect(stdout).not.toContain('not found')
+  })
+
+  it('renders `help <command>` the same as `<command> --help`', async () => {
+    // The point of delegating to the same helpClass rather than adding a
+    // dependency that renders its own.
+    const viaHelp = await run(['help', 'restore'])
+    const viaFlag = await run(['restore', '--help'])
+
+    expect(viaHelp.stdout).toBe(viaFlag.stdout)
+  })
+
+  it('describes the migrate topic as the group, not as baseline', async () => {
+    const { stdout } = await run(['migrate', '--help'])
+
+    expect(stdout).toContain('Create, list and run versioned SQL migrations')
+    expect(stdout).not.toContain('Mark all local migrations as applied without executing them\n\nUSAGE')
+    // Still lists all four.
+    for (const sub of ['baseline', 'create', 'list', 'run']) {
+      expect(stdout, sub).toContain(`migrate ${sub}`)
+    }
+  })
+
+  it('lists the commands in workflow order, with help last', async () => {
+    const { stdout } = await run(['--help'])
+    const listed = ['init', 'diff', 'sync', 'snapshot', 'clone', 'restore', 'migrate', 'report', 'mcp', 'help']
+    const positions = listed.map(name => stdout.indexOf(`\n  ${name.padEnd(8)} `))
+
+    expect(positions.every(p => p > -1), stdout).toBe(true)
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions)
+  })
+})

@@ -156,3 +156,40 @@ describe('RealtimeCheck', () => {
     expect(issues).toHaveLength(0)
   })
 })
+
+/**
+ * Which publications are compared (issue #90).
+ *
+ * `supabase_realtime` was excluded, and a second query written for it was
+ * never called. That is the publication Supabase Realtime uses: enabling
+ * Realtime on a table means adding it to that publication, so excluding it hid
+ * the only Realtime drift most projects will ever have.
+ */
+describe('RealtimeCheck: the publication query', () => {
+  async function capturedSql(): Promise<string> {
+    const seen: string[] = []
+    const queryFn = (async (_url: string, sql: string) => {
+      seen.push(sql)
+      return []
+    }) as unknown as QueryFn
+
+    await new RealtimeCheck(queryFn).scan(mockContext())
+    return seen.find(s => s.includes('pg_publication')) ?? ''
+  }
+
+  it('does not exclude supabase_realtime', async () => {
+    const sql = await capturedSql()
+
+    expect(sql).not.toMatch(/NOT\s+IN\s*\(\s*'supabase_realtime'/i)
+    expect(sql).not.toMatch(/pubname\s*(<>|!=)\s*'supabase_realtime'/i)
+  })
+
+  it('reads the tables in each publication, not just the names', async () => {
+    // Table membership is the drift: the publication itself exists on both
+    // sides of every Supabase pair.
+    const sql = await capturedSql()
+
+    expect(sql).toContain('pg_publication_tables')
+    expect(sql).toContain('tablename')
+  })
+})

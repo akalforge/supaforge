@@ -41,7 +41,7 @@ off prints what it *would* capture and writes no snapshot.
 | Check | Source | Detection | Fix |
 |-------|--------|-----------|-----|
 | Schema | `@dbdiff/cli` | ✅ Tables, columns, indexes, constraints, views, triggers, functions, standalone sequences, enum and composite types, domains, materialized views | SQL (up/down) |
-| Data | `@dbdiff/cli --type=data` | ✅ Row-level diff for all public tables (configurable). Checksum-based fast skip for unchanged tables. | SQL (up/down) |
+| Data | `@dbdiff/cli --type=data` | ✅ Row-level diff for all public tables (configurable). A content digest per table (`md5` of every row, order-independent) decides which tables to skip — a row count alone read an edited row as unchanged | SQL (up/down) |
 | RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
 | Edge Functions | Management API (hosted), Studio's `/api/v1/projects/{ref}/functions` (self-hosted), or the functions directory | ✅ Hosted and **self-hosted**, comparing module contents | DELETE extras via API (hosted); otherwise guidance to `supabase functions deploy` |
 | Storage | Storage API + `pg_policies` | ✅ Buckets (`public`, `type`, `file_size_limit`, `allowed_mime_types`, `avif_autodetection`; `owner_id` reported only), analytics and vector buckets, policies. Skipped when either side has no `storage` schema. `--include-files` adds file-level drift detection (checksums for JSON, size/date for binary) — **detection only, files are never transferred**. | Buckets via API (POST/PUT/DELETE); Policies via SQL |
@@ -49,9 +49,9 @@ off prints what it *would* capture and writes no snapshot.
 | Cron Jobs | `cron.job` table | ✅ | SQL (up/down) |
 | Webhooks | `pg_trigger` + `pg_net` | ✅ Every trigger calling `supabase_functions.http_request`, compared on its full definition — so the URL, method, headers, params and timeout count, not just the table and events | SQL (up/down) |
 | Realtime | `pg_publication` + `pg_publication_tables`, and `pg_policies` on `realtime` | ✅ Publications, plus **Realtime Authorization** policies on `realtime.messages` (who may join which channel) | SQL (CREATE/ALTER PUBLICATION; CREATE/DROP POLICY) |
-| Vault Secrets | `vault.secrets` | ✅ | SQL (`vault.create_secret` / `vault.update_secret`) |
+| Vault Secrets | `vault.secrets` | ✅ | A *modified* secret's name or description: SQL (`vault.update_secret`). A **missing** secret: none — reported with the `vault.create_secret` call to run by hand |
 | Postgres Extensions | `pg_extension` | ✅ | SQL (CREATE/DROP EXTENSION) |
-| Postgres Roles & Grants | `pg_roles` + `information_schema` grants | ✅ Custom role attributes and table grants. Supabase's own service roles (`anon`, `authenticated`, `service_role`, `supabase_*`, `pg_*`) are excluded | SQL (CREATE/ALTER ROLE, GRANT/REVOKE) |
+| Postgres Roles & Grants | `pg_roles` + `information_schema` grants | ✅ Custom role attributes and table grants. Supabase's platform roles (`postgres`, `supabase_admin`, `authenticator`, `supabase_*_admin`, `dashboard_user`, `pgbouncer`, `supavisor`, `pg_*`) are excluded throughout. The Data API roles (`anon`, `authenticated`, `service_role`) are excluded from *attribute* comparison — their attributes are the platform's — but their **grants are compared**, because revoking `anon`'s access to a table is exactly the drift worth catching | SQL (CREATE/ALTER ROLE, GRANT/REVOKE) |
 | RLS Coverage | `pg_class.relrowsecurity` | ✅ Tables with RLS disabled — **reads the target only** | SQL, held back unless `--apply-posture` |
 | Migration History | `supabase_migrations.schema_migrations` | ✅ Local migration files with no tracking row — **reads the target only** | SQL (records the file as applied without running it), held back unless `--apply-posture` |
 
@@ -311,7 +311,7 @@ supaforge diff --json                   Output as JSON
 supaforge sync                          Alias for diff --apply
 supaforge hukam                         Alias for diff 🙏
 
-supaforge snapshot                      Preview what a 9-layer snapshot would capture
+supaforge snapshot                      Preview what a 12-layer snapshot would capture
 supaforge snapshot --apply              Capture it
 supaforge snapshot --env=prod --apply   Snapshot a specific environment
 supaforge snapshot --migration --apply  Capture + generate incremental migration diff
@@ -333,8 +333,11 @@ supaforge clone --delete=<name>         Preview clone deletion
 supaforge clone --delete=<name> --apply Drop database and remove tracking
 
 supaforge restore --env=local --from-snapshot=latest          Preview snapshot restore
-supaforge restore --env=local --from-snapshot=latest --apply  Apply snapshot to target
+supaforge restore --env=local --from-snapshot=latest --apply  Rebuild the target from a snapshot
 supaforge restore --env=local --from-migrations --apply       Replay migration history
+supaforge restore --env=local --from-snapshot=latest --force  Allow a non-empty target
+supaforge restore --env=local --from-snapshot=latest --no-transaction  Keep whatever succeeds
+supaforge restore --env=local --from-migrations --from=<ver> --to=<ver>  Replay a version range
 
 supaforge migrate create --name=add_orders  Generate a migration from schema drift
 supaforge migrate list                  List local migrations, applied and pending
@@ -342,6 +345,7 @@ supaforge migrate list --offline        List without querying the target
 supaforge migrate run --dry-run         Preview which migrations would run
 supaforge migrate run                   Execute pending migrations
 supaforge migrate run --up-to=003       Stop after a given migration
+supaforge migrate run --allow-destructive  Permit migrations that drop, delete or truncate
 supaforge migrate baseline              Mark local migrations applied without running them
 
 supaforge report                        Recent command history from the local run log
@@ -349,6 +353,10 @@ supaforge report --last=20              Show more entries
 supaforge report --send                 Choose entries to send as anonymous bug reports
 
 supaforge mcp                           Start the MCP stdio server for AI agents
+supaforge mcp --allow-config-path       Let a client choose which config to load (off by default)
+
+supaforge help                          The command list
+supaforge help <command>                Help for one command, e.g. `help migrate create`
 ```
 
 Two notes on the shape of that list. `migrate run` and `migrate baseline` are
@@ -374,9 +382,23 @@ supaforge diff --apply
 supaforge clone --env=prod --apply
 ```
 
-**Destructive fixes need a second opt-in.** Drift that would destroy rows —
-dropping a table, or dropping a column — is always *reported*, but `--apply`
-skips it unless you also pass `--allow-destructive`:
+**Destructive fixes need a second opt-in.** Drift that would destroy data, or
+widen access, is always *reported*, but `--apply` skips it unless you also pass
+`--allow-destructive`. Six shapes are gated, and each says which it is rather
+than all printing "drops data":
+
+| Statement | Reported as |
+| --- | --- |
+| `DROP SCHEMA` | drops a schema and everything in it |
+| `DROP TABLE` | drops a table and its rows |
+| `TRUNCATE` | deletes every row in a table |
+| `DROP COLUMN` | drops a column and its values |
+| `DELETE FROM` | deletes rows |
+| `DROP POLICY` | removes the policy …, which may widen access |
+
+A dropped policy is the one that is not about data at all: nothing is lost from
+a table, and calling it "drops data" hid the part that matters — removing a
+RESTRICTIVE policy opens access up.
 
 ```
 $ supaforge diff --apply
@@ -384,13 +406,21 @@ $ supaforge diff --apply
 Applied 1 fix(es):
   ✓ [schema] schema-alter-1
 
-Skipped 1 issue(s):
-  ○ [schema] schema-drop-1: Destructive (drops data) — re-run with --allow-destructive to apply
+Skipped 2 issue(s):
+  ○ [schema] 2 issues: Destructive — drops a table and its rows; re-run with --allow-destructive to apply
+      drop-1, drop-2
 ```
 
 ```bash
-# Also drop the extra table/column
+# Also apply those
 supaforge diff --apply --allow-destructive
+```
+
+The same gate applies to `migrate run`, which used to execute a `DROP TABLE` in
+a migration file without asking:
+
+```bash
+supaforge migrate run --allow-destructive
 ```
 
 Dropping a view, trigger, function, index or type is not gated — those lose a
@@ -402,14 +432,6 @@ before their foreign keys, and dependants are dropped before what they depend
 on. `@dbdiff/cli` emits statements in the order it walks the catalogue, and
 applying that order directly failed on sets that were perfectly valid. Preview
 the order without running anything:
-
-> **Known limitation.** Sending drops to the end is the wrong call when a drop
-> and a create are two halves of replacing *the same object*. An enum whose
-> values changed arrives as `DROP TYPE` + `CREATE TYPE`, and the create is
-> currently ordered first, so `--apply` fails with `type … already exists` and
-> rolls back ([#81](https://github.com/akalforge/supaforge/issues/81)). Routine
-> replacement is handled correctly, and `supaforge migrate create` writes the
-> same fix set in a working order, which is the way through for now.
 
 ```bash
 supaforge diff --dry-run
@@ -426,6 +448,17 @@ Would apply 3 fix(es), in this order:
 
   Nothing was executed. Drop --dry-run to apply.
 ```
+
+**Replacing an object is one fix, not two.** Sending drops to the end would be
+the wrong call when a drop and a create are two halves of replacing *the same
+object*. An enum whose values changed arrives from `@dbdiff/cli` as `DROP TYPE`
++ `CREATE TYPE`, and ordering the create first failed with
+`type … already exists`, rolling the whole transaction back
+([#81](https://github.com/akalforge/supaforge/issues/81)). Such a pair is
+recognised and merged into a single fix that drops and recreates in that order,
+so it is never split across the ordering — functions, procedures, types, domains
+and sequences alike. It reports as `Type modified: public.order_status` rather
+than as an unrelated drop and create.
 
 `--dry-run` needs no `--apply`: previewing should not require typing the flag
 that writes. The flags that shape *what* would be applied — `--only`,
@@ -469,7 +502,7 @@ batch rolls back.
 ### Snapshot & Clone
 
 ```bash
-# Capture a full snapshot of your remote Supabase (9 layers)
+# Capture a full snapshot of your remote Supabase (12 layers)
 supaforge snapshot --env=prod --apply
 
 # With incremental migration diff (compares against previous snapshot)
@@ -489,21 +522,135 @@ supaforge restore --env=local --from-snapshot=latest --apply
 supaforge restore --env=local --from-migrations --apply
 ```
 
-**Snapshots capture 9 layers**: schema, RLS policies, cron jobs, webhooks, extensions, storage (buckets + policies), auth config, edge functions, and reference data.
+**Snapshots capture 12 layers**: schema, RLS policies, cron jobs, webhooks,
+extensions, storage (buckets + policies), auth config, edge functions,
+reference data, Realtime publications, Vault secret names, and role grants.
 
-**What `restore --from-snapshot` puts back.** The SQL layers — RLS policies,
-cron jobs, webhooks, extensions, storage policies. The schema layer is captured
-as `schema.json`, an introspection document meant for diffing rather than
-replayable DDL, so restore does **not** recreate tables
-([#80](https://github.com/akalforge/supaforge/issues/80)). Restore into a
-database that already has the structure; use `supaforge clone` to create one
-that does, or `restore --from-migrations` to replay migrations that build it.
+The schema layer is written twice, for two different jobs: `schema.json` is an
+introspection document for diffing, and `schema.sql` — a `pg_dump
+--schema-only` per schema — is what a restore replays.
 
-**Snapshot pruning**: Use `--prune` to delete old snapshots, keeping the most recent 7 (configurable with `--keep`). Preview mode by default — add `--apply` to execute.
+#### What `restore --from-snapshot` puts back
 
-**Migrations are incremental**: `--migration` diffs against the previous snapshot and generates a migration file with UP/DOWN SQL. Migration files are stored in `.supaforge/migrations/`.
+These are replayed as SQL, in dependency order:
+
+| Replayed | From | Notes |
+| --- | --- | --- |
+| Extensions | `extensions.sql` | The schema each one wants is created first — `WITH SCHEMA "extensions"` has nothing to land in on plain PostgreSQL |
+| Schema | `schema.sql` | Tables, columns, indexes, constraints, views, functions, triggers, types |
+| RLS policies | `rls.sql` | |
+| Cron jobs | `cron.sql` | |
+| Webhooks | `webhooks.sql` | Triggers the schema dump already created are skipped rather than attempted twice |
+| Storage policies | `storage-policies.sql` | |
+| Realtime publications | `realtime.sql` | Membership is added conditionally, so restoring twice is not an error |
+| Role grants | `roles.sql` | A grantee the target has never heard of is created as `NOLOGIN` first |
+| Reference data | `data/*.sql` | The tables listed in `checks.data.tables` |
+
+Four things cannot be put back, and are **named in the output** with what to do
+instead — a restore that lists what it did and says nothing about the rest reads
+as complete when it is not:
+
+| Not replayed | What to do |
+| --- | --- |
+| Auth config | Pass `--project-ref` and `--api-key` to restore it via the Management API |
+| Edge Functions | `supabase functions deploy` from your functions directory |
+| Storage **buckets** | The bucket rows are created over the Storage API. The policies *on* them are restored; objects are never transferred |
+| Vault secrets | `vault.sql` lists the names only. A secret's value cannot be read out of Vault, so each is recreated by hand with `vault.create_secret` — deliberately not runnable SQL, so a restore cannot invent a value |
+
+Preview it first, as with everything else — the preview lists each layer and
+the statements it would run:
+
+```
+Restore preview (dry-run) -- from snapshot
+
+  Layer: extensions (1 statements)
+    CREATE EXTENSION IF NOT EXISTS "pgcrypto" WITH SCHEMA "extensions";
+
+  Layer: schema (18 statements)
+    SET statement_timeout = 0;
+    ... and 15 more
+
+  Layer: realtime (2 statements)
+    ALTER PUBLICATION "supabase_realtime" ADD TABLE "public"."orders";
+
+  Layer: roles (1 statements)
+    GRANT SELECT ON "public"."orders" TO "anon";
+
+  → Add --apply to execute the restore.
+```
+
+**A restore is one transaction.** A failure rolls the whole thing back and
+leaves the target exactly as it was, rather than half-rebuilt with the errors
+reported at the end. `--no-transaction` keeps whatever succeeded.
+
+**It expects an empty database** and refuses otherwise, because replaying a
+schema over existing tables fails on the first one. `--force` replaces instead:
+it clears the objects in the snapshot's own schemas, never a Supabase schema,
+and keeps the schemas so their grants and default privileges survive. Triggers
+and policies elsewhere that depend on what it clears (the `auth.users` trigger
+calling `public.handle_new_user()` is the usual one) are recreated afterwards;
+if anything else outside would be lost, it refuses and changes nothing.
+
+Objects the platform owns — `pgbouncer.get_auth`, pg_cron's own policies on
+`cron.job` — are skipped with a reason, since no ordinary role can recreate
+them. Into plain PostgreSQL, statements that only attach to something and need
+a Supabase schema the target lacks — a foreign key to `auth.users`, a Database
+Webhook, a grant on `storage.objects`, a policy calling `auth.uid()` — are
+skipped and listed, as is an extension the server does not ship. A table that
+cannot be created still fails the restore.
+
+Grants come back exactly as captured. The schema is dumped without privileges,
+so a recreated table or view first gets whatever the target's default
+privileges give (on Supabase, everything to `anon`); those are cleared before
+the captured grants are replayed, so a view that had been revoked from `anon`
+stays revoked.
+
+**Snapshot pruning**: Use `--prune` to delete old snapshots, keeping the most
+recent 7 (configurable with `--keep`). Preview mode by default — add `--apply`
+to execute. A snapshot an incremental migration was generated against is
+retained regardless of age: deleting it would leave that migration unable to
+say what it was a diff *from*.
+
+**Migrations are incremental**: `--migration` diffs against the previous
+snapshot and writes a migration file to `.supaforge/migrations/`, with both
+directions filled in. `up` is what changed; `down` is the inverse of each
+statement — `cron.unschedule` for a scheduled job, `DROP POLICY` for a created
+policy, `DROP TRIGGER` for a webhook, `DROP EXTENSION` for an extension. A
+statement with no safe inverse is left out of `down` rather than guessed at: a
+wrong inverse looks like a revert and is not.
+
+The schema layer contributes comments rather than DDL, naming what moved:
+
+```sql
+-- The schema changed. This migration carries no DDL for it: deriving one
+-- from two introspection documents is what @dbdiff/cli does, and it needs
+-- two live databases. Generate it with `supaforge migrate create`.
+--   tables added:   public.order_items
+--   tables removed: public.legacy_orders
+--   views added:   public.order_summary
+```
+
+It used to be the single line "Schema changed. Use @dbdiff/cli to generate
+migration SQL." — true, and useless, because it named nothing that had changed.
 
 **Clone preflight checks**: Before cloning, `supaforge clone` validates that the remote database is reachable, pg_dump is compatible, and the local PostgreSQL server is running. If port 54322 is unreachable, it hints to run `supabase start`.
+
+**What clone writes to your config.** It adds a `local` environment for the
+clone and points `source` at the environment it cloned *from* and `target` at
+`local` — so the obvious next step, comparing the clone against its origin,
+works without editing anything, and a bare `diff --apply` writes into the clone
+rather than into the environment you just copied. It prints both moves, naming
+what each was before:
+
+```
+      ✓ Config updated: /path/to/supaforge.config.json
+      source: dev → prod
+      target: prod → local (the clone)
+      A bare supaforge diff --apply now writes into the clone, not into "prod".
+```
+
+Overwriting those silently was the other half of the problem: whatever the
+project pointed at before was gone with no record of it in the output.
 
 ## Configuration
 
@@ -896,7 +1043,7 @@ Working with a single Supabase environment — no source/target pair needed:
 # 1. Set up config with one environment
 supaforge init            # Choose "single" mode
 
-# 2. Capture a full 9-layer snapshot
+# 2. Capture a full 12-layer snapshot
 supaforge snapshot --env=prod --apply
 
 # 3. Track changes over time with incremental migrations
@@ -1066,12 +1213,21 @@ supaforge diff                # schema + data checks active out of the box
 
 The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.
 
-**What the schema layer reaches.** `3.0.0-rc.13`, the pinned version, models
+**What the schema layer reaches.** `3.0.0-rc.14`, the pinned version, models
 composite types, domains, materialized views (and their indexes), standalone
 sequences and RLS policies — five kinds that earlier releases did not read at
 all, and therefore reported as no drift whether they matched or not. A schema
 that SupaForge has synced can now be diffed again and come back clean, which is
 what makes `--prove` meaningful.
+
+**Objects an extension owns are no longer compared.** An extension brings its
+own functions, tables and types — `CREATE EXTENSION pg_trgm` alone installs 31
+functions and a type into `public` — and those belong to the extension's
+version, not to anything you wrote. Read as ordinary user objects, an extension
+present on one side only produced a `CREATE OR REPLACE FUNCTION` for every
+member, C-language ones included, which no managed-database role can run.
+rc.14 excludes them via `pg_depend.deptype = 'e'`, the catalogue's own record of
+that ownership, so what is left in the report is yours.
 
 One consequence is visible in output: a missing policy is found by both the
 schema layer and the RLS layer, so the plan would carry two `CREATE POLICY`
@@ -1097,6 +1253,19 @@ schema in a single query per side and skips the ones that match, then loads the
 remainder in a fixed 7 queries per side. On a Supabase project where most tables
 are unchanged, this is the difference between thousands of round-trips and a
 couple of dozen. Nothing to configure — it is on for Postgres automatically.
+
+rc.14 removed two more sources of latency, which matters most over a remote
+link: every catalogue query cost three round trips under PDO's default named
+prepares, and the internal `pg_dump` dumped the whole database — a query per
+function, in every schema — when only `public` was being read. Measured over a
+100 ms link against 20 tables plus 300 functions in a non-public schema:
+
+| scenario | before | after |
+| --- | --- | --- |
+| two identical databases | 9.55 s, 90 round trips | 3.85 s, 34 |
+| one added table | 48.86 s, 477 round trips | 11.32 s, 107 |
+
+The generated migration is byte-identical either way, comment headers aside.
 
 If a diff still struggles on a very large schema, raise the ceilings rather than
 narrowing the scan:

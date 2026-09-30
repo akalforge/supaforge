@@ -89,6 +89,19 @@ export interface DriftIssue {
   sql?: { up: string; down: string }
   /** API-based sync action (for non-SQL fixes like storage buckets, auth config, edge functions). */
   action?: SyncAction
+  /**
+   * Why this difference has no automatic fix, and what to do instead.
+   *
+   * For findings that are real but cannot be applied: a Vault secret whose
+   * value exists only in the source, an Edge Function that needs deploying.
+   * Set it rather than inventing SQL — the vault check used to emit
+   * `vault.create_secret('PLACEHOLDER_VALUE', …)`, and `--apply` ran it, which
+   * left the target holding a live secret with a bogus value (issue #91).
+   *
+   * Reported as the skip reason at apply time, so the user is told the command
+   * instead of being told there is nothing to be done.
+   */
+  manualOnly?: string
 }
 
 export interface CheckResult {

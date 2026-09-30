@@ -170,7 +170,10 @@ describe('integration: full scan', () => {
     // smtp_password secret is in source but not target
     const missingSecret = vault.issues.find(i => i.id === 'vault-missing-smtp_password')
     expect(missingSecret).toBeDefined()
-    expect(missingSecret!.sql?.up).toContain('vault.create_secret')
+    // Reported, with the command to run — but no SQL to apply, since the value
+    // cannot be read out of Vault (issue #91).
+    expect(missingSecret!.sql).toBeUndefined()
+    expect(missingSecret!.manualOnly).toContain('vault.create_secret')
   })
 
   it.skipIf(skipIfNoContainers())('should produce a score below 100', () => {

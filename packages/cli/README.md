@@ -1213,7 +1213,7 @@ supaforge diff                # schema + data checks active out of the box
 
 The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.
 
-**What the schema layer reaches.** `3.0.0-rc.14`, the pinned version, models
+**What the schema layer reaches.** `3.0.0-rc.15`, the pinned version, models
 composite types, domains, materialized views (and their indexes), standalone
 sequences and RLS policies — five kinds that earlier releases did not read at
 all, and therefore reported as no drift whether they matched or not. A schema
@@ -1226,8 +1226,18 @@ functions and a type into `public` — and those belong to the extension's
 version, not to anything you wrote. Read as ordinary user objects, an extension
 present on one side only produced a `CREATE OR REPLACE FUNCTION` for every
 member, C-language ones included, which no managed-database role can run.
-rc.14 excludes them via `pg_depend.deptype = 'e'`, the catalogue's own record of
+Since rc.14 they are excluded via `pg_depend.deptype = 'e'`, the catalogue's own record of
 that ownership, so what is left in the report is yours.
+
+**Migrations that run (rc.15).** A column type change under a view, policy or
+trigger condition now comes as one bracket — drop what reads the column, retype
+it, put everything back with its options, grants and comments — and SupaForge
+keeps that bracket as one finding so it applies as a unit. An added enum label
+is `ALTER TYPE ... ADD VALUE` instead of replacing the type, and SupaForge
+commits it ahead of the rest of an apply so the same apply can use it.
+`UNLOGGED` and storage parameters are compared, and a materialized view's
+population state no longer reads as drift between a project and a restored
+copy.
 
 One consequence is visible in output: a missing policy is found by both the
 schema layer and the RLS layer, so the plan would carry two `CREATE POLICY`

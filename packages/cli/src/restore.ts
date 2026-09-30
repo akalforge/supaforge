@@ -14,7 +14,7 @@ import { errMsg } from './utils/error'
 import { DEFAULT_IGNORE_SCHEMAS } from './defaults'
 import { dropUnsupportedSetStatements, knownParameters } from './prove'
 import { splitSqlStatements, isCommentOnly, isPsqlMetaCommand, stripPsqlMetaCommands } from './utils/sql-split'
-import { quoteIdent } from './utils/sql.js'
+import { quoteIdent, quoteLiteral } from './utils/sql.js'
 import { sqlSkeleton } from './sql-deps.js'
 
 export type FetchFn = (url: string, init?: RequestInit) => Promise<Response>
@@ -110,7 +110,7 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
   const manifest = await loadSnapshot(options.snapshotDir)
 
   // Apply SQL layers in dependency order
-  const sqlOrder = ['extensions', 'schema', 'rls', 'cron', 'webhooks', 'storage-policies']
+  const sqlOrder = RESTORE_SQL_ORDER
   const client = new pg.Client(pgClientConfig(options.targetUrl))
   await client.connect()
 
@@ -217,7 +217,15 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
               await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(needed)}`)
             }
 
-            await client.query(sql)
+            // `GRANT … TO anon` needs the role to exist, and on plain
+            // PostgreSQL — the usual restore target — none of Supabase's Data
+            // API roles do. Same shape as the extension schema above: without
+            // it the first grant fails with `role "anon" does not exist` and
+            // takes the whole transactional restore with it.
+            const grantee = grantTargetRole(sql)
+            if (grantee) await client.query(createRoleIfMissing(grantee))
+
+            await client.query(conditionalPublicationMembership(sql))
             result.applied.push({ type: 'sql', label: summarizeStatement(sql) })
           } catch (err) {
             result.errors.push({
@@ -290,24 +298,56 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
     await client.end()
   }
 
-  // Note API layers that need manual action
-  if (manifest.layers.auth?.captured) {
-    result.skipped.push({
-      type: 'api',
-      label: 'Auth config',
-      reason: 'Requires --project-ref and --api-key to restore via Management API',
-    })
-  }
-  if (manifest.layers['edge-functions']?.captured) {
-    result.skipped.push({
-      type: 'api',
-      label: 'Edge Functions',
-      reason: 'Deploy via "supabase functions deploy" from your local functions directory',
-    })
+  // Layers that were captured and cannot be replayed as SQL. Named
+  // individually rather than left out: a restore that lists what it did and
+  // says nothing about four of the twelve layers reads as complete when it is
+  // not, which is the thing a restore most needs to be honest about.
+  for (const note of MANUAL_LAYERS) {
+    if (manifest.layers[note.layer]?.captured) {
+      result.skipped.push({ type: note.type, label: note.label, reason: note.reason })
+    }
   }
 
   return result
 }
+
+/** Captured layers a restore cannot replay, and what to do about each. */
+const MANUAL_LAYERS: ReadonlyArray<{
+  layer: string
+  type: 'api' | 'sql'
+  label: string
+  reason: string
+}> = [
+  {
+    layer: 'auth',
+    type: 'api',
+    label: 'Auth config',
+    reason: 'Requires --project-ref and --api-key to restore via Management API',
+  },
+  {
+    layer: 'edge-functions',
+    type: 'api',
+    label: 'Edge Functions',
+    reason: 'Deploy via "supabase functions deploy" from your local functions directory',
+  },
+  {
+    // storage-policies.sql *is* replayed; the bucket rows are not. They are
+    // created over the Storage API, which needs credentials a restore into a
+    // plain PostgreSQL database does not have.
+    layer: 'storage',
+    type: 'api',
+    label: 'Storage buckets',
+    reason: 'Bucket rows are created via the Storage API — the policies on them were restored. '
+      + 'Objects are never transferred',
+  },
+  {
+    layer: 'vault',
+    type: 'sql',
+    label: 'Vault secrets',
+    reason: 'vault.sql lists the secret names only — a value cannot be read out of Vault, '
+      + 'so each must be recreated by hand with vault.create_secret',
+  },
+]
 
 // ─── Restore from Migrations ─────────────────────────────────────────────────
 
@@ -429,7 +469,7 @@ export async function previewSnapshotRestore(snapshotDir: string): Promise<{ lay
   const manifest = await loadSnapshot(snapshotDir)
   const preview: { layer: string; statements: string[] }[] = []
 
-  const sqlOrder = ['extensions', 'schema', 'rls', 'cron', 'webhooks', 'storage-policies']
+  const sqlOrder = RESTORE_SQL_ORDER
   for (const layer of sqlOrder) {
     const file = layerRestoreFile(layer)
     const info = manifest.layers[layer === 'storage-policies' ? 'storage' : layer]
@@ -486,6 +526,24 @@ async function replayableSchemaSql(sql: string, targetUrl: string): Promise<stri
     return sql
   }
 }
+
+/**
+ * The snapshot layers a restore replays, in dependency order.
+ *
+ * `realtime` and `roles` were captured as replayable SQL and then never
+ * replayed: the two layers were added to `snapshot` without being added here,
+ * so a restore silently dropped every publication membership and every table
+ * grant the snapshot held. Both come after `schema`, because a publication can
+ * only add a table that exists and a grant can only name one.
+ *
+ * `vault` is deliberately absent — its file is a comment-only list of secret
+ * names, because a secret's value cannot be read out of Vault and inventing one
+ * is worse than leaving it absent (issue #91). It is reported as needing manual
+ * action instead, alongside the API layers.
+ */
+const RESTORE_SQL_ORDER = [
+  'extensions', 'schema', 'rls', 'cron', 'webhooks', 'storage-policies', 'realtime', 'roles',
+]
 
 function layerRestoreFile(layer: string): string {
   switch (layer) {
@@ -679,6 +737,75 @@ export function extensionTargetSchema(sql: string): string | undefined {
 
   const schema = match[1].replace(/"/g, '')
   return isSystemSchema(schema) ? undefined : schema
+}
+
+/**
+ * The role a `GRANT … TO x` needs creating first, if any.
+ *
+ * A snapshot's `roles.sql` grants to Supabase's Data API roles — `anon`,
+ * `authenticated`, `service_role` — and the usual restore target is plain
+ * PostgreSQL, where none of them exist. Read off the skeleton, so a role named
+ * inside a function body or a string literal is not mistaken for a grantee.
+ *
+ * `PUBLIC` is not a role: it is the keyword for everyone, always present, and
+ * `CREATE ROLE public` is an error.
+ */
+export function grantTargetRole(sql: string): string | undefined {
+  const match = /^\s*GRANT\b[\s\S]*?\bTO\s+("[^"]+"|[\w$]+)/i.exec(sqlSkeleton(sql))
+  if (!match) return undefined
+
+  const role = match[1].replace(/"/g, '')
+  if (role.toLowerCase() === 'public') return undefined
+  // A `pg_` role is built in, so it either exists or cannot be created.
+  return role.startsWith('pg_') ? undefined : role
+}
+
+/**
+ * `CREATE ROLE` guarded on the role not already existing.
+ *
+ * PostgreSQL has no `CREATE ROLE IF NOT EXISTS`, so this is the DO-block form.
+ * `NOLOGIN`, deliberately: these are grant targets, and a restore quietly
+ * creating a role that can log in would be a worse outcome than a failed grant.
+ */
+export function createRoleIfMissing(role: string): string {
+  return `DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${quoteLiteral(role)}) THEN
+    CREATE ROLE ${quoteIdent(role)} NOLOGIN;
+  END IF;
+END $$;`
+}
+
+/**
+ * `ALTER PUBLICATION … ADD TABLE` guarded on the table not already being in it.
+ *
+ * Adding a table twice is an error — `relation "orders" is already member of
+ * publication` — so restoring the realtime layer into a database that already
+ * has the publication populated aborted the whole transaction. Every other
+ * statement a restore replays is either idempotent or made so (the same reason
+ * `CREATE SCHEMA` is rewritten), and this is the one that was not.
+ *
+ * Anything that is not such a statement is returned unchanged.
+ */
+export function conditionalPublicationMembership(sql: string): string {
+  const match = /^\s*ALTER\s+PUBLICATION\s+("[^"]+"|[\w$]+)\s+ADD\s+TABLE\s+(?:ONLY\s+)?([^;]+?)\s*;?\s*$/i
+    .exec(sql)
+  if (!match) return sql
+
+  const [, publication, table] = match
+  const parts = table.split('.').map(p => p.replace(/"/g, '').trim())
+  if (parts.length !== 2) return sql
+
+  const [schema, name] = parts
+  return `DO $$ BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_publication_tables
+    WHERE pubname = ${quoteLiteral(publication.replace(/"/g, ''))}
+      AND schemaname = ${quoteLiteral(schema)}
+      AND tablename = ${quoteLiteral(name)}
+  ) THEN
+    EXECUTE ${quoteLiteral(`ALTER PUBLICATION ${quoteIdent(publication.replace(/"/g, ''))} ADD TABLE ${quoteIdent(schema)}.${quoteIdent(name)}`)};
+  END IF;
+END $$;`
 }
 
 /** Thrown to unwind out of the layer loop once a transaction has aborted. */

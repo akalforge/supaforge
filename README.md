@@ -235,9 +235,19 @@ it was rather than half-rebuilt. `--no-transaction` keeps whatever succeeds.
 
 It restores into an **empty** database by default and refuses otherwise, since
 replaying a schema over existing tables fails on the first one. `--force`
-overrides that. Restoring into plain PostgreSQL is the ordinary case: the
-schemas Supabase extensions expect are created first, and a grant's role is
-created (as `NOLOGIN`) if the target has never heard of it.
+replaces instead: it clears the objects in the snapshot's own schemas — never a
+Supabase schema such as `auth`, `storage` or `graphql` — and keeps the schemas
+themselves, so their grants and default privileges survive. A trigger or policy
+elsewhere that depends on what it clears, such as the `auth.users` trigger that
+calls `public.handle_new_user()`, is put back afterwards; anything else that
+would be lost makes it refuse before changing anything.
+
+Restoring into plain PostgreSQL is the ordinary case: the schemas Supabase
+extensions expect are created first, and a grant's role is created (as
+`NOLOGIN`) if the target has never heard of it. What cannot exist there — a
+foreign key to `auth.users`, a Database Webhook, a policy calling `auth.uid()`,
+an extension the server does not ship — is skipped and listed by name. A table
+that cannot be created still fails the restore.
 
 `restore --from-migrations` replays your migration files instead, tracking them
 in `supabase_migrations.schema_migrations` — the table the Supabase CLI uses,

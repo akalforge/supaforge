@@ -584,10 +584,20 @@ leaves the target exactly as it was, rather than half-rebuilt with the errors
 reported at the end. `--no-transaction` keeps whatever succeeded.
 
 **It expects an empty database** and refuses otherwise, because replaying a
-schema over existing tables fails on the first one. `--force` overrides that.
+schema over existing tables fails on the first one. `--force` replaces instead:
+it clears the objects in the snapshot's own schemas, never a Supabase schema,
+and keeps the schemas so their grants and default privileges survive. Triggers
+and policies elsewhere that depend on what it clears (the `auth.users` trigger
+calling `public.handle_new_user()` is the usual one) are recreated afterwards;
+if anything else outside would be lost, it refuses and changes nothing.
+
 Objects the platform owns — `pgbouncer.get_auth`, pg_cron's own policies on
 `cron.job` — are skipped with a reason, since no ordinary role can recreate
-them.
+them. Into plain PostgreSQL, statements that only attach to something and need
+a Supabase schema the target lacks — a foreign key to `auth.users`, a Database
+Webhook, a grant on `storage.objects`, a policy calling `auth.uid()` — are
+skipped and listed, as is an extension the server does not ship. A table that
+cannot be created still fails the restore.
 
 **Snapshot pruning**: Use `--prune` to delete old snapshots, keeping the most
 recent 7 (configurable with `--keep`). Preview mode by default — add `--apply`

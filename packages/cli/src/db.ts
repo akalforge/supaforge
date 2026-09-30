@@ -85,6 +85,28 @@ export const pgQuery: QueryFn = async (dbUrl, sql, params) => {
   return rows
 }
 
+/**
+ * Run `fn` on one pooled connection inside a transaction that is always
+ * rolled back — for reading what the server makes of something by creating it
+ * as a temporary object, without leaving anything behind.
+ */
+export async function inRolledBackTransaction<T>(
+  dbUrl: string,
+  fn: (client: pg.PoolClient) => Promise<T>,
+): Promise<T> {
+  const client = await poolFor(dbUrl).connect()
+  try {
+    await client.query('BEGIN')
+    try {
+      return await fn(client)
+    } finally {
+      await client.query('ROLLBACK').catch(() => undefined)
+    }
+  } finally {
+    client.release()
+  }
+}
+
 /** Close every pool this process opened. Safe to call more than once. */
 export async function closePgPools(): Promise<void> {
   const open = [...pools.values()]

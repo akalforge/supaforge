@@ -1,3 +1,4 @@
+import { policyOnlyKeys } from './sql-deps.js'
 import type { HookBus } from './hooks'
 import type { CheckRegistry } from './checks/registry'
 import type { SupaForgeConfig } from './types/config'
@@ -192,6 +193,8 @@ export async function scan(
     Array.from({ length: Math.min(checkConcurrency(), total) }, () => worker()),
   )
 
+  foldDuplicatePolicyFindings(results)
+
   const summary = summarize(results)
   const score = computeScore(results)
   const postureScore = computePostureScore(results)
@@ -209,4 +212,43 @@ export async function scan(
   await bus?.emit('supaforge.scan.after', scanResult)
 
   return scanResult
+}
+
+/**
+ * Leave out the schema check's policy findings that the RLS check reports too.
+ *
+ * @dbdiff/cli diffs RLS policies as part of the schema, and the RLS check
+ * diffs the same policies itself, so a policy missing from the target was
+ * reported twice — counted twice in the issue total and the score, once as a
+ * critical "Missing RLS policy" and once as a "Policy missing" (issue #97).
+ * `--apply` already applied only one of them. The RLS check's finding is the
+ * one kept: it is the one that names the policy's risk, and it is there
+ * whenever that check runs. A schema finding that does anything besides the
+ * policies — the table the policy sits on, say — is kept whole.
+ */
+export function foldDuplicatePolicyFindings(results: CheckResult[]): void {
+  const rls = results.find(r => r?.check === 'rls' && (r.status === 'drifted' || r.status === 'clean'))
+  const schema = results.find(r => r?.check === 'schema' && r.status === 'drifted')
+  if (!rls || !schema) return
+
+  const covered = new Set<string>()
+  for (const issue of rls.issues) {
+    // @dbdiff/cli diffs `public` only, so only a public policy can be the
+    // same one; keys carry no schema, and `storage.objects` may have a policy
+    // named like one on a public table.
+    const policy = (issue.sourceValue ?? issue.targetValue) as { schemaname?: string } | undefined
+    if (policy?.schemaname !== undefined && policy.schemaname !== 'public') continue
+    for (const key of policyOnlyKeys(issue.sql?.up) ?? []) covered.add(key)
+  }
+
+  const before = schema.issues.length
+  schema.issues = schema.issues.filter(issue => {
+    const keys = policyOnlyKeys(issue.sql?.up)
+    return !(keys && keys.length > 0 && keys.every(k => covered.has(k)))
+  })
+  const folded = before - schema.issues.length
+  if (folded === 0) return
+
+  schema.folded = { count: folded, into: 'rls' }
+  if (schema.issues.length === 0) schema.status = 'clean'
 }

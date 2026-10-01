@@ -73,3 +73,20 @@ jobs:
           SUPAFORGE_TEST_SOURCE_URL: postgresql://postgres:source-test-pass@localhost:15432/postgres
           SUPAFORGE_TEST_TARGET_URL: postgresql://postgres:target-test-pass@localhost:15433/postgres
         run: npx vitest run --config vitest.integration.config.ts
+
+      # The CLI end-to-end tests that need real databases. The unit job has
+      # none, so these skip there; reseeded first, since the integration
+      # tests above apply fixes to the target.
+      - name: Reseed databases
+        run: |
+          PGPASSWORD=source-test-pass psql -h localhost -p 15432 -U postgres -d postgres \
+            -v ON_ERROR_STOP=1 -f packages/cli/tests/fixtures/seed-source.sql
+          PGPASSWORD=target-test-pass psql -h localhost -p 15433 -U postgres -d postgres \
+            -v ON_ERROR_STOP=1 -f packages/cli/tests/fixtures/seed-target.sql
+
+      - name: Run CLI end-to-end tests against the databases
+        working-directory: packages/cli
+        env:
+          SUPAFORGE_TEST_SOURCE_URL: postgresql://postgres:source-test-pass@localhost:15432/postgres
+          SUPAFORGE_TEST_TARGET_URL: postgresql://postgres:target-test-pass@localhost:15433/postgres
+        run: npx vitest run test/e2e

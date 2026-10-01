@@ -543,3 +543,15 @@ export function statementSubject(sql: string): QualifiedName | undefined {
 
   return undefined
 }
+
+/**
+ * The policies (`table.policy`) a fix consists of, when it is nothing but
+ * CREATE and DROP POLICY statements; otherwise null.
+ */
+export function policyOnlyKeys(sql: string | undefined): string[] | null {
+  if (!sql) return null
+  const statements = splitSqlStatements(sql).filter(s => sqlSkeleton(s).trim() !== '')
+  if (statements.length === 0) return null
+  if (!statements.every(s => /^\s*(?:CREATE|DROP)\s+POLICY\b/i.test(sqlSkeleton(s)))) return null
+  return [...new Set([...createdPolicies(sql), ...droppedPolicies(sql)])]
+}

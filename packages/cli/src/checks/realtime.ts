@@ -1,3 +1,4 @@
+import { dropEquivalentPolicyChanges, defaultCanonicalizer } from '../utils/policy-equivalence.js'
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
@@ -36,12 +37,17 @@ export class RealtimeCheck extends Check {
       this.fetchPolicies(ctx.source.dbUrl),
       this.fetchPolicies(ctx.target.dbUrl),
     ])
-    const policyIssues = diffSchemaPolicies(srcPolicies, tgtPolicies, {
-      schema: 'realtime',
-      check: 'realtime',
-      idPrefix: 'realtime-policy',
-      label: 'realtime authorization',
-    })
+    const policyIssues = await dropEquivalentPolicyChanges(
+      diffSchemaPolicies(srcPolicies, tgtPolicies, {
+        schema: 'realtime',
+        check: 'realtime',
+        idPrefix: 'realtime-policy',
+        label: 'realtime authorization',
+      }),
+      ctx,
+      defaultCanonicalizer(this.queryFn),
+      'realtime',
+    )
 
     return [...publicationIssues, ...policyIssues]
   }

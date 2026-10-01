@@ -1,3 +1,4 @@
+import { dropEquivalentPolicyChanges, defaultCanonicalizer } from '../utils/policy-equivalence.js'
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue, SyncAction } from '../types/drift'
@@ -132,9 +133,14 @@ export class StorageCheck extends Check {
       this.fetchStoragePolicies(ctx.source.dbUrl),
       this.fetchStoragePolicies(ctx.target.dbUrl),
     ])
-    return diffSchemaPolicies(source, target, {
-      schema: 'storage', check: 'storage', idPrefix: 'storage-policy', label: 'storage',
-    })
+    return dropEquivalentPolicyChanges(
+      diffSchemaPolicies(source, target, {
+        schema: 'storage', check: 'storage', idPrefix: 'storage-policy', label: 'storage',
+      }),
+      ctx,
+      defaultCanonicalizer(this.queryFn),
+      'storage',
+    )
   }
 
   private async hasStorageSchema(dbUrl: string): Promise<boolean> {

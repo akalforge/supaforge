@@ -221,7 +221,12 @@ function formatCheckLine(lr: CheckResult): string {
   const sevLabel = severity ? colorSeverity(severity) : ''
   const errText = lr.error || (lr.status === 'error' ? 'check failed' : '')
   const errLabel = errText ? `  ${warn(`(error: ${errText})`)}` : ''
-  return `${prefix.padEnd(CHECK_LINE_PADDING)}${count} ${noun}${sevLabel}${errLabel}`
+  // The live progress line counted these before they were folded; saying so
+  // keeps the two numbers from looking inconsistent (issue #97).
+  const folded = lr.folded
+    ? `  ${dim(`(+${lr.folded.count} reported under ${CHECK_META[lr.folded.into].label})`)}`
+    : ''
+  return `${prefix.padEnd(CHECK_LINE_PADDING)}${count} ${noun}${sevLabel}${folded}${errLabel}`
 }
 
 /** Glyph for an issue's severity. */

@@ -42,7 +42,7 @@ off prints what it *would* capture and writes no snapshot.
 |-------|--------|-----------|-----|
 | Schema | `@dbdiff/cli` | ✅ Tables, columns, indexes, constraints, views, triggers, functions, standalone sequences, enum and composite types, domains, materialized views | SQL (up/down) |
 | Data | `@dbdiff/cli --type=data` | ✅ Row-level diff for all public tables (configurable). A content digest per table (`md5` of every row, order-independent) decides which tables to skip — a row count alone read an edited row as unchanged | SQL (up/down) |
-| RLS Policies | `pg_policies` view | ✅ | SQL (up/down) |
+| RLS Policies | `pg_policies` view | ✅ Compared by what PostgreSQL makes of each expression, not its text — a policy restored from a dump renders differently and is still the same policy. Also applies to storage and Realtime Authorization policies | SQL (up/down) |
 | Edge Functions | Management API (hosted), Studio's `/api/v1/projects/{ref}/functions` (self-hosted), or the functions directory | ✅ Hosted and **self-hosted**, comparing module contents | DELETE extras via API (hosted); otherwise guidance to `supabase functions deploy` |
 | Storage | Storage API + `pg_policies` | ✅ Buckets (`public`, `type`, `file_size_limit`, `allowed_mime_types`, `avif_autodetection`; `owner_id` reported only), analytics and vector buckets, policies. Skipped when either side has no `storage` schema. `--include-files` adds file-level drift detection (checksums for JSON, size/date for binary) — **detection only, files are never transferred**. | Buckets via API (POST/PUT/DELETE); Policies via SQL |
 | Auth Config | Management API, or GoTrue `/auth/v1/settings` when `apiUrl` is set | ✅ Self-hosted covers provider flags and signup settings, not `JWT_EXP` / `MFA_ENABLED` | PATCH via API (hosted only) |
@@ -1237,13 +1237,25 @@ is `ALTER TYPE ... ADD VALUE` instead of replacing the type, and SupaForge
 commits it ahead of the rest of an apply so the same apply can use it.
 `UNLOGGED` and storage parameters are compared, and a materialized view's
 population state no longer reads as drift between a project and a restored
-copy.
+copy. Since rc.16, a partitioned or inherited column is retyped once, through
+its parent; a stored generated column reading a retyped column is recomputed
+rather than blocking the change; and an expression PostgreSQL renders
+differently after a round trip — `status IN ('draft', 'active')` on a
+`varchar` column, in a CHECK, partial index, view or trigger condition — is no
+longer reported as a change.
 
-One consequence is visible in output: a missing policy is found by both the
-schema layer and the RLS layer, so the plan would carry two `CREATE POLICY`
-statements for it and the second would fail the whole transaction. The RLS one is
-dropped, keeping the schema fix because it carries the definition dbdiff
-extracted:
+One consequence: a policy that differs is found by both the schema layer and the
+RLS layer. It is reported once, by the RLS layer — the finding that names the
+policy's risk — and the schema layer's line says how many it left there:
+
+```
+  ● Layer 1 (Schema):                   0 issues  (+2 reported under RLS Policies)
+```
+
+Only a schema finding that is nothing but policy statements is folded; one that
+also creates the table the policy sits on is kept whole. Should both still reach
+an apply — with `--check=schema,rls`, say — the second `CREATE POLICY` is
+dropped rather than failing the transaction:
 
 ```
 ○ [rls] rls-missing-public.invoices.read_own: Already created by the schema fix for the same policy

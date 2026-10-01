@@ -1,3 +1,4 @@
+import { dropEquivalentPolicyChanges, defaultCanonicalizer } from '../utils/policy-equivalence.js'
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
@@ -39,7 +40,10 @@ export class RlsCheck extends Check {
     // RLS status issues come first so ENABLE runs before CREATE POLICY when applying
     return [
       ...diffRlsStatus(sourceStatus, targetStatus),
-      ...diffPolicies(sourcePolicies, targetPolicies),
+      // The same policy restored from a dump renders differently; that is not
+      // a change (see policy-equivalence).
+      ...await dropEquivalentPolicyChanges(
+        diffPolicies(sourcePolicies, targetPolicies), ctx, defaultCanonicalizer(this.queryFn)),
     ]
   }
 

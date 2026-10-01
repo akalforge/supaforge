@@ -1258,7 +1258,12 @@ applies whole, and its DOWN is the same change's rather than whatever sat at
 the same position. A column dropped and re-added in one change is not held
 back as destructive: it is recomputed, not lost. And when a table or column
 *is* held back, so is the drop of a type, domain, function or sequence it
-still uses — otherwise that drop failed and took the whole apply with it. With a dbdiff that predates
+still uses, and in turn what that keeps — otherwise that drop failed and took
+the whole apply with it. Functions the source no longer has are dropped after
+the defaults, constraints, indexes and tables that call them. An enum change
+dbdiff cannot carry out on its own (a function takes the type, a domain is
+built on it) is reported as a manual step naming what is in the way, rather
+than run and refused. With a dbdiff that predates
 the markers, SupaForge reads the SQL statement by statement as before.
 
 One consequence: a policy that differs is found by both the schema layer and the

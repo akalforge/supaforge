@@ -35,8 +35,6 @@ import { escapeRegex } from './utils/strings.js'
 export const PHASE = {
   /** Triggers, policies, views, indexes — dropped before what they depend on. */
   DROP_DEPENDANT: 10,
-  /** Routines, dropped once no trigger still executes them. */
-  DROP_ROUTINE: 20,
   /** Types, domains, sequences: no dependencies of their own. */
   CREATE_BASE: 30,
   CREATE_TABLE: 40,
@@ -53,6 +51,15 @@ export const PHASE = {
   /** Row changes, once the structure holding them is in place. */
   DATA: 100,
   DROP_TABLE: 110,
+  /**
+   * Routines, dropped once nothing calls them: the triggers, views and
+   * policies come off first, and so do the column defaults, CHECK constraints,
+   * expression indexes and tables — all of which can call one, and were still
+   * in place when routines were dropped at the start (`cannot drop function
+   * ... because other objects depend on it`). Before the types a routine's
+   * signature can use.
+   */
+  DROP_ROUTINE: 115,
   DROP_BASE: 120,
 } as const
 

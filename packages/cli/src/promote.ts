@@ -148,6 +148,9 @@ function classifyIssue(
     return { kind: 'skip', reason: 'Not selected by --only' }
   }
 
+  // Real, but not for an automatic apply: the finding says what to do.
+  if (issue.manualOnly) return { kind: 'skip', reason: issue.manualOnly }
+
   if (!issue.sql?.up) {
     if (issue.action) return { kind: 'api', action: issue.action }
     // A check that knows why it cannot offer a fix says so; "nothing
@@ -259,7 +262,7 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
     }
   }
 
-  plan.sqlStatements = holdBackDropsStillInUse(plan.sqlStatements, keptBack, plan.skipped)
+  plan.sqlStatements = holdBackDropsStillInUse(plan.sqlStatements, keptBack, plan.skipped, downsOf(relevant))
   plan.sqlStatements = orderStatements(plan.sqlStatements, s => s.sql)
   plan.sqlStatements = dropDuplicateObjectFixes(plan.sqlStatements, plan.skipped)
   return plan
@@ -283,25 +286,53 @@ function holdBackDropsStillInUse(
   statements: PlannedSql[],
   keptBack: Array<{ issueId: string; definition: string }>,
   skipped: PlannedWork['skipped'],
+  downs: ReadonlyMap<string, string> = new Map(),
 ): PlannedSql[] {
-  if (keptBack.length === 0) return statements
   const kept = keptBack.map(k => ({ issueId: k.issueId, skeleton: sqlSkeleton(k.definition) }))
+  let remaining = statements
 
-  return statements.filter((statement) => {
-    const parts = splitSqlStatements(statement.sql).filter(s => !isCommentOnly(s))
-    const names = parts.map(s => DROPS_SUPPORTING_OBJECT.exec(sqlSkeleton(s))?.[1])
-    if (names.length === 0 || names.some(n => n === undefined)) return true
+  // Until nothing more is held back: what one held-back drop keeps can keep
+  // something else — a column kept keeps its composite type, and the
+  // composite keeps the enum it holds.
+  for (let changed = kept.length > 0; changed;) {
+    changed = false
+    remaining = remaining.filter((statement) => {
+      const names = droppedSupportingObjects(statement.sql)
+      if (names.length === 0) return true
 
-    const user = kept.find(k => names.some(n => identifierMatcher(bareName(n!)).test(k.skeleton)))
-    if (!user) return true
-    skipped.push({
-      check: statement.check,
-      issueId: statement.issueId,
-      reason: `Still used by what ${user.issueId} keeps, which is held back as destructive; `
-        + 're-run with --allow-destructive to apply both',
+      const user = kept.find(k => names.some(n => identifierMatcher(bareName(n)).test(k.skeleton)))
+      if (!user) return true
+      skipped.push({
+        check: statement.check,
+        issueId: statement.issueId,
+        reason: `Still used by what ${user.issueId} keeps, which is held back as destructive; `
+          + 're-run with --allow-destructive to apply both',
+      })
+      const definition = downs.get(statement.issueId)
+      if (definition) kept.push({ issueId: user.issueId, skeleton: sqlSkeleton(definition) })
+      changed = true
+      return false
     })
-    return false
-  })
+  }
+  return remaining
+}
+
+/** The names a fix drops, when all it does is drop types, domains, routines or sequences. */
+function droppedSupportingObjects(sql: string): string[] {
+  const parts = splitSqlStatements(sql).filter(s => !isCommentOnly(s))
+  const names = parts.map(s => DROPS_SUPPORTING_OBJECT.exec(sqlSkeleton(s))?.[1])
+  return names.length > 0 && names.every(n => n !== undefined) ? names as string[] : []
+}
+
+/** Each issue's DOWN — the definition of what it would drop — by issue id. */
+function downsOf(checks: ScanResult['checks']): Map<string, string> {
+  const downs = new Map<string, string>()
+  for (const check of checks) {
+    for (const issue of check.issues) {
+      if (issue.sql?.down) downs.set(issue.id, issue.sql.down)
+    }
+  }
+  return downs
 }
 
 /**

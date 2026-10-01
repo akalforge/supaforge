@@ -696,6 +696,23 @@ describe('planWork trigger de-duplication', () => {
   })
 })
 
+describe('planWork and manual-only findings with SQL', () => {
+  it('skips them with their reason rather than running the SQL', () => {
+    const plan = planWork(makeScanResult({
+      checks: [{
+        check: 'schema', status: 'drifted', durationMs: 0, issues: [
+          { id: 'schema-alter-type-1', check: 'schema', severity: 'warning', description: 'd', title: 'Type altered: public.st',
+            sql: { up: 'DROP TYPE IF EXISTS "st";', down: '' }, manualOnly: 'do it by hand' },
+          { id: 'schema-create-view-2', check: 'schema', severity: 'warning', description: 'd', title: 'View missing: public.v',
+            sql: { up: 'CREATE VIEW "v" AS SELECT 1;', down: '' } },
+        ],
+      }],
+    }))
+    expect(plan.sqlStatements.map(s => s.issueId)).toEqual(['schema-create-view-2'])
+    expect(plan.skipped).toEqual([{ check: 'schema', issueId: 'schema-alter-type-1', reason: 'do it by hand' }])
+  })
+})
+
 describe('planWork and drops something held back still uses', () => {
   function withLegacyTable(): ScanResult {
     return makeScanResult({
@@ -722,6 +739,24 @@ describe('planWork and drops something held back still uses', () => {
     const plan = planWork(withLegacyTable())
     expect(plan.sqlStatements.map(s => s.issueId)).toEqual(['schema-drop-type-3'])
     expect(plan.skipped.find(s => s.issueId === 'schema-drop-type-2')?.reason).toMatch(/Still used by what schema-drop-1 keeps/)
+  })
+
+  it('holds back what a held-back drop keeps in turn', () => {
+    // The column keeps its composite type, and the composite keeps its enum.
+    const plan = planWork(makeScanResult({
+      checks: [{
+        check: 'schema', status: 'drifted', durationMs: 0, issues: [
+          { id: 'schema-alter-1', check: 'schema', severity: 'warning', description: 'd', title: 'Table altered: public.t',
+            sql: { up: 'ALTER TABLE "t" DROP COLUMN "v";', down: 'ALTER TABLE "t" ADD COLUMN "v" "c";' } },
+          { id: 'schema-drop-type-2', check: 'schema', severity: 'critical', description: 'd', title: 'Extra type: public.c',
+            sql: { up: 'DROP TYPE IF EXISTS "c";', down: 'CREATE TYPE "c" AS ("x" "e", "y" integer);' } },
+          { id: 'schema-drop-type-3', check: 'schema', severity: 'critical', description: 'd', title: 'Extra type: public.e',
+            sql: { up: 'DROP TYPE IF EXISTS "e";', down: `CREATE TYPE "e" AS ENUM ('a');` } },
+        ],
+      }],
+    }))
+    expect(plan.sqlStatements).toEqual([])
+    expect(plan.skipped.map(s => s.issueId).sort()).toEqual(['schema-alter-1', 'schema-drop-type-2', 'schema-drop-type-3'])
   })
 
   it('drops both once destructive fixes are allowed', () => {

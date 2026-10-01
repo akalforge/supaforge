@@ -1251,7 +1251,9 @@ dropped and re-added, a `serial` column becomes an identity. SupaForge asks
 dbdiff to mark each change (`--units`), so such a change is one finding that
 applies whole, and its DOWN is the same change's rather than whatever sat at
 the same position. A column dropped and re-added in one change is not held
-back as destructive: it is recomputed, not lost. With a dbdiff that predates
+back as destructive: it is recomputed, not lost. And when a table or column
+*is* held back, so is the drop of a type, domain, function or sequence it
+still uses — otherwise that drop failed and took the whole apply with it. With a dbdiff that predates
 the markers, SupaForge reads the SQL statement by statement as before.
 
 One consequence: a policy that differs is found by both the schema layer and the

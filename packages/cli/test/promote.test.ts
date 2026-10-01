@@ -695,3 +695,37 @@ describe('planWork trigger de-duplication', () => {
     expect(plan.skipped.find(s => s.check === 'rls')?.reason).toMatch(/policy/i)
   })
 })
+
+describe('planWork and drops something held back still uses', () => {
+  function withLegacyTable(): ScanResult {
+    return makeScanResult({
+      checks: [{
+        check: 'schema', status: 'drifted', durationMs: 0, issues: [
+          {
+            id: 'schema-drop-1', check: 'schema', severity: 'critical', description: 'Schema difference detected by @dbdiff/cli.', title: 'Extra table: public.legacy',
+            sql: { up: 'DROP TABLE IF EXISTS "legacy";', down: 'CREATE TABLE "legacy" ("id" integer, "k" "legacy_kind");' },
+          },
+          {
+            id: 'schema-drop-type-2', check: 'schema', severity: 'critical', description: 'Schema difference detected by @dbdiff/cli.', title: 'Extra type: public.legacy_kind',
+            sql: { up: 'DROP TYPE IF EXISTS "legacy_kind";', down: `CREATE TYPE "legacy_kind" AS ENUM ('x');` },
+          },
+          {
+            id: 'schema-drop-type-3', check: 'schema', severity: 'critical', description: 'Schema difference detected by @dbdiff/cli.', title: 'Extra type: public.unused',
+            sql: { up: 'DROP TYPE IF EXISTS "unused";', down: `CREATE TYPE "unused" AS ENUM ('x');` },
+          },
+        ],
+      }],
+    })
+  }
+
+  it('holds back the type a held-back table still uses, and only that', () => {
+    const plan = planWork(withLegacyTable())
+    expect(plan.sqlStatements.map(s => s.issueId)).toEqual(['schema-drop-type-3'])
+    expect(plan.skipped.find(s => s.issueId === 'schema-drop-type-2')?.reason).toMatch(/Still used by what schema-drop-1 keeps/)
+  })
+
+  it('drops both once destructive fixes are allowed', () => {
+    const plan = planWork(withLegacyTable(), { allowDestructive: true })
+    expect(plan.sqlStatements.map(s => s.issueId).sort()).toEqual(['schema-drop-1', 'schema-drop-type-2', 'schema-drop-type-3'])
+  })
+})

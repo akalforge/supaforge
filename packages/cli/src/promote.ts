@@ -7,7 +7,7 @@ import {
   orderStatements, referencedTables,
   createdPolicies, createsOnlyPolicies,
   createdTriggers, createsOnlyTriggers,
-  sqlSkeleton,
+  sqlSkeleton, bareName,
 } from './sql-deps.js'
 import { splitSqlStatements, isCommentOnly } from './utils/sql-split.js'
 import { applyTableFilter, isFiltered, type TableFilter } from './utils/table-filter.js'
@@ -215,6 +215,9 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
     c => c.status === 'drifted' && (!options.checks || options.checks.includes(c.check)),
   )
   const recreatedPolicies = policiesCreatedBySelectedFixes(relevant, options)
+  // What the destructive gate keeps, as the definitions that would put it
+  // back — the objects still there after the apply.
+  const keptBack: Array<{ issueId: string; definition: string }> = []
 
   for (const checkResult of relevant) {
     // A posture check judges the target on its own and fires identically
@@ -247,13 +250,64 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
 
       if (outcome.kind === 'sql') plan.sqlStatements.push({ ...at, sql: outcome.sql })
       else if (outcome.kind === 'api') plan.apiActions.push({ ...at, action: outcome.action })
-      else plan.skipped.push({ ...at, reason: outcome.reason })
+      else {
+        plan.skipped.push({ ...at, reason: outcome.reason })
+        if (outcome.reason.startsWith('Destructive') && issue.sql?.down) {
+          keptBack.push({ issueId: issue.id, definition: issue.sql.down })
+        }
+      }
     }
   }
 
+  plan.sqlStatements = holdBackDropsStillInUse(plan.sqlStatements, keptBack, plan.skipped)
   plan.sqlStatements = orderStatements(plan.sqlStatements, s => s.sql)
   plan.sqlStatements = dropDuplicateObjectFixes(plan.sqlStatements, plan.skipped)
   return plan
+}
+
+/** `DROP TYPE|DOMAIN|FUNCTION|PROCEDURE|SEQUENCE [IF EXISTS] <name>`, capturing the name. */
+const DROPS_SUPPORTING_OBJECT = /^\s*DROP\s+(?:TYPE|DOMAIN|FUNCTION|PROCEDURE|ROUTINE|SEQUENCE)\s+(?:IF\s+EXISTS\s+)?((?:"[^"]+"|[\w$]+)(?:\s*\.\s*(?:"[^"]+"|[\w$]+))?)/i
+
+/**
+ * Hold back the drop of a type, domain, routine or sequence that something
+ * the destructive gate keeps still uses.
+ *
+ * The source no longer has a table and the enum its column was typed by; the
+ * table's DROP is held back without --allow-destructive, and the enum's DROP
+ * then fails — `cannot drop type ... because other objects depend on it` —
+ * taking every other fix in the transaction with it. A kept object's own
+ * definition (its fix's DOWN) says what it uses. Only a fix that does nothing
+ * but drop such objects is held back; holding back more is the safe side.
+ */
+function holdBackDropsStillInUse(
+  statements: PlannedSql[],
+  keptBack: Array<{ issueId: string; definition: string }>,
+  skipped: PlannedWork['skipped'],
+): PlannedSql[] {
+  if (keptBack.length === 0) return statements
+  const kept = keptBack.map(k => ({ issueId: k.issueId, skeleton: sqlSkeleton(k.definition) }))
+
+  return statements.filter((statement) => {
+    const parts = splitSqlStatements(statement.sql).filter(s => !isCommentOnly(s))
+    const names = parts.map(s => DROPS_SUPPORTING_OBJECT.exec(sqlSkeleton(s))?.[1])
+    if (names.length === 0 || names.some(n => n === undefined)) return true
+
+    const user = kept.find(k => names.some(n => mentions(k.skeleton, bareName(n!))))
+    if (!user) return true
+    skipped.push({
+      check: statement.check,
+      issueId: statement.issueId,
+      reason: `Still used by what ${user.issueId} keeps, which is held back as destructive; `
+        + 're-run with --allow-destructive to apply both',
+    })
+    return false
+  })
+}
+
+/** Whether SQL names an identifier, quoted or not, as a whole word. */
+function mentions(sql: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(?<![\\w$])"?${escaped}"?(?![\\w$])`, 'i').test(sql)
 }
 
 /**

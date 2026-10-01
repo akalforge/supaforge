@@ -867,6 +867,14 @@ These objects would still differ after applying.
 The target is never touched when the proof fails — it exits 1 having applied
 nothing. On success it reports `Converged` and proceeds.
 
+When the clone and the source differ, the source is copied onto the same
+server the way the clone was and compared again, so both sides have been
+through the same dump and restore. PostgreSQL does not render every expression
+the same way twice — `status IN ('draft', 'active')` on a `varchar` column
+comes back as an equivalent but differently written `ARRAY` expression — and
+compared with the source as written, every correct migration creating such a
+CHECK, partial index or policy was refused.
+
 The clone is created on the target's own server (no extra credentials), holds
 structure only (no data is copied), and is dropped even if the proof throws. It
 receives only the schemas being compared — `public` unless you say otherwise —

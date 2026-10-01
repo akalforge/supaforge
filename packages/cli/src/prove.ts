@@ -188,6 +188,8 @@ export async function proveConvergence(opts: {
   }
 
   let created = false
+  let sourceCopyCreated = false
+  let roundTripName: string | undefined
   try {
     try {
       await pgQuery(adminUrl, `CREATE DATABASE "${cloneName}"`)
@@ -201,45 +203,8 @@ export async function proveConvergence(opts: {
       }
     }
 
-    // Prepare the clone to receive the proved schemas, and nothing else.
-    await prepareClone(cloneUrl, opts.targetUrl, schemas)
-
-    // Copy the target's structure. Data is irrelevant to a schema proof and
-    // copying it would make this unusable on anything but a toy database.
-    //
-    // Only the schemas being proved. Listing Supabase's schemas as exclusions
-    // instead left the dump carrying everything that *references* them — a
-    // `CREATE EXTENSION ... WITH SCHEMA extensions`, an event trigger calling
-    // `extensions.set_graphql_placeholder()` — none of which could be replayed
-    // into a clone that deliberately has no such schema. `--prove` therefore
-    // failed on every real Supabase project, whatever the client version.
-    const dumpArgs = [
-      opts.targetUrl, '--schema-only', '--no-owner', '--no-privileges',
-      ...schemas.map(s => `--schema=${s}`),
-    ]
-    const { stdout: structure } = await exec(pgDump, dumpArgs, {
-      maxBuffer: 256 * 1024 * 1024, timeout: 300_000,
-    })
-
-    // pg_dump writes its preamble for its own version, so a newer client can
-    // hand an older server a parameter that does not exist there (issue #72).
-    const { sql: replayable } = dropUnsupportedSetStatements(
-      structure, await knownParameters(cloneUrl),
-    )
-
-    try {
-      await runSql(psql, cloneUrl, replayable)
-    } catch (err) {
-      // Rethrown, not returned as `skipped`: a caller treats `skipped` as
-      // "could not check, carry on and apply", and this is a case where we do
-      // not know what the migration would do. Blocking the apply is the
-      // behaviour that was already right (issue #72 confirmed nothing was
-      // written and no clone was left behind) — only the message needed to say
-      // what the cause actually is.
-      throw new Error(
-        explainStructureFailure((err as Error).message, clientMajor, serverMajor),
-      )
-    }
+    const tools = { pgDump, psql, clientMajor, serverMajor }
+    await copyStructure(opts.targetUrl, cloneUrl, schemas, tools)
 
     // The migration under test.
     await runSql(psql, cloneUrl, opts.migrationSql)
@@ -254,21 +219,117 @@ export async function proveConvergence(opts: {
     // how a difference is *described*, never whether one is detected.
     if (want === got) return { converged: true, residual: [], cloneName }
 
+    // The clone's objects have been through a dump and restore, or were
+    // recreated from the SQL a rendering produced; the source's have not, and
+    // PostgreSQL does not render every expression the same way twice —
+    // `status IN ('draft', 'active')` on a varchar column comes back as a
+    // different but equivalent ARRAY expression. So a correct migration
+    // creating such a CHECK, index or policy was refused. Compared with the
+    // source copied the same way, like is compared with like.
+    roundTripName = `${cloneName}_src`
+    const roundTripUrl = withDatabase(opts.targetUrl, roundTripName)
+    const roundTrip = await copyOfSource(adminUrl, opts.sourceUrl, roundTripUrl, roundTripName, schemas, tools)
+    if (roundTrip !== null) {
+      sourceCopyCreated = true
+      if (roundTrip.ok) {
+        const wantRoundTripped = await fingerprint(roundTripUrl, schemas)
+        if (wantRoundTripped === got) return { converged: true, residual: [], cloneName }
+        return {
+          converged: false,
+          residual: await describeDifference(roundTripUrl, cloneUrl, schemas, wantRoundTripped, got),
+          cloneName,
+        }
+      }
+    }
+
     return {
       converged: false,
       residual: await describeDifference(opts.sourceUrl, cloneUrl, schemas, want, got),
       cloneName,
     }
   } finally {
+    if (sourceCopyCreated && roundTripName) {
+      await dropDatabase(adminUrl, roundTripName)
+    }
     if (created) {
       // Never leave a clone behind, even on failure. Terminating first because
       // a failed apply can leave a session attached.
-      await pgQuery(adminUrl,
-        `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
-          WHERE datname = '${cloneName}' AND pid <> pg_backend_pid()`).catch(() => undefined)
-      await pgQuery(adminUrl, `DROP DATABASE IF EXISTS "${cloneName}"`).catch(() => undefined)
+      await dropDatabase(adminUrl, cloneName)
     }
   }
+}
+
+interface PgTools { pgDump: string; psql: string; clientMajor: number; serverMajor: number }
+
+/**
+ * Copy `fromUrl`'s structure in the given schemas into the empty database at
+ * `intoUrl` — data is irrelevant to a schema proof and copying it would make
+ * this unusable on anything but a toy database.
+ *
+ * Only the schemas being proved. Listing Supabase's schemas as exclusions
+ * instead left the dump carrying everything that *references* them — a
+ * `CREATE EXTENSION ... WITH SCHEMA extensions`, an event trigger calling
+ * `extensions.set_graphql_placeholder()` — none of which could be replayed
+ * into a clone that deliberately has no such schema. `--prove` therefore
+ * failed on every real Supabase project, whatever the client version.
+ */
+async function copyStructure(fromUrl: string, intoUrl: string, schemas: string[], tools: PgTools): Promise<void> {
+  // Prepare the copy to receive the proved schemas, and nothing else.
+  await prepareClone(intoUrl, fromUrl, schemas)
+
+  const dumpArgs = [
+    fromUrl, '--schema-only', '--no-owner', '--no-privileges',
+    ...schemas.map(s => `--schema=${s}`),
+  ]
+  const { stdout: structure } = await exec(tools.pgDump, dumpArgs, {
+    maxBuffer: 256 * 1024 * 1024, timeout: 300_000,
+  })
+
+  // pg_dump writes its preamble for its own version, so a newer client can
+  // hand an older server a parameter that does not exist there (issue #72).
+  const { sql: replayable } = dropUnsupportedSetStatements(structure, await knownParameters(intoUrl))
+
+  try {
+    await runSql(tools.psql, intoUrl, replayable)
+  } catch (err) {
+    // Rethrown, not returned as `skipped`: a caller treats `skipped` as
+    // "could not check, carry on and apply", and this is a case where we do
+    // not know what the migration would do. Blocking the apply is the
+    // behaviour that was already right (issue #72 confirmed nothing was
+    // written and no clone was left behind) — only the message needed to say
+    // what the cause actually is.
+    throw new Error(explainStructureFailure((err as Error).message, tools.clientMajor, tools.serverMajor))
+  }
+}
+
+/**
+ * The source's structure copied onto the target's server the way the clone
+ * was, for comparing like with like. `null` when the database could not be
+ * created, `{ ok: false }` when the copy failed — the proof then falls back to
+ * comparing against the source itself, as it did before.
+ */
+async function copyOfSource(
+  adminUrl: string, sourceUrl: string, intoUrl: string, name: string, schemas: string[], tools: PgTools,
+): Promise<{ ok: boolean } | null> {
+  try {
+    await pgQuery(adminUrl, `CREATE DATABASE "${name}"`)
+  } catch {
+    return null
+  }
+  try {
+    await copyStructure(sourceUrl, intoUrl, schemas, tools)
+    return { ok: true }
+  } catch {
+    return { ok: false }
+  }
+}
+
+/** Drop a throwaway database, ending any session still attached first. */
+async function dropDatabase(adminUrl: string, name: string): Promise<void> {
+  await pgQuery(adminUrl,
+    `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+      WHERE datname = '${name}' AND pid <> pg_backend_pid()`).catch(() => undefined)
+  await pgQuery(adminUrl, `DROP DATABASE IF EXISTS "${name}"`).catch(() => undefined)
 }
 
 /**

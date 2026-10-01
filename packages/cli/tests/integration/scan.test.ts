@@ -42,12 +42,11 @@ describe('integration: full scan', () => {
     expect(missingMood).toBeDefined()
     expect(missingMood!.sql?.up).toMatch(/CREATE TYPE.*mood/i)
 
-    // post_status missing 'archived' value → dbdiff recreates via DROP + CREATE
+    // post_status missing 'archived' value → the label is added in place
+    // (@dbdiff/cli 3.0.0-rc.15), not by replacing the type
     const postStatusIssues = schema.issues.filter(i => i.title.includes('post_status'))
-    expect(postStatusIssues.length).toBeGreaterThanOrEqual(1)
-    const hasDrop = postStatusIssues.some(i => i.sql?.up.match(/DROP TYPE.*post_status/i))
-    const hasCreate = postStatusIssues.some(i => i.sql?.up.match(/CREATE TYPE.*post_status.*archived/i))
-    expect(hasDrop || hasCreate).toBe(true)
+    expect(postStatusIssues).toHaveLength(1)
+    expect(postStatusIssues[0].sql?.up).toMatch(/ALTER TYPE "post_status" ADD VALUE IF NOT EXISTS 'archived'/)
   })
 
   it.skipIf(skipIfNoContainers())('should detect RLS drift', () => {

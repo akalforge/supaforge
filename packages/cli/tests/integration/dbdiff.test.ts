@@ -8,6 +8,7 @@
  *
  * Requires containers from scripts/test-integration.sh or CI services.
  */
+import { isEnumValueAddition } from '../../src/promote'
 import { describe, it, expect, beforeAll } from 'vitest'
 import { runDbDiff, resolveDbDiffBin, parseDbDiffOutput, sqlToIssues } from '../../src/dbdiff'
 import { SchemaCheck } from '../../src/checks/schema'
@@ -89,9 +90,10 @@ describe('integration: runDbDiff schema', () => {
       include: 'both',
     })
 
-    // dbdiff recreates enums with value differences via DROP + CREATE
-    expect(result.up).toMatch(/DROP TYPE.*post_status/i)
-    expect(result.up).toMatch(/CREATE TYPE.*post_status.*archived/i)
+    // An added label is added in place since @dbdiff/cli 3.0.0-rc.15, not by
+    // replacing the type — which PostgreSQL refuses while a column uses it.
+    expect(result.up).toMatch(/ALTER TYPE "post_status" ADD VALUE IF NOT EXISTS 'archived'/i)
+    expect(result.up).not.toMatch(/DROP TYPE[^;]*post_status/i)
   })
 
   it.skipIf(skipIfNoContainers())('classifies enum statements correctly as DriftIssues', async () => {
@@ -109,18 +111,17 @@ describe('integration: runDbDiff schema', () => {
     expect(missingMood).toBeDefined()
     expect(missingMood!.id).toContain('create-type')
 
-    // post_status is recreated via DROP + CREATE, which is one modified type
-    // rather than an extra one and a missing one (issue #81). Reported as two
-    // issues it was also ordered as two, and the CREATE ran before the DROP it
-    // replaced — `type "post_status" already exists`.
+    // post_status gains a label: one ALTER TYPE ... ADD VALUE, reported as
+    // the type altered. (A removed label still replaces the type, and that
+    // DROP + CREATE pair is still merged into one issue — see the unit tests
+    // for issue #81.)
     const postStatusIssues = issues.filter(i => i.title.includes('post_status'))
     expect(postStatusIssues).toHaveLength(1)
     expect(postStatusIssues[0].id).toContain('alter-type')
-    expect(postStatusIssues[0].title).toContain('Type modified')
-
-    // Drop before create, in the one statement.
-    const up = postStatusIssues[0].sql?.up ?? ''
-    expect(up.indexOf('DROP TYPE')).toBeLessThan(up.indexOf('CREATE TYPE'))
+    expect(postStatusIssues[0].title).toBe('Type altered: public.post_status')
+    expect(postStatusIssues[0].sql?.up).toMatch(/ADD VALUE IF NOT EXISTS 'archived'/)
+    // Committed ahead of the rest of an apply, so the same apply can use it.
+    expect(isEnumValueAddition(postStatusIssues[0].sql?.up ?? '')).toBe(true)
   })
 
   it.skipIf(skipIfNoContainers())('handles identical schemas with empty output', async () => {

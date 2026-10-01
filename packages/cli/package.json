@@ -50,7 +50,7 @@
   },
   "dependencies": {
     "@akalforge/pg-conformance": "~0.0.6",
-    "@dbdiff/cli": "3.0.0-rc.16",
+    "@dbdiff/cli": "3.0.0-rc.17",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@oclif/core": "^4",
     "@supabase/supabase-js": "^2.103.0",

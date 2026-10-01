@@ -8,6 +8,7 @@ import type { DriftIssue } from './types/drift'
 import { errMsg, friendlyDbError, DiagnosticError } from './utils/error'
 import { DBDIFF_EXEC_TIMEOUT_MS, DBDIFF_MAX_BUFFER } from './constants'
 import { sqlSkeleton, policiesRemoved } from './sql-deps'
+import { pairUnits, parseUnits, REPLACING_KINDS, type DbDiffUnit } from './dbdiff-units'
 
 const execFileAsync = promisify(execFile)
 
@@ -30,6 +31,11 @@ export interface DbDiffOptions {
    * diff reads as working rather than hung (issue #29).
    */
   onProgress?: (progress: { table: string; tablesSeen: number }) => void
+  /**
+   * Ask a schema diff for `--units` (the default). Set false for a dbdiff
+   * that predates the flag — runDbDiff does so itself when one refuses it.
+   */
+  units?: boolean
 }
 
 export interface DbDiffResult {
@@ -163,6 +169,14 @@ export function buildDbDiffArgs(options: DbDiffOptions, outputFile: string): str
     `--output=${outputFile}`,
   ]
 
+  // Each schema change marked as one unit, so a change of several statements
+  // is one finding and its DOWN is found by name — see dbdiff-units.ts. Data
+  // diffs stay statement by statement: a unit there is a table's rows, and
+  // rows are reviewed and applied one at a time.
+  if (options.type === 'schema' && options.units !== false) {
+    args.push('--units')
+  }
+
   const memoryLimit = resolveDbDiffMemoryLimit()
   if (memoryLimit) {
     args.push(`--memory-limit=${memoryLimit}`)
@@ -261,6 +275,13 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
     const stderr = String(errObj.stderr ?? '').trim()
     const stdout = String(errObj.stdout ?? '').trim()
     const combined = `${message} ${stderr}`
+
+    // A dbdiff older than --units (3.0.0-rc.17) refuses the flag; its output
+    // is read statement by statement instead.
+    if (options.units !== false && /"--units" option does not exist/.test(`${combined} ${stdout}`)) {
+      return runDbDiff({ ...options, units: false })
+    }
+
     if (
       combined.includes('ENOENT') ||
       combined.includes('not found') ||
@@ -376,7 +397,7 @@ export function destructiveReason(
   // were held back as though they emptied the table — and Supabase's default
   // `GRANT ALL` includes TRUNCATE, so every grant fix for a new table tripped it.
   if (/(?:^|;)\s*TRUNCATE\b/.test(skeleton)) return 'deletes every row in a table'
-  if (/\bDROP\s+COLUMN\b/.test(skeleton)) return 'drops a column and its values'
+  if (columnsDroppedForGood(skeleton).length > 0) return 'drops a column and its values'
   if (/\bDELETE\s+FROM\b/.test(skeleton)) return 'deletes rows'
 
   // A policy another fix in the same apply creates again is being replaced,
@@ -390,6 +411,27 @@ export function destructiveReason(
   }
 
   return undefined
+}
+
+/**
+ * Columns a statement drops and does not add back.
+ *
+ * A stored generated column whose expression changes, or that reads a column
+ * being retyped, is dropped and re-added in the same change — recomputed from
+ * its expression, so nothing is lost — and was held back as though its values
+ * were. Matched on the upper-cased skeleton, so names compare as written.
+ */
+function columnsDroppedForGood(skeleton: string): string[] {
+  const ident = String.raw`("(?:[^"]|"")+"|[\w$]+)`
+  const dropped = [...skeleton.matchAll(new RegExp(String.raw`\bDROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?` + ident, 'g'))]
+  return dropped
+    .filter(m => !new RegExp(String.raw`\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?` + escapeRegExp(m[1]) + String.raw`(?![\w$"])`)
+      .test(skeleton.slice((m.index ?? 0) + m[0].length)))
+    .map(m => m[1])
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 export function parseDbDiffOutput(output: string): DbDiffResult {
@@ -440,6 +482,11 @@ export function sqlToIssues(
   ignoredSchemaTables?: Set<string>,
 ): DriftIssue[] {
   if (!result.up && !result.down) return []
+
+  const upUnits = parseUnits(result.up)
+  if (upUnits) {
+    return issuesFromUnits(upUnits, parseUnits(result.down) ?? [], check, ignoreSchemas, ignoredSchemaTables)
+  }
 
   let upStatements = splitStatements(result.up)
   let downStatements = splitStatements(result.down)
@@ -493,6 +540,105 @@ export function sqlToIssues(
       sql: { up: upSql, down: downSql },
     }
   })
+}
+
+/**
+ * One finding per dbdiff unit (see dbdiff-units.ts), paired with the DOWN
+ * unit for the same change.
+ *
+ * Named as the statement-by-statement path names them: a unit replacing one
+ * object — a changed routine, policy, or enum whose labels were removed — is
+ * "<Kind> modified"; anything else by its leading statement, which for a
+ * table change is its first ALTER TABLE rather than a view it stands aside.
+ */
+function issuesFromUnits(
+  upUnits: DbDiffUnit[],
+  downUnits: DbDiffUnit[],
+  check: 'schema' | 'data',
+  ignoreSchemas?: string[],
+  ignoredSchemaTables?: Set<string>,
+): DriftIssue[] {
+  const pairs = pairUnits(upUnits, downUnits).filter(({ up, down }) =>
+    !(ignoreSchemas?.length && isCrossSchemaFkUnit(up, down, ignoreSchemas, ignoredSchemaTables)))
+
+  return pairs.map(({ up, down }, i) => {
+    const upSql = up.sql
+    const downSql = down?.sql ?? ''
+    const statements = splitStatements(upSql)
+    const replaced = replacedObject(up, statements)
+
+    if (replaced) {
+      const report = REPLACEABLE_REPORT[replaced.kind]
+      return {
+        id: `${check}-alter-${report.idPart}-${i + 1}`,
+        check,
+        severity: 'warning' as const,
+        title: `${report.label}: ${qualifySchemaName(replaced.name)}`,
+        description: `${report.what} differs between source and target.`,
+        sql: { up: upSql, down: downSql },
+      }
+    }
+
+    const lead = leadStatement(up, statements)
+    const type = classifyStatement(lead)
+    return {
+      id: `${check}-${type}-${i + 1}`,
+      check,
+      severity: DROP_TYPES.includes(type) ? 'critical' : 'warning',
+      title: summariseStatement(lead, check, downSql),
+      description: `${check === 'schema' ? 'Schema' : 'Data'} difference detected by @dbdiff/cli.`,
+      sql: { up: upSql, down: downSql },
+    }
+  })
+}
+
+/**
+ * A constraint change about a foreign key into an ignored schema — a false
+ * positive from dbdiff seeing that schema's tables as stubs. The reference is
+ * in the ADD, which is the UP of an added key and the DOWN of a dropped one.
+ */
+function isCrossSchemaFkUnit(
+  up: DbDiffUnit,
+  down: DbDiffUnit | undefined,
+  schemas: string[],
+  ignoredSchemaTables?: Set<string>,
+): boolean {
+  if (!/Constraint$/.test(up.kind)) return false
+  return [up.sql, down?.sql ?? ''].some(sql =>
+    /\bFOREIGN\s+KEY\b/i.test(sql)
+    && (hasCrossSchemaRef(sql, schemas, ignoredSchemaTables) || hasBrokenRef(sql)))
+}
+
+/** The object a unit drops and recreates, when that is what it does. */
+function replacedObject(
+  unit: DbDiffUnit,
+  statements: string[],
+): { kind: ReplaceableKind; name: string } | undefined {
+  const kind = REPLACING_KINDS[unit.kind]
+  const drop = statements.find(sql => replaceablePart(sql)?.drop)
+  if (!kind || !drop) return undefined
+
+  if (kind === 'type') return { kind, name: unit.object }
+  const create = [...statements].reverse().find(sql => replaceablePart(sql)?.drop === false) ?? drop
+  return {
+    kind,
+    name: kind === 'routine'
+      ? extractRoutineName(create) + extractRoutineArgs(drop)
+      : REPLACEABLE_NAME[kind](create),
+  }
+}
+
+/**
+ * The statement a unit is named by: for a table change, its first ALTER
+ * TABLE (a column type change opens by standing views aside; a serial column
+ * by creating its sequence); otherwise its first statement.
+ */
+function leadStatement(unit: DbDiffUnit, statements: string[]): string {
+  if (unit.kind.startsWith('AlterTable')) {
+    const alter = statements.find(sql => /^\s*ALTER\s+TABLE\b/i.test(sql))
+    if (alter) return alter
+  }
+  return statements[0] ?? unit.sql
 }
 
 /** `ALTER TABLE t ALTER COLUMN c TYPE ...`, capturing the table and column. */
@@ -909,8 +1055,8 @@ function splitStatements(sql: string): string[] {
       let j = i
       while (j < sql.length && (sql[j] === ' ' || sql[j] === '\t' || sql[j] === '\r')) j++
       if (j >= sql.length || sql[j] === '\n') {
-        const stmt = buf.trim()
-        if (stmt.length > 0 && !stmt.startsWith('--')) {
+        const stmt = withoutLeadingComments(buf)
+        if (stmt.length > 0) {
           statements.push(stmt)
         }
         buf = ''
@@ -924,12 +1070,24 @@ function splitStatements(sql: string): string[] {
   }
 
   // Flush any trailing content without a statement-ending newline
-  const last = buf.trim()
-  if (last.length > 0 && !last.startsWith('--')) {
+  const last = withoutLeadingComments(buf)
+  if (last.length > 0) {
     statements.push(last.endsWith(';') ? last : `${last};`)
   }
 
   return statements
+}
+
+/**
+ * A statement without the `--` lines in front of it.
+ *
+ * A statement opening with a comment used to be dropped whole — and dbdiff
+ * puts notes in front of statements: the DROP TYPE replacing an enum whose
+ * labels it could not move came after three lines saying why, so it never
+ * reached a finding.
+ */
+function withoutLeadingComments(chunk: string): string {
+  return chunk.trim().replace(/^(?:--[^\n]*(?:\n|$)\s*)+/, '').trim()
 }
 
 export function classifyStatement(sql: string): string {

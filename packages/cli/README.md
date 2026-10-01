@@ -1244,6 +1244,16 @@ differently after a round trip — `status IN ('draft', 'active')` on a
 `varchar` column, in a CHECK, partial index, view or trigger condition — is no
 longer reported as a change.
 
+**One finding per change (rc.17).** Some changes are several statements that
+only work together and in order — an enum whose labels are removed is moved to
+a new type, a column type change stands its views aside, a generated column is
+dropped and re-added, a `serial` column becomes an identity. SupaForge asks
+dbdiff to mark each change (`--units`), so such a change is one finding that
+applies whole, and its DOWN is the same change's rather than whatever sat at
+the same position. A column dropped and re-added in one change is not held
+back as destructive: it is recomputed, not lost. With a dbdiff that predates
+the markers, SupaForge reads the SQL statement by statement as before.
+
 One consequence: a policy that differs is found by both the schema layer and the
 RLS layer. It is reported once, by the RLS layer — the finding that names the
 policy's risk — and the schema layer's line says how many it left there:

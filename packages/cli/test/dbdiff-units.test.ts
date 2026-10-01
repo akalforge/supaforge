@@ -1,0 +1,150 @@
+import { describe, it, expect } from 'vitest'
+import { pairUnits, parseUnits } from '../src/dbdiff-units.js'
+import { buildDbDiffArgs, destructiveReason, sqlToIssues } from '../src/dbdiff.js'
+
+/** A section as `dbdiff --units` writes it. */
+function units(...parts: Array<[kind: string, object: string, sql: string]>): string {
+  return parts.map(([kind, object, sql]) => `-- dbdiff:unit ${kind} ${object}\n${sql}\n-- dbdiff:end`).join('\n')
+}
+
+const SWAP_UP = [
+  `CREATE TYPE "st__new" AS ENUM ('new', 'shipped');`,
+  `DROP POLICY IF EXISTS "own" ON "orders";`,
+  `DROP VIEW IF EXISTS "open_orders";`,
+  `ALTER TABLE "orders" ALTER COLUMN "state" DROP DEFAULT;`,
+  `ALTER TABLE "orders" ALTER COLUMN "state" TYPE "st__new" USING "state"::text::"st__new";`,
+  `DROP TYPE "st";`,
+  `ALTER TYPE "st__new" RENAME TO "st";`,
+  `ALTER TABLE "orders" ALTER COLUMN "state" SET DEFAULT 'new'::st;`,
+  `CREATE VIEW "open_orders" AS SELECT id, state FROM orders;`,
+  `CREATE POLICY "own" ON "orders" USING ((state = 'new'::st));`,
+].join('\n')
+
+describe('parseUnits', () => {
+  it('reads each unit with its kind, object and SQL', () => {
+    const parsed = parseUnits(units(
+      ['AlterEnum', 'st', SWAP_UP],
+      ['CreateView', 'v', 'CREATE VIEW "v" AS SELECT 1;'],
+    ))
+    expect(parsed?.map(u => [u.kind, u.object])).toEqual([['AlterEnum', 'st'], ['CreateView', 'v']])
+    expect(parsed?.[0].sql).toBe(SWAP_UP)
+  })
+
+  it('is undefined for output without markers', () => {
+    expect(parseUnits('CREATE VIEW "v" AS SELECT 1;')).toBeUndefined()
+  })
+
+  it('ignores what is outside a unit, and a unit with no SQL', () => {
+    const parsed = parseUnits(`-- header\n\n${units(['DropView', 'v', ''], ['CreateView', 'w', 'CREATE VIEW "w" AS SELECT 1;'])}\n`)
+    expect(parsed?.map(u => u.object)).toEqual(['w'])
+  })
+})
+
+describe('pairUnits', () => {
+  it('pairs by kind and object, not by position', () => {
+    const up = parseUnits(units(['CreateView', 'a', 'A;'], ['AlterTableChangeColumn', 't.c', 'C;']))!
+    const down = parseUnits(units(['AlterTableChangeColumn', 't.c', 'C-down;'], ['CreateView', 'a', 'A-down;']))!
+    expect(pairUnits(up, down).map(p => p.down?.sql)).toEqual(['A-down;', 'C-down;'])
+  })
+
+  it('pairs units of the same key first with first, and leaves an UP without a DOWN alone', () => {
+    const up = parseUnits(units(['AlterRoutine', 'f(int)', 'one;'], ['AlterRoutine', 'f(int)', 'two;'], ['AlterTableColumnStorage', 't.c', 'x;']))!
+    const down = parseUnits(units(['AlterRoutine', 'f(int)', 'one-down;'], ['AlterRoutine', 'f(int)', 'two-down;']))!
+    expect(pairUnits(up, down).map(p => p.down?.sql)).toEqual(['one-down;', 'two-down;', undefined])
+  })
+})
+
+describe('sqlToIssues with units', () => {
+  it('makes an enum label swap one "Type modified" finding, in order', () => {
+    const issues = sqlToIssues({ up: units(['AlterEnum', 'st', SWAP_UP]), down: '' }, 'schema')
+    expect(issues).toHaveLength(1)
+    expect(issues[0].title).toBe('Type modified: public.st')
+    expect(issues[0].severity).toBe('warning')
+    expect(issues[0].sql?.up).toBe(SWAP_UP)
+  })
+
+  it('keeps an enum label addition titled as an alteration', () => {
+    const issues = sqlToIssues({
+      up: units(['AlterEnum', 'st', `ALTER TYPE "st" ADD VALUE IF NOT EXISTS 'a';\nALTER TYPE "st" ADD VALUE IF NOT EXISTS 'b' AFTER 'a';`]),
+      down: '',
+    }, 'schema')
+    expect(issues.map(i => i.title)).toEqual(['Type altered: public.st'])
+  })
+
+  it('names a column change by its ALTER TABLE, not the view it stands aside', () => {
+    const sql = `DROP VIEW IF EXISTS "v";\nALTER TABLE "orders" ALTER COLUMN "amount" TYPE numeric(12,2);\nCREATE VIEW "v" AS SELECT amount FROM orders;`
+    const issues = sqlToIssues({ up: units(['AlterTableChangeColumn', 'orders.amount', sql]), down: '' }, 'schema')
+    expect(issues).toHaveLength(1)
+    expect(issues[0].title).toBe('Table altered: public.orders')
+  })
+
+  it('takes each finding\'s DOWN from the same change', () => {
+    const issues = sqlToIssues({
+      up: units(['CreateView', 'a', 'CREATE VIEW "a" AS SELECT 1;'], ['CreateView', 'b', 'CREATE VIEW "b" AS SELECT 2;']),
+      down: units(['CreateView', 'b', 'DROP VIEW IF EXISTS "b";'], ['CreateView', 'a', 'DROP VIEW IF EXISTS "a";']),
+    }, 'schema')
+    expect(issues.map(i => i.sql?.down)).toEqual(['DROP VIEW IF EXISTS "a";', 'DROP VIEW IF EXISTS "b";'])
+  })
+
+  it('names a replaced policy or routine as modified', () => {
+    const issues = sqlToIssues({
+      up: units(
+        ['AlterPolicy', 'orders.own', `DROP POLICY IF EXISTS "own" ON "orders";\nCREATE POLICY "own" ON "orders" USING (true);`],
+        ['AlterRoutine', 'f(integer)', `DROP FUNCTION IF EXISTS "f"(integer);\nCREATE OR REPLACE FUNCTION public.f(x integer) RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;`],
+      ),
+      down: '',
+    }, 'schema')
+    expect(issues.map(i => i.title)).toEqual(['Policy modified: public.orders.own', 'Function modified: public.f(integer)'])
+  })
+
+  it('drops a foreign key into an ignored schema, from either side', () => {
+    const issues = sqlToIssues({
+      up: units(
+        ['AlterTableAddConstraint', 'p.p_user_fkey', `ALTER TABLE "p" ADD CONSTRAINT "p_user_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users" ("id");`],
+        ['AlterTableDropConstraint', 'q.q_user_fkey', `ALTER TABLE "q" DROP CONSTRAINT "q_user_fkey";`],
+        ['CreateView', 'v', 'CREATE VIEW "v" AS SELECT 1;'],
+      ),
+      down: units(['AlterTableDropConstraint', 'q.q_user_fkey', `ALTER TABLE "q" ADD CONSTRAINT "q_user_fkey" FOREIGN KEY ("user_id") REFERENCES "" ("");`]),
+    }, 'schema', ['auth'])
+    expect(issues.map(i => i.title)).toEqual(['View missing: public.v'])
+  })
+})
+
+describe('buildDbDiffArgs and --units', () => {
+  const base = { sourceUrl: 'postgres://a', targetUrl: 'postgres://b', include: 'both' as const }
+
+  it('asks for units on a schema diff only', () => {
+    expect(buildDbDiffArgs({ ...base, type: 'schema' }, '/tmp/o.sql')).toContain('--units')
+    expect(buildDbDiffArgs({ ...base, type: 'data' }, '/tmp/o.sql')).not.toContain('--units')
+  })
+
+  it('leaves it out for a dbdiff that predates it', () => {
+    expect(buildDbDiffArgs({ ...base, type: 'schema', units: false }, '/tmp/o.sql')).not.toContain('--units')
+  })
+})
+
+describe('destructiveReason and re-added columns', () => {
+  it('lets through a generated column dropped and re-added in the same change', () => {
+    expect(destructiveReason(
+      `ALTER TABLE "t" DROP COLUMN "g";\nALTER TABLE "t" ADD COLUMN "g" numeric GENERATED ALWAYS AS ((a * 3)) STORED;`,
+    )).toBeUndefined()
+  })
+
+  it('still holds back a column dropped for good', () => {
+    expect(destructiveReason('ALTER TABLE "t" DROP COLUMN "g";')).toMatch(/drops a column/)
+    expect(destructiveReason(`ALTER TABLE "t" DROP COLUMN "g";\nALTER TABLE "t" ADD COLUMN "h" int;`)).toMatch(/drops a column/)
+    // Re-added before, not after, is not a re-add.
+    expect(destructiveReason(`ALTER TABLE "t" ADD COLUMN "g" int;\nALTER TABLE "t" DROP COLUMN "g";`)).toMatch(/drops a column/)
+  })
+})
+
+describe('statements after a comment', () => {
+  it('are kept rather than dropped with the comment', () => {
+    const up = `-- Removing or reordering enum labels needs the type replaced, which\n-- PostgreSQL refuses while any column still uses it.\nDROP TYPE IF EXISTS "st";\nCREATE TYPE "st" AS ENUM ('a');`
+    const issues = sqlToIssues({ up, down: '' }, 'schema')
+    expect(issues.flatMap(i => (i.sql?.up ?? '').split('\n')).filter(l => !l.startsWith('--'))).toEqual([
+      'DROP TYPE IF EXISTS "st";',
+      `CREATE TYPE "st" AS ENUM ('a');`,
+    ])
+  })
+})

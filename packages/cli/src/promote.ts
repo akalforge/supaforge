@@ -7,7 +7,7 @@ import {
   orderStatements, referencedTables,
   createdPolicies, createsOnlyPolicies,
   createdTriggers, createsOnlyTriggers,
-  sqlSkeleton, bareName,
+  sqlSkeleton, bareName, identifierMatcher,
 } from './sql-deps.js'
 import { splitSqlStatements, isCommentOnly } from './utils/sql-split.js'
 import { applyTableFilter, isFiltered, type TableFilter } from './utils/table-filter.js'
@@ -292,7 +292,7 @@ function holdBackDropsStillInUse(
     const names = parts.map(s => DROPS_SUPPORTING_OBJECT.exec(sqlSkeleton(s))?.[1])
     if (names.length === 0 || names.some(n => n === undefined)) return true
 
-    const user = kept.find(k => names.some(n => mentions(k.skeleton, bareName(n!))))
+    const user = kept.find(k => names.some(n => identifierMatcher(bareName(n!)).test(k.skeleton)))
     if (!user) return true
     skipped.push({
       check: statement.check,
@@ -302,12 +302,6 @@ function holdBackDropsStillInUse(
     })
     return false
   })
-}
-
-/** Whether SQL names an identifier, quoted or not, as a whole word. */
-function mentions(sql: string, name: string): boolean {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-  return new RegExp(`(?<![\\w$])"?${escaped}"?(?![\\w$])`, 'i').test(sql)
 }
 
 /**

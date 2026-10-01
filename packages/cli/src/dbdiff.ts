@@ -8,6 +8,7 @@ import type { DriftIssue } from './types/drift'
 import { errMsg, friendlyDbError, DiagnosticError } from './utils/error'
 import { DBDIFF_EXEC_TIMEOUT_MS, DBDIFF_MAX_BUFFER } from './constants'
 import { sqlSkeleton, policiesRemoved } from './sql-deps'
+import { escapeRegex } from './utils/strings'
 import { pairUnits, parseUnits, REPLACING_KINDS, type DbDiffUnit } from './dbdiff-units'
 
 const execFileAsync = promisify(execFile)
@@ -425,13 +426,9 @@ function columnsDroppedForGood(skeleton: string): string[] {
   const ident = String.raw`("(?:[^"]|"")+"|[\w$]+)`
   const dropped = [...skeleton.matchAll(new RegExp(String.raw`\bDROP\s+COLUMN\s+(?:IF\s+EXISTS\s+)?` + ident, 'g'))]
   return dropped
-    .filter(m => !new RegExp(String.raw`\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?` + escapeRegExp(m[1]) + String.raw`(?![\w$"])`)
+    .filter(m => !new RegExp(String.raw`\bADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?` + escapeRegex(m[1]) + String.raw`(?![\w$"])`)
       .test(skeleton.slice((m.index ?? 0) + m[0].length)))
     .map(m => m[1])
-}
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 export function parseDbDiffOutput(output: string): DbDiffResult {

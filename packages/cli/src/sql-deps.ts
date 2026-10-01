@@ -358,7 +358,8 @@ interface Node {
  * not. Built once per name rather than per comparison — a large fix set is
  * thousands of pairings.
  */
-function identifierMatcher(name: string): RegExp {
+/** Matches `name` as a whole identifier, quoted or not. */
+export function identifierMatcher(name: string): RegExp {
   return new RegExp(String.raw`(?<![\w$])"?${escapeRegex(name)}"?(?![\w$])`, 'i')
 }
 

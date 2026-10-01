@@ -1213,7 +1213,7 @@ supaforge diff                # schema + data checks active out of the box
 
 The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.
 
-**What the schema layer reaches.** `3.0.0-rc.15`, the pinned version, models
+**What the schema layer reaches.** `3.0.0-rc.16`, the pinned version, models
 composite types, domains, materialized views (and their indexes), standalone
 sequences and RLS policies — five kinds that earlier releases did not read at
 all, and therefore reported as no drift whether they matched or not. A schema
@@ -1229,7 +1229,7 @@ member, C-language ones included, which no managed-database role can run.
 Since rc.14 they are excluded via `pg_depend.deptype = 'e'`, the catalogue's own record of
 that ownership, so what is left in the report is yours.
 
-**Migrations that run (rc.15).** A column type change under a view, policy or
+**Migrations that run (rc.15, rc.16).** A column type change under a view, policy or
 trigger condition now comes as one bracket — drop what reads the column, retype
 it, put everything back with its options, grants and comments — and SupaForge
 keeps that bracket as one finding so it applies as a unit. An added enum label

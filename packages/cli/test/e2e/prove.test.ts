@@ -90,6 +90,23 @@ describeE2E('convergence proof', () => {
     expect(proof.residual).toEqual(['table public.t: comment only on the source → none'])
   }, 300_000)
 
+  // The clone used to hold only the proved schemas, so anything in them
+  // leaning on another — a key onto auth.users, a policy calling auth.uid()
+  // on Supabase — could not even be copied: `schema "auth" does not exist`.
+  it('proves a schema leaning on another one', async () => {
+    const base = `DROP SCHEMA IF EXISTS app CASCADE; CREATE SCHEMA app;
+                  CREATE TABLE app.users (id int PRIMARY KEY);
+                  CREATE FUNCTION app.uid() RETURNS int LANGUAGE sql STABLE AS 'SELECT 1';
+                  CREATE TABLE profiles (id int, user_id int REFERENCES app.users (id));
+                  ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;`
+    await h.applySql('source', base + 'CREATE POLICY own ON profiles USING (user_id = app.uid());')
+    await h.applySql('target', base)
+    const proof = await prove('CREATE POLICY own ON profiles USING (user_id = app.uid());')
+
+    expect(proof.skipped).toBeUndefined()
+    expect(proof.converged, proof.residual.join('\n')).toBe(true)
+  }, 300_000)
+
   // The three below are regressions. The fingerprint used to compare objects
   // that carry a body by name alone, so each of these pairs — genuinely
   // different schemas, in the ways most likely to matter — was reported as

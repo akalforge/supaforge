@@ -277,9 +277,15 @@ async function copyStructure(fromUrl: string, intoUrl: string, schemas: string[]
   // Prepare the copy to receive the proved schemas, and nothing else.
   await prepareClone(intoUrl, fromUrl, schemas)
 
+  // And the schemas they lean on. A Supabase table referencing auth.users, or
+  // a policy calling auth.uid(), cannot be created without them — every real
+  // project failed here with `schema "auth" does not exist`. Copied, not
+  // compared: the fingerprint covers only the proved schemas.
+  const supporting = await supportingSchemas(fromUrl, schemas)
+
   const dumpArgs = [
     fromUrl, '--schema-only', '--no-owner', '--no-privileges',
-    ...schemas.map(s => `--schema=${s}`),
+    ...[...schemas, ...supporting].map(s => `--schema=${s}`),
   ]
   const { stdout: structure } = await exec(tools.pgDump, dumpArgs, {
     maxBuffer: 256 * 1024 * 1024, timeout: 300_000,
@@ -287,7 +293,11 @@ async function copyStructure(fromUrl: string, intoUrl: string, schemas: string[]
 
   // pg_dump writes its preamble for its own version, so a newer client can
   // hand an older server a parameter that does not exist there (issue #72).
-  const { sql: replayable } = dropUnsupportedSetStatements(structure, await knownParameters(intoUrl))
+  // A supporting schema may already exist, created for an extension living in
+  // it, so its CREATE SCHEMA has to tolerate that.
+  const { sql: replayable } = dropUnsupportedSetStatements(
+    tolerateExistingSchemas(structure), await knownParameters(intoUrl),
+  )
 
   try {
     await runSql(tools.psql, intoUrl, replayable)
@@ -300,6 +310,63 @@ async function copyStructure(fromUrl: string, intoUrl: string, schemas: string[]
     // what the cause actually is.
     throw new Error(explainStructureFailure((err as Error).message, tools.clientMajor, tools.serverMajor))
   }
+}
+
+/**
+ * Schemas outside `schemas` holding something an object in them depends on —
+ * a referenced table, a called function, a column's type — followed
+ * transitively. Extension members are left out: prepareClone installs the
+ * extensions themselves.
+ */
+export async function supportingSchemas(
+  dbUrl: string, schemas: string[], queryFn: QueryFn = pgQuery,
+): Promise<string[]> {
+  const known = new Set(schemas)
+  const found: string[] = []
+  for (let from = [...schemas]; from.length > 0;) {
+    const rows = await queryFn(dbUrl, SUPPORTING_SCHEMAS_SQL(from)) as unknown as Array<{ schema: string }>
+    from = rows.map(r => r.schema).filter(s => !known.has(s))
+    for (const schema of from) {
+      known.add(schema)
+      found.push(schema)
+    }
+  }
+  return found
+}
+
+/** The namespace of any object pg_depend can name, by catalog. */
+const NAMESPACE_OF = (cls: string, oid: string) => `CASE ${cls}
+    WHEN 'pg_class'::regclass      THEN (SELECT relnamespace FROM pg_class WHERE oid = ${oid})
+    WHEN 'pg_proc'::regclass       THEN (SELECT pronamespace FROM pg_proc WHERE oid = ${oid})
+    WHEN 'pg_type'::regclass       THEN (SELECT typnamespace FROM pg_type WHERE oid = ${oid})
+    WHEN 'pg_constraint'::regclass THEN (SELECT connamespace FROM pg_constraint WHERE oid = ${oid})
+    WHEN 'pg_attrdef'::regclass    THEN (SELECT x_c.relnamespace FROM pg_attrdef x_d JOIN pg_class x_c ON x_c.oid = x_d.adrelid WHERE x_d.oid = ${oid})
+    WHEN 'pg_policy'::regclass     THEN (SELECT x_c.relnamespace FROM pg_policy x_p JOIN pg_class x_c ON x_c.oid = x_p.polrelid WHERE x_p.oid = ${oid})
+    WHEN 'pg_trigger'::regclass    THEN (SELECT x_c.relnamespace FROM pg_trigger x_t JOIN pg_class x_c ON x_c.oid = x_t.tgrelid WHERE x_t.oid = ${oid})
+    WHEN 'pg_rewrite'::regclass    THEN (SELECT x_c.relnamespace FROM pg_rewrite x_r JOIN pg_class x_c ON x_c.oid = x_r.ev_class WHERE x_r.oid = ${oid})
+  END`
+
+const SUPPORTING_SCHEMAS_SQL = (from: string[]) => `
+  SELECT DISTINCT rn.nspname AS schema
+    FROM pg_depend d
+    JOIN pg_namespace n  ON n.oid  = ${NAMESPACE_OF('d.classid', 'd.objid')}
+    JOIN pg_namespace rn ON rn.oid = ${NAMESPACE_OF('d.refclassid', 'd.refobjid')}
+   WHERE n.nspname IN (${from.map(quoteLiteral).join(', ')})
+     AND rn.nspname <> n.nspname
+     AND rn.nspname NOT IN ('pg_catalog', 'information_schema')
+     AND rn.nspname NOT LIKE 'pg\\_%'
+     AND d.deptype IN ('n', 'a')
+     AND NOT EXISTS (SELECT 1 FROM pg_depend e
+                      WHERE e.classid = d.refclassid AND e.objid = d.refobjid AND e.deptype = 'e')
+   ORDER BY 1`
+
+function quoteLiteral(value: string): string {
+  return `'${value.replace(/'/g, "''")}'`
+}
+
+/** `CREATE SCHEMA x;` lines made `IF NOT EXISTS`. */
+export function tolerateExistingSchemas(sql: string): string {
+  return sql.replace(/^CREATE SCHEMA (?!IF NOT EXISTS )/gm, 'CREATE SCHEMA IF NOT EXISTS ')
 }
 
 /**

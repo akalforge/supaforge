@@ -875,6 +875,11 @@ comes back as an equivalent but differently written `ARRAY` expression — and
 compared with the source as written, every correct migration creating such a
 CHECK, partial index or policy was refused.
 
+The clone also gets the structure of any schema the proved ones lean on — a
+table referencing `auth.users`, a policy calling `auth.uid()` — so a real
+Supabase project can be proved at all; before, those failed with `schema
+"auth" does not exist`. Only the proved schemas are compared.
+
 The clone is created on the target's own server (no extra credentials), holds
 structure only (no data is copied), and is dropped even if the proof throws. It
 receives only the schemas being compared — `public` unless you say otherwise —

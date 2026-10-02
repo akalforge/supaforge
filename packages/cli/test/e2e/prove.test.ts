@@ -6,13 +6,12 @@
  * the mock. Each case here supplies a migration whose correctness is decided by
  * PostgreSQL, not by us.
  */
-import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
+import { it, expect, beforeAll, beforeEach, afterAll } from 'vitest'
 import { PgHarness } from '../harness/PgHarness.js'
+import { describeWithContainers } from '../harness/containers.js'
 import { proveConvergence } from '../../src/prove.js'
 
-let runtimeAvailable = true
-try { PgHarness.detectRuntime() } catch { runtimeAvailable = false }
-const describeE2E = runtimeAvailable ? describe : describe.skip
+const describeE2E = describeWithContainers()
 
 describeE2E('convergence proof', () => {
   let h: PgHarness

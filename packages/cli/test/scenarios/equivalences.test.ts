@@ -6,15 +6,14 @@
  * Reporting drift here is the false positive that sends a user to "fix" two
  * environments that already match — and, applied, rewrites a correct object.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { it, expect, beforeAll, afterAll } from 'vitest'
 import { loadCorpus } from '@akalforge/pg-conformance'
 import { PgHarness } from '../harness/PgHarness.js'
+import { describeWithContainers } from '../harness/containers.js'
 import { comparisonFindings } from './runner.js'
 import { scenarioHarness, topologyLabel, gapsFor } from './topology.js'
 
-let runtimeAvailable = true
-try { PgHarness.detectRuntime() } catch { runtimeAvailable = false }
-const describeE2E = runtimeAvailable ? describe : describe.skip
+const describeE2E = describeWithContainers()
 
 const pairs = loadCorpus('equivalences').flatMap((c, i) => [
   { key: `e${i}a`, name: `${c.id} (written vs rendered)`, source: c.written, target: c.rendered },

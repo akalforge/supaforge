@@ -7,15 +7,14 @@
  *
  * Which servers it runs on, and the known gaps for them: see topology.ts.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { it, expect, beforeAll, afterAll } from 'vitest'
 import { loadCorpus } from '@akalforge/pg-conformance'
 import { PgHarness } from '../harness/PgHarness.js'
+import { describeWithContainers } from '../harness/containers.js'
 import { runScenario, type Scenario } from './runner.js'
 import { scenarioHarness, topologyLabel, gapsFor } from './topology.js'
 
-let runtimeAvailable = true
-try { PgHarness.detectRuntime() } catch { runtimeAvailable = false }
-const describeE2E = runtimeAvailable ? describe : describe.skip
+const describeE2E = describeWithContainers()
 
 const scenarios: Array<{ key: string; name: string; minPgVersion?: number; scenario: Scenario }> =
   loadCorpus('migrations').flatMap((c, i) => [

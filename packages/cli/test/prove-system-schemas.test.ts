@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { prepareClone, supportingSchemas, tolerateExistingSchemas } from '../src/prove.js'
+import { prepareClone, residualHeldBack, supportingSchemas, tolerateExistingSchemas } from '../src/prove.js'
 import type { QueryFn } from '../src/db.js'
 
 /**
@@ -127,5 +127,37 @@ describe('the schemas a proof copies besides its own', () => {
   it('lets a CREATE SCHEMA find its schema already there', () => {
     expect(tolerateExistingSchemas('CREATE SCHEMA auth;\nCREATE SCHEMA IF NOT EXISTS x;\nSELECT 1;'))
       .toBe('CREATE SCHEMA IF NOT EXISTS auth;\nCREATE SCHEMA IF NOT EXISTS x;\nSELECT 1;')
+  })
+})
+
+describe('residual the held-back fixes account for', () => {
+  const held = ['DROP TABLE IF EXISTS "legacy";', 'DROP TYPE IF EXISTS "legacy_kind";', 'ALTER TABLE "t" DROP COLUMN "old";']
+
+  it('is the objects those fixes would have dropped, left on the target', () => {
+    const r = residualHeldBack([
+      'table public.legacy: unexpected',
+      'type public.legacy_kind: unexpected',
+      'column public.t.old: unexpected',
+    ], held)
+    expect(r.unexplained).toEqual([])
+    expect(r.heldBack).toHaveLength(3)
+  })
+
+  it('leaves anything else to block the apply, even on the same objects', () => {
+    const r = residualHeldBack([
+      'table public.legacy: unexpected',
+      'column public.t.total: type numeric → integer',
+      'table public.other: unexpected',
+      'column public.t.old: not null yes → no',
+    ], held)
+    expect(r.unexplained).toEqual([
+      'column public.t.total: type numeric → integer',
+      'table public.other: unexpected',
+      'column public.t.old: not null yes → no',
+    ])
+  })
+
+  it('accounts for nothing when nothing is held back', () => {
+    expect(residualHeldBack(['table public.legacy: unexpected'], []).unexplained).toHaveLength(1)
   })
 })

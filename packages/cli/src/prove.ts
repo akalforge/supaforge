@@ -570,3 +570,37 @@ export function explainStructureFailure(
     : ''
   return `could not replay the target's structure onto the clone: ${message}${versionGap}`
 }
+
+/** `DROP <kind> [IF EXISTS] <name>` and `DROP COLUMN [IF EXISTS] <name>`, capturing the bare name. */
+const DROPPED_NAME = /\bDROP\s+(?:TABLE|VIEW|MATERIALIZED\s+VIEW|TYPE|DOMAIN|SEQUENCE|FUNCTION|PROCEDURE|INDEX|COLUMN|CONSTRAINT|POLICY|TRIGGER)\s+(?:IF\s+EXISTS\s+)?(?:(?:"[^"]+"|[\w$]+)\s*\.\s*)?("[^"]+"|[\w$]+)/gi
+
+/**
+ * Split a proof's residual into what the held-back fixes account for and
+ * what they do not.
+ *
+ * A fix held back — a destructive drop without --allow-destructive, one left
+ * out by --only — leaves its object on the target on purpose, and the proof
+ * then reported that object as `unexpected`, refusing the whole apply. A line
+ * is only accounted for when it is that shape — an object present that the
+ * source lacks — and a held-back fix drops an object of that name; anything
+ * else about the same table still blocks.
+ */
+export function residualHeldBack(
+  residual: string[],
+  heldBackSql: string[],
+): { heldBack: string[]; unexplained: string[] } {
+  const dropped = new Set<string>()
+  for (const sql of heldBackSql) {
+    for (const m of sql.matchAll(DROPPED_NAME)) dropped.add(m[1].replace(/^"|"$/g, '').toLowerCase())
+  }
+  const heldBack: string[] = []
+  const unexplained: string[] = []
+  for (const line of residual) {
+    const subject = /^[a-z ]+?\s([^\s:]+(?:\s[^\s:]+)?):\s*unexpected$/i.exec(line)?.[1]
+    const name = subject?.split(/[.\s]/).pop()?.replace(/^"|"$/g, '').toLowerCase()
+    if (name && dropped.has(name)) heldBack.push(line)
+    else unexplained.push(line)
+  }
+  return { heldBack, unexplained }
+}
+

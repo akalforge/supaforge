@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { proofScope } from '../src/prove.js'
+import { proofScope, outsideTheRun } from '../src/prove.js'
 
 const fix = (check: string, sql: string) => ({ check, issueId: `${check}-x`, sql })
 const ids = (xs: Array<{ sql: string }>) => xs.map(x => x.sql)
@@ -56,5 +56,30 @@ describe('proofScope', () => {
   it('does not take a role named inside a function body for a server-wide statement', () => {
     const body = `CREATE FUNCTION public.f() RETURNS void LANGUAGE plpgsql AS $$ BEGIN EXECUTE 'CREATE ROLE x'; END $$;`
     expect(ids(proofScope([fix('schema', body)]).replay)).toEqual([body])
+  })
+})
+
+/**
+ * Which differences a run limited to some checks is not answerable for.
+ *
+ * `diff --check=rls --prove` was refused for every table the target lacked,
+ * though the run never set out to create one.
+ */
+describe('outsideTheRun', () => {
+  it('holds everything to the schema check', () => {
+    expect(outsideTheRun('table public.extra: missing', ['schema', 'rls'])).toBe(false)
+  })
+
+  it('sets aside what no check in the run compares', () => {
+    expect(outsideTheRun('table public.extra: missing', ['rls'])).toBe(true)
+    expect(outsideTheRun('index on public.t t_x: missing', ['rls'])).toBe(true)
+  })
+
+  it('keeps what a check in the run compares', () => {
+    expect(outsideTheRun('policy on public.t p: missing', ['rls'])).toBe(false)
+    expect(outsideTheRun('table public.t: RLS enabled no → yes', ['rls'])).toBe(false)
+    expect(outsideTheRun('table public.t: RLS enabled no → yes', ['rls-coverage'])).toBe(false)
+    expect(outsideTheRun('extension pg_trgm: missing', ['extensions'])).toBe(false)
+    expect(outsideTheRun('trigger on public.t tr: missing', ['webhooks'])).toBe(false)
   })
 })

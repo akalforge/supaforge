@@ -385,6 +385,9 @@ export default class Diff extends BaseCommand {
             sourceUrl: sourceEnv.dbUrl,
             targetUrl: targetEnv.dbUrl,
             migrationSql,
+            // The checks this run compares: without the schema check, what the
+            // target already lacks elsewhere is not this migration's to fix.
+            checks: scanResult.checks.map(c => c.check),
           })
 
         if (proof.skipped) {
@@ -406,7 +409,14 @@ export default class Diff extends BaseCommand {
           this.log(`\n  ${dim('These objects would still differ after applying.')}`)
           this.exit(1)
         } else {
-          this.log(`  ${ok('Converged')} — the migration reproduces the source exactly.\n`)
+          if (proof.outOfScope?.length) {
+            this.log(`  ${ok('Converged')} on what this run compares. Outside it, and already different before:`)
+            for (const line of proof.outOfScope.slice(0, 15)) this.log(`    ${dim(line)}`)
+            if (proof.outOfScope.length > 15) this.log(`    ${dim(`…and ${proof.outOfScope.length - 15} more`)}`)
+            this.log('')
+          } else {
+            this.log(`  ${ok('Converged')} — the migration reproduces the source exactly.\n`)
+          }
         }
       }
 

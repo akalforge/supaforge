@@ -482,6 +482,7 @@ describe('CLI e2e: migrate run', () => {
     expect(stdout).toContain('--env')
     expect(stdout).toContain('--dry-run')
     expect(stdout).toContain('--up-to')
+    expect(stdout).toContain('--apply')
   })
 
   it('should error without config file', async () => {

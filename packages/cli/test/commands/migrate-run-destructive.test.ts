@@ -1,11 +1,10 @@
 import { describe, it, expect } from 'vitest'
-import { findDestructiveStatements } from '../../src/commands/migrate/run.js'
+import { findDestructiveStatements, truncateSql } from '../../src/commands/migrate/run.js'
 
 /**
  * The destructive gate on `migrate run` (issue #88).
  *
- * `migrate run` executes by design — it is the one family that does not take
- * `--apply` — but it also had no destructive check at all, so a migration file
+ * `migrate run` had no destructive check at all, so a migration file
  * holding `DROP TABLE` ran with no opt-in while `diff --apply` held the same
  * statement back. In the report a table with a row in it was dropped and the
  * command reported success.
@@ -110,5 +109,17 @@ $$;`,
 
   it('returns nothing for no migrations', async () => {
     expect(await findDestructiveStatements([], reader({}))).toEqual([])
+  })
+})
+
+describe('truncateSql', () => {
+  it('lists the statement, not the comments ahead of it', () => {
+    expect(truncateSql('-- Migration: x\n-- dbdiff:unit DropTable t\nDROP TABLE "t"')).toBe('DROP TABLE "t"')
+  })
+
+  it('keeps a long statement to one line of a hundred characters', () => {
+    const out = truncateSql(`DELETE FROM t WHERE id IN (${'1, '.repeat(60)}1)`)
+    expect(out).toHaveLength(100)
+    expect(out.endsWith('...')).toBe(true)
   })
 })

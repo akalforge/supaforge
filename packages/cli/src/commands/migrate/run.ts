@@ -18,6 +18,12 @@ import { errMsg } from '../../utils/error.js'
  * Reads local migration files, executes unapplied ones in order,
  * and records each in supabase_migrations.schema_migrations.
  *
+ * Previews unless given `--apply`, like every other command that writes. It
+ * used to be the one exception, executing unless given `--dry-run`, so the
+ * habit every other command teaches — run it bare to see what it would do —
+ * ran migrations against whichever environment was named. `--dry-run` is
+ * still accepted, and still previews.
+ *
  * Replaces `supabase db push` for self-hosted Supabase instances.
  */
 export default class MigrateRun extends BaseCommand {
@@ -25,8 +31,8 @@ export default class MigrateRun extends BaseCommand {
 
   static override examples = [
     '<%= config.bin %> migrate run --env=prod',
-    '<%= config.bin %> migrate run --env=prod --dry-run',
-    '<%= config.bin %> migrate run --env=prod --up-to=003',
+    '<%= config.bin %> migrate run --env=prod --apply',
+    '<%= config.bin %> migrate run --env=prod --up-to=003 --apply',
   ]
 
   static override flags = {
@@ -34,8 +40,13 @@ export default class MigrateRun extends BaseCommand {
       char: 'e',
       description: 'Target environment to run migrations against',
     }),
+    apply: Flags.boolean({
+      description: 'Execute the pending migrations (previews without it)',
+      default: false,
+      exclusive: ['dry-run'],
+    }),
     'dry-run': Flags.boolean({
-      description: 'Preview which migrations would run without executing them',
+      description: 'Preview which migrations would run (the default; kept for existing scripts)',
       default: false,
     }),
     'up-to': Flags.string({
@@ -90,29 +101,29 @@ export default class MigrateRun extends BaseCommand {
       this.log(`  ${dim('○')} ${m.filename}`)
     }
 
-    // Dry-run mode
-    if (flags['dry-run']) {
-      this.log(`\n${dim('Dry run — no changes applied.')}`)
+    // A DROP TABLE in a migration file used to run with no opt-in at all,
+    // while `diff --apply` held the same statement back (issue #88). The gate
+    // is the same one, and the same flag opens it. Listed in the preview too,
+    // so it is not first heard of when the apply refuses.
+    const destructive = flags['allow-destructive'] ? [] : await findDestructiveStatements(pending)
+    if (destructive.length > 0) {
+      this.log('')
+      this.log(warn(`${destructive.length} destructive statement(s) in the pending migrations:`))
+      for (const { filename, sql } of destructive) {
+        this.log(`  ${warn('✗')} ${filename}`)
+        this.log(`      ${dim(truncateSql(sql))}`)
+      }
+    }
+
+    if (!flags.apply) {
+      this.log(`\n${dim('Preview only — nothing was applied.')} Re-run with ${bold('--apply')} to execute`
+        + (destructive.length > 0 ? `, and ${bold('--allow-destructive')} for the statements above.` : '.'))
       return
     }
 
-    // `migrate run` executes by design — it is the one family that does not
-    // take --apply — but that made it the one path where a DROP TABLE ran with
-    // no opt-in at all, while `diff --apply` held the same statement back
-    // (issue #88). The gate is the same one, and the same flag opens it.
-    if (!flags['allow-destructive']) {
-      const destructive = await findDestructiveStatements(pending)
-      if (destructive.length > 0) {
-        this.log('')
-        this.log(warn(`${destructive.length} destructive statement(s) in the pending migrations:`))
-        for (const { filename, sql } of destructive) {
-          this.log(`  ${warn('✗')} ${filename}`)
-          this.log(`      ${dim(truncateSql(sql))}`)
-        }
-        this.log(`\n${warn('Nothing was applied.')} Re-run with ${bold('--allow-destructive')} to proceed,`)
-        this.log(`or ${bold('--dry-run')} to review the full SQL first.`)
-        this.exit(1)
-      }
+    if (destructive.length > 0) {
+      this.log(`\n${warn('Nothing was applied.')} Re-run with ${bold('--allow-destructive')} to proceed.`)
+      this.exit(1)
     }
 
     this.log('')
@@ -173,8 +184,14 @@ export async function findDestructiveStatements(
   return found
 }
 
-/** One line of SQL for a listing, whatever the statement's shape. */
-function truncateSql(sql: string): string {
-  const oneLine = sql.replace(/\s+/g, ' ').trim()
+/**
+ * One line of SQL for a listing, whatever the statement's shape.
+ *
+ * Comment lines are dropped first: the first statement of a file carries the
+ * file's header, and a generated one its unit marker, which otherwise filled
+ * the line before the statement began.
+ */
+export function truncateSql(sql: string): string {
+  const oneLine = sql.split('\n').filter(l => !/^\s*--/.test(l)).join(' ').replace(/\s+/g, ' ').trim()
   return oneLine.length > 100 ? `${oneLine.slice(0, 97)}...` : oneLine
 }

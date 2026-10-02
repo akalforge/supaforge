@@ -177,10 +177,10 @@ supaforge restore --env=local --from-snapshot=latest --force   Restore into a no
 
 supaforge migrate create --name=add_orders   Generate a migration file from schema drift
 supaforge migrate list                    List local migrations, applied and pending
-supaforge migrate run --dry-run           Preview which migrations would run
-supaforge migrate run                     Execute pending migrations
-supaforge migrate run --allow-destructive Permit migrations that drop or delete
-supaforge migrate baseline                Mark local migrations applied without running them
+supaforge migrate run                     Preview which migrations would run
+supaforge migrate run --apply             Execute pending migrations
+supaforge migrate run --apply --allow-destructive  Permit migrations that drop or delete
+supaforge migrate baseline --apply        Mark local migrations applied without running them
 
 supaforge report                          Show recent command history from the local run log
 supaforge report --send                   Choose entries to send as anonymous bug reports
@@ -189,10 +189,8 @@ supaforge mcp                             Start MCP stdio server for AI agents
 supaforge help <command>                  Help for any command, e.g. `help migrate create`
 ```
 
-> `diff`, `clone`, `restore` and `snapshot` preview by default — add `--apply`
-> to execute. The `migrate` family is the exception: `migrate run`
-> executes unless you pass `--dry-run`, and `migrate baseline` only writes
-> tracking rows, so it has no preview mode.
+> `diff`, `clone`, `restore`, `snapshot`, `migrate run` and `migrate baseline`
+> preview by default — add `--apply` to execute.
 >
 > Fixes that destroy data — dropping a table, schema or column, deleting rows,
 > truncating, or removing an RLS policy — are always reported but never applied

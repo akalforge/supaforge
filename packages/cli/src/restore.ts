@@ -16,6 +16,7 @@ import { dropUnsupportedSetStatements, knownParameters } from './prove'
 import { splitSqlStatements, isCommentOnly, isPsqlMetaCommand, stripPsqlMetaCommands } from './utils/sql-split'
 import { quoteIdent, quoteLiteral } from './utils/sql.js'
 import { sqlSkeleton, statementSubject } from './sql-deps.js'
+import { ABSENT_ON_TARGET, EXTENSION_UNAVAILABLE } from './pg-errors.js'
 import {
   replaceableSchemas, findExternalDependents, dropSchemaContents, recreateExternalDependents,
   resetRelationGrants, type ExternalDependent,
@@ -730,15 +731,6 @@ export function mentionedPlatformSchema(
     !targetSchemas.has(schema)
     && new RegExp(String.raw`(?:"${schema}"|\b${schema})\s*\.`, 'i').test(skeleton))
 }
-
-/**
- * SQLSTATEs meaning "that does not exist here": a relation, function, schema
- * or object missing.
- */
-const ABSENT_ON_TARGET = new Set(['42P01', '42883', '3F000', '42704'])
-
-/** SQLSTATEs for an extension the server does not ship. */
-const EXTENSION_UNAVAILABLE = new Set(['0A000', '58P01'])
 
 /**
  * Statements that attach to an object rather than define one: a grant, a

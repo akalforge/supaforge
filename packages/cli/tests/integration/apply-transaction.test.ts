@@ -132,6 +132,41 @@ describe('integration: --apply ordering and atomicity', () => {
     expect(await exists('function', 'touch_updated')).toBe(false)
   })
 
+  // A fix needing something the target cannot have — here a type from an
+  // extension it lacks, and the index on that column — used to roll back
+  // every unrelated fix with it, so nothing was synced at all.
+  it.skipIf(skipIfNoContainers())('leaves out only the fixes whose dependency the target lacks', async () => {
+    const fixes = [
+      ...issue48Fixes(),
+      { id: 'schema-alter-8', up: `ALTER TABLE ${SCHEMA}.orders ADD COLUMN embedding sf_no_such_schema.vector(3)` },
+      { id: 'schema-create-index-9', up: `CREATE INDEX idx_orders_embedding ON ${SCHEMA}.orders (embedding)` },
+    ]
+
+    const result = await promote({ dbUrl: TARGET_URL!, scanResult: makeScanResult(fixes) })
+
+    expect(result.rolledBack).toBeUndefined()
+    expect(result.applied).toHaveLength(5)
+    expect(result.errors.map(e => e.issueId).sort()).toEqual(['schema-alter-8', 'schema-create-index-9'])
+    expect(result.errors[0].error).toContain('The other fixes were')
+    expect(await exists('column', 'status')).toBe(true)
+    expect(await exists('function', 'touch_updated')).toBe(true)
+    expect(await exists('column', 'embedding')).toBe(false)
+  })
+
+  it.skipIf(skipIfNoContainers())('leaves out an extension the server does not ship', async () => {
+    const fixes = [
+      { id: 'extensions-create-1', up: 'CREATE EXTENSION IF NOT EXISTS sf_no_such_extension' },
+      ...issue48Fixes(),
+    ]
+
+    const result = await promote({ dbUrl: TARGET_URL!, scanResult: makeScanResult(fixes) })
+
+    expect(result.rolledBack).toBeUndefined()
+    expect(result.applied).toHaveLength(5)
+    expect(result.errors).toHaveLength(1)
+    expect(result.errors[0].error).toContain('not available on this server')
+  })
+
   it.skipIf(skipIfNoContainers())('keeps partial progress under --no-transaction', async () => {
     await query(`CREATE TABLE ${SCHEMA}.active_orders (id int)`)
 

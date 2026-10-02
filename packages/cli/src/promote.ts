@@ -264,7 +264,10 @@ export function planWork(scanResult: ScanResult, options: PlanOptions = {}): Pla
   }
 
   plan.sqlStatements = holdBackDropsStillInUse(plan.sqlStatements, keptBack, plan.skipped, downsOf(relevant))
-  plan.sqlStatements = orderStatements(plan.sqlStatements, s => s.sql)
+  // DBDiff's fixes keep the order DBDiff wrote them in, which it took from
+  // the catalog; the others are placed around them — see orderStatements().
+  const dbdiffOrder = new Map(plan.sqlStatements.filter(s => s.check === 'schema').map((s, i) => [s, i]))
+  plan.sqlStatements = orderStatements(plan.sqlStatements, s => s.sql, s => dbdiffOrder.get(s))
   plan.sqlStatements = dropDuplicateObjectFixes(plan.sqlStatements, plan.skipped)
   return plan
 }

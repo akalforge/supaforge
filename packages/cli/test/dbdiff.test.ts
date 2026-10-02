@@ -615,6 +615,25 @@ describe('sqlToIssues — cross-schema FK filtering', () => {
     expect(issues).toHaveLength(0)
   })
 
+  it('keeps a qualified FK onto an ignored schema when the target has the table', () => {
+    // dbdiff >= 3.0.0-rc.18 qualifies the reference; auth.users exists on
+    // every Supabase project, so the key is real drift to sync.
+    const issues = sqlToIssues({
+      up: 'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users" ("id") ON DELETE CASCADE;',
+      down: 'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+    }, 'schema', ['auth', 'storage'], new Set(['users', 'auth.users']))
+    expect(issues).toHaveLength(1)
+    expect(issues[0].sql?.up).toContain('REFERENCES "auth"."users"')
+  })
+
+  it('still filters a qualified FK onto a table the target does not have', () => {
+    const issues = sqlToIssues({
+      up: 'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "auth"."users" ("id");',
+      down: 'ALTER TABLE "projects" DROP CONSTRAINT "projects_user_id_fkey";',
+    }, 'schema', ['auth'], new Set(['identities', 'auth.identities']))
+    expect(issues).toHaveLength(0)
+  })
+
   it('filters out FK with broken empty REFERENCES from dbdiff', () => {
     const issues = sqlToIssues({
       up: 'ALTER TABLE "projects" ADD CONSTRAINT "projects_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "" ("");',

@@ -63,7 +63,7 @@ export class SchemaCheck extends Check {
    * where "users" lives in the ignored "auth" schema but dbdiff omitted the
    * schema prefix (due to search_path or its own normalisation).
    *
-   * Returns a Set of lowercase table names. Fails silently so that a transient
+   * Returns a Set of lowercase table names, bare and schema-qualified. Fails silently so that a transient
    * DB error here never blocks the main schema diff.
    */
   async fetchIgnoredSchemaTables(dbUrl: string, ignoreSchemas: string[]): Promise<Set<string>> {
@@ -72,10 +72,15 @@ export class SchemaCheck extends Check {
       const placeholders = ignoreSchemas.map((_, i) => `$${i + 1}`).join(', ')
       const rows = await this.queryFn(
         dbUrl,
-        `SELECT tablename FROM pg_tables WHERE schemaname IN (${placeholders})`,
+        `SELECT schemaname, tablename FROM pg_tables WHERE schemaname IN (${placeholders})`,
         ignoreSchemas,
       )
-      return new Set(rows.map(r => String(r.tablename).toLowerCase()))
+      // Bare names catch an unqualified REFERENCES; `schema.table` lets a
+      // qualified one onto a table the target has through.
+      return new Set(rows.flatMap(r => [
+        String(r.tablename).toLowerCase(),
+        `${String(r.schemaname)}.${String(r.tablename)}`.toLowerCase(),
+      ]))
     } catch {
       // Non-fatal: return empty set and let the existing filter handle what it can
       return new Set()

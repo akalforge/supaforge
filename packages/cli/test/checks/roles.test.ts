@@ -284,10 +284,18 @@ describe('RolesCheck: the queries it runs', () => {
     // versions, not that anybody changed anything.
     const { grants } = await capturedSql()
 
-    for (const role of ['supabase_admin', 'supabase_auth_admin', 'authenticator', 'pgbouncer']) {
+    for (const role of ['supabase_admin', 'supabase_auth_admin', 'authenticator', 'pgbouncer', 'supabase_realtime_admin', 'supabase_replication_admin']) {
       expect(grants, `${role} should still be excluded`).toContain(`'${role}'`)
     }
     expect(grants).toContain("NOT LIKE 'pg_%'")
+  })
+
+  it('leaves out the role it is connected as', async () => {
+    // Each environment's credential, not the project's: reported as drift, its
+    // fix was DROP ROLE on the role the apply itself was running as.
+    const { roles } = await capturedSql()
+
+    expect(roles).toMatch(/rolname\s*<>\s*current_user/)
   })
 
   it('still ignores the Data API roles when comparing role attributes', async () => {

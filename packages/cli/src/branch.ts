@@ -9,6 +9,7 @@ import { checkPgDumpCompat } from './pg-tools'
 import { BRANCHES_FILE, PG_PIPELINE_TIMEOUT_MS, CLONE_PROGRESS_INTERVAL_MS } from './constants'
 import { CLONE_STUBS_SQL } from './stubs'
 import { quoteIdent } from './utils/sql'
+import { SUPABASE_PLATFORM_SCHEMAS } from './defaults'
 
 /** Prefix for branch database names created by SupaForge. */
 export const BRANCH_DB_PREFIX = 'supaforge_branch_'
@@ -625,9 +626,11 @@ export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<Clon
     throw err
   }
 
+  const { failures, unavailable } = restoreFailures(restoreLog)
   return {
     url: localDbUrl,
-    failures: restoreFailures(restoreLog),
+    failures,
+    unavailable,
     extensionsInstalled: extensions.installed,
   }
 }
@@ -643,6 +646,11 @@ export interface CloneResult {
    * clone said nothing.
    */
   failures: RestoreFailure[]
+  /**
+   * What this server cannot have: extensions it does not ship, the platform's
+   * own event triggers. Context rather than failures — see restoreFailures.
+   */
+  unavailable: RestoreFailure[]
   /** Extensions installed locally ahead of the restore — see installRemoteExtensions. */
   extensionsInstalled: string[]
 }
@@ -655,16 +663,29 @@ export interface RestoreFailure {
 }
 
 /**
- * The statements pg_restore reported failing, from its stderr.
+ * The statements pg_restore reported failing, from its stderr, split into
+ * what the clone lacks and what this server cannot have.
  *
  * Each failure is an `error: could not execute query: ERROR: …` line followed,
- * a few lines later, by `Command was: …`. Two kinds are left out as not being
- * failures of their own: `… already exists` (the object is there, as with
- * `public` on PostgreSQL 15+), and anything said about an extension that is
- * itself reported as not available — its comment, its absence. Each listed
- * object is something the clone does not have.
+ * a few lines later, by `Command was: …`.
+ *
+ * - `failures`: objects of the project's that are not in the clone — a table,
+ *   its rows, an index, a function. These make the clone incomplete.
+ * - `unavailable`: an extension this server does not ship, and an event trigger
+ *   of the platform's whose function lives in one of its schemas. Every
+ *   Supabase project has pg_net, pg_graphql, pgjwt, supabase_vault and the
+ *   event triggers granting access to them, none of which plain PostgreSQL can
+ *   hold. Counting them as failures made every clone of a Supabase project
+ *   "incomplete". They are context: anything of the project's that needed one
+ *   of them fails on its own account and is listed under `failures`.
+ *
+ * Left out entirely: `… already exists` (the object is there, as with `public`
+ * on PostgreSQL 15+), and the comment on an extension that is not available.
  */
-export function restoreFailures(stderr: string): RestoreFailure[] {
+export function restoreFailures(
+  stderr: string,
+  platformSchemas: readonly string[] = SUPABASE_PLATFORM_SCHEMAS,
+): { failures: RestoreFailure[]; unavailable: RestoreFailure[] } {
   const entries: Array<{ error: string; command: string }> = []
   for (const block of stderr.split(/^pg_restore: (?:error|warning): /m).slice(1)) {
     const error = /could not execute query: ERROR:\s+(.*)/.exec(block)?.[1]?.trim()
@@ -672,23 +693,33 @@ export function restoreFailures(stderr: string): RestoreFailure[] {
     if (error && command) entries.push({ error, command })
   }
 
-  const unavailable = new Set(entries
+  const notShipped = new Set(entries
     .filter(e => / is not available$/.test(e.error) && /^CREATE\s+EXTENSION\b/i.test(e.command))
     .map(e => extensionName(e.command)))
+  const inPlatformSchema = new RegExp(`\\b(?:${platformSchemas.map(escapeRegExp).join('|')})\\.`)
 
   const failures: RestoreFailure[] = []
+  const unavailable: RestoreFailure[] = []
   for (const { error, command } of entries) {
     if (/ already exists$/.test(error)) continue
     if (/^CREATE\s+EXTENSION\b/i.test(command)) {
-      failures.push({ object: `extension ${extensionName(command)}`, error })
+      const entry = { object: `extension ${extensionName(command)}`, error }
+      ;(notShipped.has(extensionName(command)) ? unavailable : failures).push(entry)
       continue
     }
     const ext = /^COMMENT\s+ON\s+EXTENSION\s+("[^"]+"|[\w$]+)/i.exec(command)?.[1]
-    if (ext && unavailable.has(ext.replace(/"/g, ''))) continue
-    failures.push({ object: summariseCommand(command), error })
+    if (ext && notShipped.has(ext.replace(/"/g, ''))) continue
+    const entry = { object: summariseCommand(command), error }
+    if (/^CREATE\s+EVENT\s+TRIGGER\b/i.test(command) && inPlatformSchema.test(error)) {
+      unavailable.push(entry)
+      continue
+    }
+    failures.push(entry)
   }
-  return failures
+  return { failures, unavailable }
 }
+
+const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 
 function extensionName(command: string): string {
   const m = /^CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?("[^"]+"|[\w$]+)/i.exec(command)

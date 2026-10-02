@@ -598,15 +598,24 @@ async function captureRoleGrants(
   const excluded = SUPABASE_PLATFORM_SCHEMAS.map(quoteLiteral).join(', ')
   try {
     const rows = await queryFn(dbUrl, `
-      SELECT grantee, table_schema, table_name, NULL::text AS column_name,
-             privilege_type, (is_grantable = 'YES') AS is_grantable
-      FROM information_schema.role_table_grants
-      WHERE grantee NOT IN (
-        'postgres','supabase_admin','authenticator','supabase_auth_admin',
-        'supabase_storage_admin','dashboard_user','pgbouncer','supavisor'
-      )
-        AND grantee NOT LIKE 'pg\\_%'
-        AND table_schema NOT IN (${excluded})
+      -- From relacl, not information_schema.role_table_grants: that view
+      -- counts the owner's own privileges as grants, which a restore then
+      -- replayed as GRANT ... TO <owner>, creating the role on the target;
+      -- and it hides grants the connecting role takes no part in.
+      SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+             n.nspname AS table_schema, c.relname AS table_name, NULL::text AS column_name,
+             a.privilege_type, a.is_grantable
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      CROSS JOIN LATERAL aclexplode(c.relacl) a
+      WHERE c.relacl IS NOT NULL AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+        AND a.grantee <> c.relowner
+        AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) NOT IN (
+          'postgres','supabase_admin','authenticator','supabase_auth_admin',
+          'supabase_storage_admin','dashboard_user','pgbouncer','supavisor'
+        ))
+        AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) NOT LIKE 'pg\\_%')
+        AND n.nspname NOT IN (${excluded})
       UNION ALL
       SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END,
              n.nspname, c.relname, att.attname, a.privilege_type, a.is_grantable

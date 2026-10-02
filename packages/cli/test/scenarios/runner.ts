@@ -16,10 +16,12 @@
  *   that converges.
  * - **Rows survive.** The scenario's `preserve` queries return the same rows
  *   on the target before and after it is migrated.
- * - **A second apply finds nothing.** The diff of the converged pair is empty.
+ * - **A second apply finds nothing**, and says so in JSON when asked to. The
+ *   diff of the converged pair, by every check, is empty.
  * - **Nothing leaks.** No command touches the servers' roles or databases.
  */
 import { diffState } from '../../src/state-diff.js'
+import { DEFAULT_IGNORE_SCHEMAS } from '../../src/defaults.js'
 import type { PromoteResult } from '../../src/promote.js'
 import { isComparisonCheck, type ScanResult } from '../../src/types/drift.js'
 import type { PgHarness, CliResult } from '../harness/PgHarness.js'
@@ -61,6 +63,19 @@ function json<T>(r: CliResult, what: string): T {
 
 const issueCount = (scan: ScanResult) => scan.checks.reduce((n, c) => n + c.issues.length, 0)
 
+/**
+ * Every schema either side holds that SupaForge compares — the same set the
+ * scan covers, not just `public`. Judged on `public` alone, a change in any
+ * other schema could fail to converge and still pass.
+ */
+async function userSchemas(h: PgHarness, src: string, tgt: string): Promise<string[]> {
+  const sql = `SELECT nspname FROM pg_namespace
+    WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema'
+      AND nspname <> ALL (ARRAY[${DEFAULT_IGNORE_SCHEMAS.map(n => `'${n}'`).join(', ')}]::text[])`
+  const list = async (role: 'source' | 'target', db: string) => (await h.sqlIn(role, db, sql)).split('\n').filter(Boolean)
+  return [...new Set([...await list('source', src), ...await list('target', tgt)])].sort()
+}
+
 async function rows(h: PgHarness, role: 'source' | 'target', db: string, queries: string[]): Promise<string[]> {
   return Promise.all(queries.map(q => h.sqlIn(role, db, q)))
 }
@@ -90,12 +105,13 @@ export async function runScenario(h: PgHarness, key: string, s: Scenario): Promi
     const rowsBefore = await rows(h, 'target', tgt, preserve)
 
     // The plan, and a dry run of it, change nothing.
+    const schemas = await userSchemas(h, src, tgt)
     const scan = await cli('--json')
     outcome.found = issueCount(json<ScanResult>(scan, 'first scan'))
-    const before = await h.stateIn('target', tgt)
+    const before = await h.stateIn('target', tgt, schemas)
     const dry = await cli('--dry-run', '--json')
     json<PromoteResult>(dry, 'dry run')
-    if (diffState(before, await h.stateIn('target', tgt)).length > 0) {
+    if (diffState(before, await h.stateIn('target', tgt, schemas)).length > 0) {
       violations.push('a dry run changed the target')
     }
 
@@ -119,7 +135,7 @@ export async function runScenario(h: PgHarness, key: string, s: Scenario): Promi
       violations.push(`--prove did not run:\n${short(all)}`)
     }
 
-    outcome.residual = diffState(await h.stateIn('source', src), await h.stateIn('target', tgt))
+    outcome.residual = diffState(await h.stateIn('source', src, schemas), await h.stateIn('target', tgt, schemas))
     if (outcome.residual.length > 0) {
       violations.push(`the target does not match the source:\n  ${outcome.residual.join('\n  ')}`)
     }
@@ -128,6 +144,15 @@ export async function runScenario(h: PgHarness, key: string, s: Scenario): Promi
     preserve.forEach((q, i) => {
       if (rowsAfter[i] !== rowsBefore[i]) violations.push(`rows changed for ${q}:\n  before: ${rowsBefore[i]}\n  after:  ${rowsAfter[i]}`)
     })
+
+    // Applying again does nothing, and --json still means JSON when there is
+    // nothing to do — that branch once printed a sentence instead.
+    if (outcome.residual.length === 0) {
+      const second = json<PromoteResult>(await cli('--apply', '--json'), 'second apply')
+      if (second.applied.length > 0) {
+        violations.push(`a second apply applied ${second.applied.map(a => a.issueId).join(', ')}`)
+      }
+    }
 
     // Every check this time, not just the schema: a converged pair must look
     // identical to all of them.

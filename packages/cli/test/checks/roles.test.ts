@@ -104,7 +104,7 @@ describe('RolesCheck', () => {
     const grant = makeGrant()
     const queryFn: QueryFn = async (dbUrl, sql) => {
       if (sql.includes('pg_roles')) return [role]
-      if (sql.includes('role_table_grants')) {
+      if (sql.includes('c.relacl')) {
         return dbUrl.includes('source') ? [grant] : []
       }
       return []
@@ -123,7 +123,7 @@ describe('RolesCheck', () => {
     const grant = makeGrant({ privilege_type: 'INSERT' })
     const queryFn: QueryFn = async (dbUrl, sql) => {
       if (sql.includes('pg_roles')) return [role]
-      if (sql.includes('role_table_grants')) {
+      if (sql.includes('c.relacl')) {
         return dbUrl.includes('target') ? [grant] : []
       }
       return []
@@ -146,7 +146,7 @@ describe('RolesCheck', () => {
     await check.scan(mockContext())
     expect(calls).toHaveLength(6)
     const roleQueries  = calls.filter(s => s.includes('pg_roles'))
-    const grantQueries = calls.filter(s => s.includes('role_table_grants'))
+    const grantQueries = calls.filter(s => s.includes('c.relacl'))
     expect(roleQueries).toHaveLength(2)
     expect(grantQueries).toHaveLength(2)
   })
@@ -266,7 +266,7 @@ describe('RolesCheck: the queries it runs', () => {
 
     return {
       roles: seen.find(s => s.includes('pg_roles')) ?? '',
-      grants: seen.find(s => s.includes('role_table_grants')) ?? '',
+      grants: seen.find(s => s.includes('c.relacl')) ?? '',
     }
   }
 
@@ -288,6 +288,16 @@ describe('RolesCheck: the queries it runs', () => {
       expect(grants, `${role} should still be excluded`).toContain(`'${role}'`)
     }
     expect(grants).toContain("NOT LIKE 'pg_%'")
+  })
+
+  // information_schema.role_table_grants counted an owner's own privileges as
+  // grants, and showed only grants the connecting role takes part in.
+  it('reads table grants from the catalog, leaving out the owner', async () => {
+    const { grants } = await capturedSql()
+
+    expect(grants).not.toContain('role_table_grants')
+    expect(grants).toContain('aclexplode(c.relacl)')
+    expect(grants).toMatch(/a\.grantee\s*<>\s*c\.relowner/)
   })
 
   it('leaves out the role it is connected as', async () => {

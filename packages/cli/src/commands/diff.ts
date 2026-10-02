@@ -345,6 +345,14 @@ export default class Diff extends BaseCommand {
       })))
 
       if (scanResult.summary.total === 0) {
+        // --json promises JSON on stdout whatever the outcome. This branch used
+        // to print the sentence below instead, so a script reading the result
+        // of an apply failed on the one run where there was nothing to do.
+        if (flags.json) {
+          const empty: PromoteResult = { applied: [], skipped: [], errors: [] }
+          this.log(JSON.stringify(empty, null, 2))
+          return
+        }
         this.log(`${ok('No drift detected.')} Nothing to apply. ✓`)
         this.log(renderTip({ command: 'diff', apply: true, driftTotal: 0 }))
         return

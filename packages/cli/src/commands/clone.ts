@@ -288,6 +288,7 @@ export default class Clone extends BaseCommand {
       if (cloned.extensionsInstalled.length > 0) {
         this.log(`      ${dim(`Installed first, in the schema the source keeps them in: ${cloned.extensionsInstalled.join(', ')}`)}`)
       }
+      for (const line of formatUnavailable(cloned.unavailable)) this.log(line)
       for (const line of formatRestoreFailures(cloned.failures)) this.log(line)
     } catch (err) {
       process.stdout.write('\n')
@@ -353,7 +354,10 @@ export default class Clone extends BaseCommand {
 
     const missing = cloned.failures.length
     if (flags.json) {
-      this.log(JSON.stringify({ snapshot: snapshot.manifest, config: newConfig, restoreFailures: cloned.failures }, null, 2))
+      this.log(JSON.stringify({
+        snapshot: snapshot.manifest, config: newConfig,
+        restoreFailures: cloned.failures, unavailable: cloned.unavailable,
+      }, null, 2))
       if (missing > 0) this.exit(1)
       return
     }
@@ -405,6 +409,22 @@ export default class Clone extends BaseCommand {
     // relying on it should not carry on as though it were.
     if (missing > 0) this.exit(1)
   }
+}
+
+/**
+ * What this server cannot have, in one line: extensions it does not ship and
+ * the platform's own event triggers. Every Supabase project has some, so they
+ * are stated rather than counted as the clone failing — see restoreFailures.
+ */
+export function formatUnavailable(items: readonly RestoreFailure[]): string[] {
+  if (items.length === 0) return []
+  const extensions = items.filter(i => i.object.startsWith('extension ')).map(i => i.object.slice('extension '.length))
+  const others = items.length - extensions.length
+  const parts = [
+    ...(extensions.length ? [`extension${extensions.length > 1 ? 's' : ''} ${extensions.join(', ')}`] : []),
+    ...(others ? [`${others} event trigger(s) of the platform's`] : []),
+  ]
+  return [`      ${dim(`Not available on this server, as expected for a Supabase project: ${parts.join('; ')}`)}`]
 }
 
 /** Shown at most, before "…and N more". */

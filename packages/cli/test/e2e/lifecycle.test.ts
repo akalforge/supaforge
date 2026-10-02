@@ -19,12 +19,10 @@ import { readdir, mkdtemp, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PgHarness } from '../harness/PgHarness.js'
+import { describeWithContainers } from '../harness/containers.js'
 import { STAGES, MUTATION_SQL } from '../harness/stages.js'
 
-let runtimeAvailable = true
-try { PgHarness.detectRuntime() } catch { runtimeAvailable = false }
-
-const describeE2E = runtimeAvailable ? describe : describe.skip
+const describeE2E = describeWithContainers()
 
 describeE2E('e2e: real-database lifecycle', () => {
   let h: PgHarness

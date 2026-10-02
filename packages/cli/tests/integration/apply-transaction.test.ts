@@ -164,7 +164,7 @@ describe('integration: --apply ordering and atomicity', () => {
     expect(result.rolledBack).toBeUndefined()
     expect(result.applied).toHaveLength(5)
     expect(result.errors).toHaveLength(1)
-    expect(result.errors[0].error).toContain('not available on this server')
+    expect(result.errors[0].error).toContain('this server does not ship it')
   })
 
   it.skipIf(skipIfNoContainers())('keeps partial progress under --no-transaction', async () => {

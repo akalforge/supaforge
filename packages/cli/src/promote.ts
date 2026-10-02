@@ -500,7 +500,7 @@ export function unmetDependency(sql: string, err: unknown): string | undefined {
   const code = sqlState(err)
   if (!code) return undefined
   if (/^\s*CREATE\s+EXTENSION\b/i.test(sqlSkeleton(sql))) {
-    return EXTENSION_UNAVAILABLE.has(code) ? 'the extension is not available on this server' : undefined
+    return EXTENSION_UNAVAILABLE.has(code) ? 'this server does not ship it' : undefined
   }
   if (ABSENT_ON_TARGET.has(code) || code === UNDEFINED_COLUMN) {
     return 'it needs something the target does not have'

@@ -131,8 +131,8 @@ describe('unmetDependency', () => {
   })
 
   it('accepts an extension the server does not ship, only for CREATE EXTENSION', () => {
-    expect(unmetDependency('CREATE EXTENSION IF NOT EXISTS vector', err('0A000'))).toContain('not available')
-    expect(unmetDependency('CREATE EXTENSION vector', err('58P01'))).toContain('not available')
+    expect(unmetDependency('CREATE EXTENSION IF NOT EXISTS vector', err('0A000'))).toContain('does not ship')
+    expect(unmetDependency('CREATE EXTENSION vector', err('58P01'))).toContain('does not ship')
     // 0A000 is "feature not supported" in general: anywhere else it is a real failure.
     expect(unmetDependency('ALTER TABLE t ALTER COLUMN c TYPE int', err('0A000'))).toBeUndefined()
   })

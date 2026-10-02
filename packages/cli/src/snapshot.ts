@@ -9,6 +9,7 @@ import { normalizeRoles } from './utils/strings'
 import type { EnvironmentConfig, SupaForgeConfig, SnapshotManifest, SnapshotLayerInfo } from './types/config'
 import { DEFAULT_IGNORE_SCHEMAS, RELATION_NOT_FOUND } from './defaults'
 import { introspectSchema } from './schema-introspect'
+import { PUBLICATION_SQL } from './checks/realtime'
 import type { SchemaSnapshot } from './schema-introspect'
 import { getServerMajorVersion, resolvePgDumpPath } from './pg-tools'
 import { errMsg } from './utils/error'
@@ -492,12 +493,7 @@ async function captureRealtime(
 ): Promise<SnapshotLayerInfo> {
   const file = 'realtime.sql'
   try {
-    const rows = await queryFn(dbUrl, `
-      SELECT p.pubname, pt.schemaname, pt.tablename
-      FROM pg_publication p
-      LEFT JOIN pg_publication_tables pt ON p.pubname = pt.pubname
-      ORDER BY p.pubname, pt.schemaname, pt.tablename
-    `) as unknown as Array<{ pubname: string; schemaname: string | null; tablename: string | null }>
+    const rows = await queryFn(dbUrl, PUBLICATION_SQL) as unknown as Array<{ pubname: string; schemaname: string | null; tablename: string | null }>
 
     // One CREATE per publication, then the tables added to it. `supabase_realtime`
     // exists on every Supabase project, so the CREATE is conditional and the

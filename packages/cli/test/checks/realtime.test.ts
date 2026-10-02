@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { RealtimeCheck } from '../../src/checks/realtime.js'
+import { RealtimeCheck, PLATFORM_PUBLICATIONS, PUBLICATION_SQL } from '../../src/checks/realtime.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { QueryFn } from '../../src/db.js'
 
@@ -191,5 +191,31 @@ describe('RealtimeCheck: the publication query', () => {
 
     expect(sql).toContain('pg_publication_tables')
     expect(sql).toContain('tablename')
+  })
+
+  // Supabase keeps a second publication of its own over the daily
+  // realtime.messages_YYYY_MM_DD partitions. The partition names roll over each
+  // day, so comparing them reported drift between any two projects (and
+  // between a project and itself a day later), and a snapshot captured them as
+  // ALTER PUBLICATION statements naming partitions the target never has.
+  it('leaves out the platform-managed messages publication', async () => {
+    const sql = await capturedSql()
+
+    expect(PLATFORM_PUBLICATIONS).toContain('supabase_realtime_messages_publication')
+    expect(sql).toContain("'supabase_realtime_messages_publication'")
+    expect(sql).toMatch(/p\.pubname\s*<>\s*ALL/)
+  })
+
+  it('leaves out member tables in schemas excluded everywhere else', async () => {
+    // The filter sits in the join, not the WHERE: a user publication whose only
+    // members are platform tables must still be reported as existing.
+    const sql = await capturedSql()
+
+    expect(sql).toMatch(/LEFT JOIN pg_publication_tables[\s\S]*pt\.schemaname\s*<>\s*ALL[\s\S]*WHERE/)
+    expect(sql).toContain("'realtime'")
+  })
+
+  it('is the same query the snapshot captures with', async () => {
+    expect(await capturedSql()).toBe(PUBLICATION_SQL)
   })
 })

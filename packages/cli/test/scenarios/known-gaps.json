@@ -6,10 +6,7 @@
     "The suite fails on any failure not listed here, and on a listed one that",
     "starts passing, so the list can only shrink."
   ],
-  "migrations": {
-    "generated_expression_changed (before → after)": "The corpus's preserve query reads the generated column, which a correct migration recomputes (4 becomes 6), so no tool can satisfy it. Fixed in @akalforge/pg-conformance by preserving id and a only.",
-    "generated_expression_changed (after → before)": "The corpus's preserve query reads the generated column, which a correct migration recomputes (4 becomes 6), so no tool can satisfy it. Fixed in @akalforge/pg-conformance by preserving id and a only."
-  },
+  "migrations": {},
   "equivalences": {},
   "topologies": {
     "pg17→pg15": {

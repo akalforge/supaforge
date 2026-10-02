@@ -49,7 +49,7 @@
     "topicSeparator": " "
   },
   "dependencies": {
-    "@akalforge/pg-conformance": "~0.0.7",
+    "@akalforge/pg-conformance": "~0.0.8",
     "@dbdiff/cli": "3.0.0-rc.18",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@oclif/core": "^4",

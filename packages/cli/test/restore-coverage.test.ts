@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os'
 import {
   previewSnapshotRestore,
   summarizeStatement,
-  grantTargetRole,
   createRoleIfMissing,
   conditionalPublicationMembership,
 } from '../src/restore.js'
+import { rolesNamedBy } from '../src/sql-deps.js'
 
 /**
  * Which of a snapshot's twelve layers a restore actually replays.
@@ -155,36 +155,67 @@ describe('previewSnapshotRestore: layer coverage', () => {
  * written: `role "anon" does not exist`, and `relation "orders" is already
  * member of publication`.
  */
-describe('grantTargetRole', () => {
+describe('rolesNamedBy', () => {
   it('names the role a grant needs', () => {
-    expect(grantTargetRole('GRANT SELECT ON "public"."orders" TO "anon";')).toBe('anon')
+    expect(rolesNamedBy('GRANT SELECT ON "public"."orders" TO "anon";')).toEqual(['anon'])
   })
 
-  it('reads an unquoted grantee', () => {
-    expect(grantTargetRole('GRANT ALL ON public.orders TO service_role;')).toBe('service_role')
+  it('reads an unquoted grantee, folded as PostgreSQL folds it', () => {
+    expect(rolesNamedBy('GRANT ALL ON public.orders TO service_role;')).toEqual(['service_role'])
+    expect(rolesNamedBy('GRANT ALL ON public.orders TO Service_Role;')).toEqual(['service_role'])
   })
 
-  it('does not try to create PUBLIC', () => {
-    // Not a role: the keyword for everyone. `CREATE ROLE public` is an error.
-    expect(grantTargetRole('GRANT SELECT ON public.orders TO PUBLIC;')).toBeUndefined()
+  it('reads every grantee, and stops before the grant options', () => {
+    expect(rolesNamedBy('GRANT SELECT ON t TO "anon", authenticated WITH GRANT OPTION;'))
+      .toEqual(['anon', 'authenticated'])
+  })
+
+  it('does not try to create PUBLIC or the current user', () => {
+    // Not roles: keywords. `CREATE ROLE public` is an error.
+    expect(rolesNamedBy('GRANT SELECT ON public.orders TO PUBLIC;')).toEqual([])
+    expect(rolesNamedBy('GRANT SELECT ON public.orders TO CURRENT_USER;')).toEqual([])
   })
 
   it('does not try to create a built-in role', () => {
     // A `pg_` role either exists already or cannot be created.
-    expect(grantTargetRole('GRANT pg_read_all_data TO app;')).toBe('app')
-    expect(grantTargetRole('GRANT SELECT ON public.orders TO pg_monitor;')).toBeUndefined()
+    expect(rolesNamedBy('GRANT pg_read_all_data TO app;')).toEqual(['app'])
+    expect(rolesNamedBy('GRANT SELECT ON public.orders TO pg_monitor;')).toEqual([])
   })
 
-  it('is undefined for anything that is not a grant', () => {
-    expect(grantTargetRole('CREATE TABLE public.t (id int);')).toBeUndefined()
-    expect(grantTargetRole('REVOKE SELECT ON public.orders FROM anon;')).toBeUndefined()
+  it('is empty for anything that names no roles', () => {
+    expect(rolesNamedBy('CREATE TABLE public.t (id int);')).toEqual([])
+    expect(rolesNamedBy('REVOKE SELECT ON public.orders FROM anon;')).toEqual([])
+    expect(rolesNamedBy('CREATE POLICY p ON t USING (true);')).toEqual([])
   })
 
   it('does not read a role name out of a function body', () => {
     // Read off the skeleton, so a literal mentioning a role is not a grantee.
-    expect(grantTargetRole(
+    expect(rolesNamedBy(
       `CREATE FUNCTION f() RETURNS text AS $$ SELECT 'GRANT SELECT ON t TO nobody' $$ LANGUAGE sql;`,
-    )).toBeUndefined()
+    )).toEqual([])
+  })
+
+  // The schema dump and the RLS layer both replay policies long before the
+  // roles layer: a policy for service_role restored into plain PostgreSQL
+  // failed on the missing role and rolled the whole restore back.
+  it('names every role a policy is for', () => {
+    expect(rolesNamedBy(
+      'CREATE POLICY auth_read ON public.notes FOR SELECT TO authenticated, service_role USING (id > 0);',
+    )).toEqual(['authenticated', 'service_role'])
+    expect(rolesNamedBy(
+      'CREATE POLICY "p" ON "public"."t" AS PERMISSIVE FOR ALL TO "service_role" USING (true) WITH CHECK (true);',
+    )).toEqual(['service_role'])
+    expect(rolesNamedBy('ALTER POLICY p ON t TO anon;')).toEqual(['anon'])
+  })
+
+  it('reads a quoted role exactly, and not one out of a policy expression', () => {
+    expect(rolesNamedBy(
+      `CREATE POLICY p ON t FOR SELECT TO "We""ird" USING (x = 'TO bob');`,
+    )).toEqual(['We"ird'])
+  })
+
+  it('does not take a policy being renamed for a role', () => {
+    expect(rolesNamedBy('ALTER POLICY p ON t RENAME TO q;')).toEqual([])
   })
 })
 

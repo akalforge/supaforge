@@ -5,7 +5,7 @@ import { scan } from '../scanner.js'
 import type { ScanProgressEvent } from '../scanner.js'
 import { renderSummary, renderDetailed, formatSkips } from '../render.js'
 import { promote, planWork, type PromoteResult } from '../promote.js'
-import type { CheckName } from '../types/drift.js'
+import type { CheckName, ScanResult } from '../types/drift.js'
 import { CHECK_NAMES, CHECK_META } from '../types/drift.js'
 import { ok, warn, dim, cmd, bold } from '../ui.js'
 import { sanitizeForReport } from '../utils/sanitize.js'
@@ -14,7 +14,7 @@ import { formatGitHubAnnotations, computeCiExitCode, formatCiSummary, type FailO
 import { resolveTableFilter, isFiltered, describeTableFilter } from '../utils/table-filter.js'
 import { parseFlagList } from '../utils/strings.js'
 import { isCloneDatabase, sourceLooksLikeCloneOf } from '../branch.js'
-import { proveConvergence } from '../prove.js'
+import { proveConvergence, residualHeldBack, proofScope } from '../prove.js'
 import { summarizeByKind } from '../scoring.js'
 import { CLONE_SKIP_FLAGS } from '../defaults.js'
 
@@ -366,24 +366,42 @@ export default class Diff extends BaseCommand {
           allowDestructive: flags['allow-destructive'], tableFilter,
           applyPosture: flags['apply-posture'],
         })
-        const migrationSql = planned.sqlStatements.map(s => s.sql).join('\n')
+        const { replay, unproved } = proofScope(planned.sqlStatements)
+        const migrationSql = replay.map(s => s.sql).join('\n')
 
         this.log(`\n  ${dim('Proving convergence on a throwaway clone…')}`)
-        const proof = await proveConvergence({
-          sourceUrl: sourceEnv.dbUrl,
-          targetUrl: targetEnv.dbUrl,
-          migrationSql,
-        })
+        if (unproved.length > 0) {
+          // Applied all the same; the proof just cannot speak for them.
+          const byCheck = [...new Set(unproved.map(s => s.check))]
+            .map(c => `${c} ×${unproved.filter(s => s.check === c).length}`).join(', ')
+          this.log(`  ${dim(`Not proved — act outside the proved schemas or on the whole server: ${byCheck}`)}`)
+        }
+        // Nothing left to replay means nothing to prove. Running it anyway
+        // compared the whole schema, and refused a cron-only apply over
+        // tables it was never going to touch.
+        const proof = replay.length === 0
+          ? { converged: false, residual: [], cloneName: '', skipped: 'none of the planned fixes is one the proof can replay' }
+          : await proveConvergence({
+            sourceUrl: sourceEnv.dbUrl,
+            targetUrl: targetEnv.dbUrl,
+            migrationSql,
+          })
 
         if (proof.skipped) {
           // Could not prove is not the same as failed to converge; say which.
           this.log(`  ${warn('Convergence not proven')}: ${proof.skipped}`)
           this.log(`  ${dim('Continuing — re-run without --prove to silence this.')}\n`)
+        } else if (!proof.converged && residualHeldBack(proof.residual, heldBackSql(scanResult, planned)).unexplained.length === 0) {
+          // Everything left over is what this run deliberately holds back.
+          this.log(`  ${ok('Converged')}, apart from what is held back and stays on the target:`)
+          for (const line of proof.residual.slice(0, 15)) this.log(`    ${dim(line)}`)
+          this.log('')
         } else if (!proof.converged) {
           this.log(`  ${warn('Migration does not reproduce the source.')} Nothing was applied.\n`)
-          for (const line of proof.residual.slice(0, 15)) this.log(`    ${line}`)
-          if (proof.residual.length > 15) {
-            this.log(`    ${dim(`…and ${proof.residual.length - 15} more`)}`)
+          const { unexplained } = residualHeldBack(proof.residual, heldBackSql(scanResult, planned))
+          for (const line of unexplained.slice(0, 15)) this.log(`    ${line}`)
+          if (unexplained.length > 15) {
+            this.log(`    ${dim(`…and ${unexplained.length - 15} more`)}`)
           }
           this.log(`\n  ${dim('These objects would still differ after applying.')}`)
           this.exit(1)
@@ -545,3 +563,12 @@ export default class Diff extends BaseCommand {
     }
   }
 }
+
+/** The SQL of the fixes this run plans to skip, which the proof did not replay. */
+function heldBackSql(scanResult: ScanResult, planned: { skipped: Array<{ issueId: string }> }): string[] {
+  const skipped = new Set(planned.skipped.map(s => s.issueId))
+  return scanResult.checks.flatMap(c => c.issues)
+    .filter(i => skipped.has(i.id) && i.sql?.up)
+    .map(i => i.sql!.up)
+}
+

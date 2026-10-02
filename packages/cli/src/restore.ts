@@ -15,7 +15,8 @@ import { DEFAULT_IGNORE_SCHEMAS, SUPABASE_PLATFORM_SCHEMAS } from './defaults'
 import { dropUnsupportedSetStatements, knownParameters } from './prove'
 import { splitSqlStatements, isCommentOnly, isPsqlMetaCommand, stripPsqlMetaCommands } from './utils/sql-split'
 import { quoteIdent, quoteLiteral } from './utils/sql.js'
-import { sqlSkeleton, statementSubject } from './sql-deps.js'
+import { sqlSkeleton, statementSubject, rolesNamedBy } from './sql-deps.js'
+import { ABSENT_ON_TARGET, EXTENSION_UNAVAILABLE } from './pg-errors.js'
 import {
   replaceableSchemas, findExternalDependents, dropSchemaContents, recreateExternalDependents,
   resetRelationGrants, type ExternalDependent,
@@ -732,15 +733,6 @@ export function mentionedPlatformSchema(
 }
 
 /**
- * SQLSTATEs meaning "that does not exist here": a relation, function, schema
- * or object missing.
- */
-const ABSENT_ON_TARGET = new Set(['42P01', '42883', '3F000', '42704'])
-
-/** SQLSTATEs for an extension the server does not ship. */
-const EXTENSION_UNAVAILABLE = new Set(['0A000', '58P01'])
-
-/**
  * Statements that attach to an object rather than define one: a grant, a
  * policy, a trigger, a view, a comment, a foreign key, publication
  * membership, a cron call. Only these may be skipped — a table or a column
@@ -814,10 +806,9 @@ async function applyStatement(
     const needed = extensionTargetSchema(sql)
     if (needed) await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(needed)}`)
 
-    // `GRANT … TO anon` needs the role to exist, and on plain PostgreSQL none
-    // of Supabase's Data API roles do.
-    const grantee = grantTargetRole(sql)
-    if (grantee) await client.query(createRoleIfMissing(grantee))
+    // `GRANT … TO anon` and `CREATE POLICY … TO service_role` need the role to
+    // exist, and on plain PostgreSQL none of Supabase's Data API roles do.
+    for (const role of rolesNamedBy(sql)) await client.query(createRoleIfMissing(role))
 
     await client.query(conditionalPublicationMembership(sql))
     if (transactional) await client.query('RELEASE SAVEPOINT sf_restore_statement')
@@ -883,27 +874,6 @@ export function extensionTargetSchema(sql: string): string | undefined {
 
   const schema = match[1].replace(/"/g, '')
   return isSystemSchema(schema) ? undefined : schema
-}
-
-/**
- * The role a `GRANT … TO x` needs creating first, if any.
- *
- * A snapshot's `roles.sql` grants to Supabase's Data API roles — `anon`,
- * `authenticated`, `service_role` — and the usual restore target is plain
- * PostgreSQL, where none of them exist. Read off the skeleton, so a role named
- * inside a function body or a string literal is not mistaken for a grantee.
- *
- * `PUBLIC` is not a role: it is the keyword for everyone, always present, and
- * `CREATE ROLE public` is an error.
- */
-export function grantTargetRole(sql: string): string | undefined {
-  const match = /^\s*GRANT\b[\s\S]*?\bTO\s+("[^"]+"|[\w$]+)/i.exec(sqlSkeleton(sql))
-  if (!match) return undefined
-
-  const role = match[1].replace(/"/g, '')
-  if (role.toLowerCase() === 'public') return undefined
-  // A `pg_` role is built in, so it either exists or cannot be created.
-  return role.startsWith('pg_') ? undefined : role
 }
 
 /**

@@ -342,11 +342,11 @@ supaforge restore --env=local --from-migrations --from=<ver> --to=<ver>  Replay 
 supaforge migrate create --name=add_orders  Generate a migration from schema drift
 supaforge migrate list                  List local migrations, applied and pending
 supaforge migrate list --offline        List without querying the target
-supaforge migrate run --dry-run         Preview which migrations would run
-supaforge migrate run                   Execute pending migrations
-supaforge migrate run --up-to=003       Stop after a given migration
-supaforge migrate run --allow-destructive  Permit migrations that drop, delete or truncate
-supaforge migrate baseline              Mark local migrations applied without running them
+supaforge migrate run                   Preview which migrations would run
+supaforge migrate run --apply           Execute pending migrations
+supaforge migrate run --apply --up-to=003  Stop after a given migration
+supaforge migrate run --apply --allow-destructive  Permit migrations that drop, delete or truncate
+supaforge migrate baseline --apply      Mark local migrations applied without running them
 
 supaforge report                        Recent command history from the local run log
 supaforge report --last=20              Show more entries
@@ -359,18 +359,15 @@ supaforge help                          The command list
 supaforge help <command>                Help for one command, e.g. `help migrate create`
 ```
 
-Two notes on the shape of that list. `migrate run` and `migrate baseline` are
-the only state-changing commands that do **not** take `--apply`: `run` executes
-unless given `--dry-run`, and `baseline` writes tracking rows only, so it has no
-preview mode. And `report` is local — it reads `~/.supaforge/run-log.jsonl` and
+A note on the shape of that list: `report` is local — it reads `~/.supaforge/run-log.jsonl` and
 prints it. Only `report --send` leaves the machine, only for the entries you
 select, and it shows exactly what would be transmitted before asking. No SQL,
 table names or schema content is ever included.
 
 ### Safe by Default
 
-Commands that modify databases preview what they would do first — the `migrate`
-family noted above being the exception. Add `--apply` to execute:
+Commands that modify databases preview what they would do first. Add `--apply`
+to execute:
 
 ```bash
 # Preview only (default)
@@ -420,7 +417,7 @@ The same gate applies to `migrate run`, which used to execute a `DROP TABLE` in
 a migration file without asking:
 
 ```bash
-supaforge migrate run --allow-destructive
+supaforge migrate run --apply --allow-destructive
 ```
 
 Dropping a view, trigger, function, index or type is not gated — those lose a

@@ -4,6 +4,7 @@ import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
 import { quoteName } from '../utils/sql'
 import { Check, type CheckContext } from './base'
+import { DEFAULT_IGNORE_SCHEMAS } from '../defaults'
 import {
   diffSchemaPolicies, schemaPolicySql, type SchemaPolicy,
 } from '../utils/schema-policies'
@@ -85,12 +86,33 @@ export class RealtimeCheck extends Check {
  * reports it as such, because both sides have it. Its table list is the whole
  * point.
  */
-const PUBLICATION_SQL = `
+/**
+ * The publication Supabase Realtime keeps for itself. Its members are
+ * `realtime.messages_YYYY_MM_DD`, daily partitions the Realtime service
+ * creates and drops on its own schedule, so two projects always differ on it
+ * and no fix can apply; a snapshot recording that day's partitions could not
+ * be restored anywhere else, and rolled the whole restore back.
+ */
+export const PLATFORM_PUBLICATIONS = ['supabase_realtime_messages_publication']
+
+/**
+ * Every publication and the tables in it — but not the platform's own
+ * publications, nor member tables in a schema the platform owns. One query for
+ * both the check and the snapshot, so the two agree on what Realtime state is.
+ */
+export const PUBLICATION_SQL = `
   SELECT p.pubname, pt.schemaname, pt.tablename
   FROM pg_publication p
-  LEFT JOIN pg_publication_tables pt ON p.pubname = pt.pubname
+  LEFT JOIN pg_publication_tables pt
+         ON p.pubname = pt.pubname
+        AND pt.schemaname <> ALL (${sqlTextArray(DEFAULT_IGNORE_SCHEMAS)})
+  WHERE p.pubname <> ALL (${sqlTextArray(PLATFORM_PUBLICATIONS)})
   ORDER BY p.pubname, pt.schemaname, pt.tablename
 `
+
+function sqlTextArray(values: string[]): string {
+  return `ARRAY[${values.map(v => `'${v.replace(/'/g, "''")}'`).join(', ')}]::text[]`
+}
 
 function pubTableKey(pub: RealtimePublication): string {
   return `${pub.pubname}.${pub.schemaname}.${pub.tablename}`

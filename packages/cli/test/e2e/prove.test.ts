@@ -230,4 +230,19 @@ describeE2E('convergence proof', () => {
       "SELECT count(*) FROM pg_database WHERE datname LIKE 'supaforge_prove_%'")
     expect(remaining).toBe('0')
   }, 300_000)
+
+  // A role is the server's, not the database's. Replaying `CREATE ROLE` in the
+  // throwaway database created it for real, and the apply's own CREATE ROLE
+  // then failed with "already exists". A migration needing a role the server
+  // lacks is now declined, and nothing is created.
+  it('does not create a role on the server to prove a policy for it', async () => {
+    await h.applySql('source', 'CREATE TABLE t (id int);')
+    const proof = await prove(
+      'CREATE TABLE t (id int); ALTER TABLE t ENABLE ROW LEVEL SECURITY; '
+      + 'CREATE POLICY p ON t TO sf_prove_absent_role USING (true);',
+    )
+
+    expect(proof.skipped).toContain('sf_prove_absent_role')
+    expect(await h.sql('target', "SELECT count(*) FROM pg_roles WHERE rolname = 'sf_prove_absent_role'")).toBe('0')
+  }, 300_000)
 })

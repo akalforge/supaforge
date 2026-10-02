@@ -2,6 +2,7 @@ import pg from 'pg'
 import { pgClientConfig } from './db.js'
 import type { ScanResult, SyncAction } from './types/drift'
 import { errMsg } from './utils/error'
+import { ABSENT_ON_TARGET, EXTENSION_UNAVAILABLE, UNDEFINED_COLUMN, sqlState } from './pg-errors.js'
 import { destructiveReason } from './dbdiff'
 import {
   orderStatements, referencedTables,
@@ -457,16 +458,24 @@ export function isEnumValueAddition(sql: string): boolean {
 }
 
 /**
- * All statements in one transaction: the first failure rolls back everything.
+ * All statements in one transaction, each fix under a savepoint of its own.
  *
- * What ran before the failure moves to `rolledBack` rather than `applied`,
- * because none of it is in the target any more.
+ * A fix that fails because the target lacks something it needs — an extension
+ * the server does not ship, the type or schema that extension would have
+ * created, a table or column an earlier such fix would have added — is undone
+ * on its own and reported as an error, and the rest still commit. One column
+ * typed `extensions.vector` on a target without pgvector used to roll back
+ * every unrelated fix in the apply, which left nothing synced at all.
  *
- * Enum label additions are the exception: they go first, in a transaction of
- * their own that commits, so the rest can use the new labels — see
- * isEnumValueAddition. They are additive and idempotent (`IF NOT EXISTS`), so
- * keeping them when the rest rolls back leaves nothing half-done; they are
- * reported as applied because they are.
+ * Every other failure still rolls back everything. What ran before it moves to
+ * `rolledBack` rather than `applied`, because none of it is in the target any
+ * more.
+ *
+ * Enum label additions go first, in a transaction of their own that commits,
+ * so the rest can use the new labels — see isEnumValueAddition. They are
+ * additive and idempotent (`IF NOT EXISTS`), so keeping them when the rest
+ * rolls back leaves nothing half-done; they are reported as applied because
+ * they are.
  */
 async function runInTransaction(
   client: pg.Client,
@@ -480,6 +489,25 @@ async function runInTransaction(
   await runBatch(client, rest, result)
 }
 
+/**
+ * Why a fix cannot apply to this target at all, or undefined when the failure
+ * is something else.
+ *
+ * Only "does not exist" failures qualify, and for `CREATE EXTENSION`, an
+ * extension the server does not ship.
+ */
+export function unmetDependency(sql: string, err: unknown): string | undefined {
+  const code = sqlState(err)
+  if (!code) return undefined
+  if (/^\s*CREATE\s+EXTENSION\b/i.test(sqlSkeleton(sql))) {
+    return EXTENSION_UNAVAILABLE.has(code) ? 'this server does not ship it' : undefined
+  }
+  if (ABSENT_ON_TARGET.has(code) || code === UNDEFINED_COLUMN) {
+    return 'it needs something the target does not have'
+  }
+  return undefined
+}
+
 /** One transaction; true when it committed. */
 async function runBatch(
   client: pg.Client,
@@ -490,20 +518,44 @@ async function runBatch(
   const done: PromoteResult['applied'] = []
   await client.query('BEGIN')
 
-  for (const stmt of statements) {
-    try {
-      await client.query(stmt.sql)
-      done.push({ check: stmt.check, issueId: stmt.issueId, sql: stmt.sql })
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => {})
-      result.errors.push({ check: stmt.check, issueId: stmt.issueId, error: errMsg(err) })
-      result.rolledBack = [...(result.rolledBack ?? []), ...done]
-      return false
+  // Fixes whose dependency is missing are tried again once the others have
+  // run, in case what they need comes later in the batch. Only the ones still
+  // failing when a pass makes no progress are left out.
+  let pending = statements
+  let unmet: Array<{ stmt: PlannedSql; err: unknown; why: string }> = []
+  while (pending.length > 0) {
+    unmet = []
+    for (const stmt of pending) {
+      await client.query('SAVEPOINT sf_fix')
+      try {
+        await client.query(stmt.sql)
+        await client.query('RELEASE SAVEPOINT sf_fix')
+        done.push({ check: stmt.check, issueId: stmt.issueId, sql: stmt.sql })
+      } catch (err) {
+        const why = unmetDependency(stmt.sql, err)
+        if (why && await client.query('ROLLBACK TO SAVEPOINT sf_fix').then(() => true, () => false)) {
+          unmet.push({ stmt, err, why })
+          continue
+        }
+        await client.query('ROLLBACK').catch(() => {})
+        result.errors.push({ check: stmt.check, issueId: stmt.issueId, error: errMsg(err) })
+        result.rolledBack = [...(result.rolledBack ?? []), ...done]
+        return false
+      }
     }
+    if (unmet.length === pending.length) break
+    pending = unmet.map(u => u.stmt)
   }
 
   await client.query('COMMIT')
   result.applied.push(...done)
+  for (const { stmt, err, why } of unmet) {
+    result.errors.push({
+      check: stmt.check,
+      issueId: stmt.issueId,
+      error: `${errMsg(err)} — not applied: ${why}. The other fixes were.`,
+    })
+  }
   return true
 }
 

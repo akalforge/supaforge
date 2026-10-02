@@ -400,6 +400,10 @@ export function destructiveReason(
   if (/(?:^|;)\s*TRUNCATE\b/.test(skeleton)) return 'deletes every row in a table'
   if (columnsDroppedForGood(skeleton).length > 0) return 'drops a column and its values'
   if (/\bDELETE\s+FROM\b/.test(skeleton)) return 'deletes rows'
+  // A role is not schema: it is who can log in. The roles check offered
+  // `DROP ROLE` for every role only the target had, including the one the
+  // apply was connected as, and nothing held it back.
+  if (/(?:^|;)\s*DROP\s+(?:ROLE|USER|GROUP)\b/.test(skeleton)) return 'drops a role, and every login and grant it holds'
 
   // A policy another fix in the same apply creates again is being replaced,
   // not removed: a column type change drops the policies reading the column

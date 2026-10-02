@@ -15,7 +15,8 @@
  * containers and workspaces up for inspection after a failure.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { readdir } from 'node:fs/promises'
+import { readdir, mkdtemp, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PgHarness } from '../harness/PgHarness.js'
 import { STAGES, MUTATION_SQL } from '../harness/stages.js'
@@ -165,6 +166,30 @@ describeE2E('e2e: real-database lifecycle', () => {
       const r = await h.cli(['migrate', 'create', '-n', 'add_referral_code'], { cwd: ws })
       expect(r.code).toBe(0)
       expect(r.stdout + r.stderr).toMatch(/referral|migration/i)
+    }, 300_000)
+
+    // `migrate run` was the one writing command that executed when run bare;
+    // every other previews until given --apply.
+    it('previews pending migrations unless given --apply', async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'sf-migrations-'))
+      await writeFile(join(dir, '20990101000000_sf_preview.sql'), 'CREATE TABLE public.sf_migrate_preview (id int);\n')
+      const mws = await h.workspace({ checks: { migrations: { dir } } })
+      const exists = async () =>
+        (await h.sql('target', "SELECT to_regclass('public.sf_migrate_preview') IS NOT NULL")) === 't'
+
+      try {
+        const preview = await h.cli(['migrate', 'run', '--env=target'], { cwd: mws })
+        expect(preview.code).toBe(0)
+        expect(preview.stdout).toMatch(/nothing was applied/i)
+        expect(await exists()).toBe(false)
+
+        const applied = await h.cli(['migrate', 'run', '--env=target', '--apply'], { cwd: mws })
+        expect(applied.code, applied.stdout + applied.stderr).toBe(0)
+        expect(await exists()).toBe(true)
+      } finally {
+        await h.applySql('target', `DROP TABLE IF EXISTS public.sf_migrate_preview;
+          DELETE FROM supabase_migrations.schema_migrations WHERE version = '20990101000000';`)
+      }
     }, 300_000)
   })
 

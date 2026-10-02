@@ -98,6 +98,20 @@ describe('destructiveReason: TRUNCATE only as a statement', () => {
   })
 })
 
+describe('destructiveReason: dropping a role', () => {
+  it('holds back DROP ROLE, DROP USER and DROP GROUP', () => {
+    expect(destructiveReason('DROP ROLE IF EXISTS "reporting";')).toMatch(/drops a role/)
+    expect(destructiveReason('DROP USER app_login;')).toMatch(/drops a role/)
+    expect(destructiveReason('DROP GROUP readers;')).toMatch(/drops a role/)
+  })
+
+  it('does not take a role being created or altered for one being dropped', () => {
+    expect(destructiveReason('CREATE ROLE "reporting" NOLOGIN;')).toBeUndefined()
+    expect(destructiveReason('ALTER ROLE "reporting" NOLOGIN;')).toBeUndefined()
+    expect(destructiveReason('REVOKE "reporting" FROM app;')).toBeUndefined()
+  })
+})
+
 describe('isEnumValueAddition', () => {
   it('recognises label additions only', () => {
     expect(isEnumValueAddition(`ALTER TYPE "st" ADD VALUE IF NOT EXISTS 'paid' AFTER 'new';`)).toBe(true)

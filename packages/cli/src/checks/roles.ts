@@ -38,6 +38,11 @@ const PLATFORM_ROLES = [
   'postgres', 'supabase_admin', 'authenticator',
   'supabase_auth_admin', 'supabase_storage_admin', 'dashboard_user',
   'pgbouncer', 'supavisor',
+  // Created by Supabase's own images for Edge Functions, Realtime, read
+  // replicas and logical replication. Diffing a project against plain
+  // PostgreSQL offered to create all four on the target.
+  'supabase_functions_admin', 'supabase_realtime_admin',
+  'supabase_read_only_user', 'supabase_replication_admin',
 ]
 
 /**
@@ -54,6 +59,15 @@ const API_ROLES = ['anon', 'authenticated', 'service_role']
 
 const quoted = (names: string[]) => names.map(n => `'${n.replace(/'/g, "''")}'`).join(', ')
 
+/**
+ * Every role but the platform's, the built-in ones, and the one this check is
+ * connected as.
+ *
+ * The connecting role is the credential each environment was given, not part
+ * of the project: two databases reached as different users reported each user
+ * as drift, and the fix for the target's was `DROP ROLE` on the very role the
+ * apply was running as.
+ */
 const ROLES_SQL = `
   SELECT
     rolname, rolsuper, rolinherit, rolcreaterole, rolcreatedb,
@@ -62,6 +76,7 @@ const ROLES_SQL = `
   FROM pg_roles
   WHERE NOT (rolname LIKE 'pg_%')
     AND rolname NOT IN (${quoted([...PLATFORM_ROLES, ...API_ROLES])})
+    AND rolname <> current_user
   ORDER BY rolname
 `
 

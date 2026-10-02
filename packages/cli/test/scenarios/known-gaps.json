@@ -1,0 +1,34 @@
+{
+  "_comment": [
+    "Scenarios that do not yet pass, keyed by test name, with why. 'migrations'",
+    "and 'equivalences' apply on every topology; 'topologies' adds gaps for one",
+    "pair of servers, named as the suite names it (pg17→pg15).",
+    "The suite fails on any failure not listed here, and on a listed one that",
+    "starts passing, so the list can only shrink."
+  ],
+  "migrations": {
+    "generated_expression_changed (before → after)": "The corpus's preserve query reads the generated column, which a correct migration recomputes (4 becomes 6), so no tool can satisfy it. Fixed in @akalforge/pg-conformance by preserving id and a only.",
+    "generated_expression_changed (after → before)": "The corpus's preserve query reads the generated column, which a correct migration recomputes (4 becomes 6), so no tool can satisfy it. Fixed in @akalforge/pg-conformance by preserving id and a only."
+  },
+  "equivalences": {},
+  "topologies": {
+    "pg17→pg15": {
+      "migrations": {
+        "enum_label_removed_under_readers (before → after)": "PostgreSQL 15 renders a view's columns table-qualified (o.id) and 16+ does not, so every view reads as changed between the two: DBDiff recreates it and the state comparison reports its definition. Needs view definitions compared independently of the server's rendering, in DBDiff and in @akalforge/pg-conformance's state query.",
+        "enum_label_removed_under_readers (after → before)": "PostgreSQL 15 renders a view's columns table-qualified (o.id) and 16+ does not, so every view reads as changed between the two: DBDiff recreates it and the state comparison reports its definition. Needs view definitions compared independently of the server's rendering, in DBDiff and in @akalforge/pg-conformance's state query.",
+        "enum_label_added_under_readers (before → after)": "PostgreSQL 15 renders a view's columns table-qualified (o.id) and 16+ does not, so every view reads as changed between the two: DBDiff recreates it and the state comparison reports its definition. Needs view definitions compared independently of the server's rendering, in DBDiff and in @akalforge/pg-conformance's state query.",
+        "enum_label_added_under_readers (after → before)": "PostgreSQL 15 renders a view's columns table-qualified (o.id) and 16+ does not, so every view reads as changed between the two: DBDiff recreates it and the state comparison reports its definition. Needs view definitions compared independently of the server's rendering, in DBDiff and in @akalforge/pg-conformance's state query.",
+        "retype_under_views_and_policies (before → after)": "PostgreSQL 15 renders a view's columns table-qualified (o.id) and 16+ does not, so every view reads as changed between the two: DBDiff recreates it and the state comparison reports its definition. Needs view definitions compared independently of the server's rendering, in DBDiff and in @akalforge/pg-conformance's state query.",
+        "retype_under_views_and_policies (after → before)": "PostgreSQL 15 renders a view's columns table-qualified (o.id) and 16+ does not, so every view reads as changed between the two: DBDiff recreates it and the state comparison reports its definition. Needs view definitions compared independently of the server's rendering, in DBDiff and in @akalforge/pg-conformance's state query.",
+        "retype_partitioned_column (before → after)": "PostgreSQL 15 renders a view's columns table-qualified (o.id) and 16+ does not, so every view reads as changed between the two: DBDiff recreates it and the state comparison reports its definition. Needs view definitions compared independently of the server's rendering, in DBDiff and in @akalforge/pg-conformance's state query.",
+        "retype_partitioned_column (after → before)": "PostgreSQL 15 renders a view's columns table-qualified (o.id) and 16+ does not, so every view reads as changed between the two: DBDiff recreates it and the state comparison reports its definition. Needs view definitions compared independently of the server's rendering, in DBDiff and in @akalforge/pg-conformance's state query.",
+        "removed_enum_used_everywhere (after → before)": "PostgreSQL 15 renders a view's columns table-qualified (o.id) and 16+ does not, so every view reads as changed between the two: DBDiff recreates it and the state comparison reports its definition. Needs view definitions compared independently of the server's rendering, in DBDiff and in @akalforge/pg-conformance's state query.",
+        "removed_table_typed_by_removed_enum (after → before)": "PostgreSQL 15 renders a view's columns table-qualified (o.id) and 16+ does not, so every view reads as changed between the two: DBDiff recreates it and the state comparison reports its definition. Needs view definitions compared independently of the server's rendering, in DBDiff and in @akalforge/pg-conformance's state query."
+      },
+      "equivalences": {
+        "in_list_on_varchar_view (written vs rendered)": "PostgreSQL 15 renders a view's columns table-qualified (o.id) and 16+ does not, so every view reads as changed between the two: DBDiff recreates it and the state comparison reports its definition. Needs view definitions compared independently of the server's rendering, in DBDiff and in @akalforge/pg-conformance's state query.",
+        "in_list_on_varchar_view (rendered vs written)": "PostgreSQL 15 renders a view's columns table-qualified (o.id) and 16+ does not, so every view reads as changed between the two: DBDiff recreates it and the state comparison reports its definition. Needs view definitions compared independently of the server's rendering, in DBDiff and in @akalforge/pg-conformance's state query."
+      }
+    }
+  }
+}

@@ -1,0 +1,74 @@
+name: Scenarios
+
+# Every schema change in @akalforge/pg-conformance's corpora, through the real
+# CLI, judged by what any correct run must do: a dry run writes nothing, an
+# apply never rolls back, --allow-destructive converges (checked against the
+# servers' own catalogs, not by asking DBDiff), --prove agrees, rows survive,
+# a second scan is empty, and no server-wide state changes.
+#
+# One job per pair of servers. Twins of each major Supabase and PostgreSQL
+# users run, and an upgrade across majors, which twins can never exercise.
+# Known gaps are listed in packages/cli/test/scenarios/known-gaps.json; the job
+# fails on any other failure, and on a listed one that starts passing.
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scenarios:
+    name: Scenarios / ${{ matrix.name }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: 'PostgreSQL 15', source: 'postgres:15-alpine', target: 'postgres:15-alpine' }
+          - { name: 'PostgreSQL 17', source: 'postgres:17-alpine', target: 'postgres:17-alpine' }
+          - { name: 'PostgreSQL 18', source: 'postgres:18-alpine', target: 'postgres:18-alpine' }
+          - { name: 'PostgreSQL 17 to 15', source: 'postgres:17-alpine', target: 'postgres:15-alpine' }
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+          cache-dependency-path: packages/cli/package-lock.json
+
+      # --prove needs a pg_dump at least as new as the server. Without one it
+      # steps aside and the job would go green having proved nothing, so the
+      # newest client is installed: it serves every older server too.
+      - name: Install PostgreSQL client 18
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client-18
+          /usr/lib/postgresql/18/bin/pg_dump --version
+
+      - name: Install dependencies
+        working-directory: packages/cli
+        run: npm ci
+
+      - name: Run scenarios
+        working-directory: packages/cli
+        env:
+          SCENARIO_SOURCE_IMAGE: docker.io/library/${{ matrix.source }}
+          SCENARIO_TARGET_IMAGE: docker.io/library/${{ matrix.target }}
+          SCENARIO_REQUIRE_PROOF: '1'
+        run: npx vitest run --config vitest.scenarios.config.ts

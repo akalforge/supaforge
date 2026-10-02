@@ -244,4 +244,36 @@ describeE2E('convergence proof', () => {
     expect(proof.skipped).toContain('sf_prove_absent_role')
     expect(await h.sql('target', "SELECT count(*) FROM pg_roles WHERE rolname = 'sf_prove_absent_role'")).toBe('0')
   }, 300_000)
+
+  // A run limited to some checks only sets out to fix those. The target's
+  // other differences were there before and are not the migration's failure.
+  it('lets a scoped run converge on what it compares, and names the rest', async () => {
+    await h.applySql('source', `CREATE TABLE t (id int); ALTER TABLE t ENABLE ROW LEVEL SECURITY;
+      CREATE POLICY p ON t USING (true); CREATE TABLE extra (id int);`)
+    await h.applySql('target', 'CREATE TABLE t (id int);')
+    const proof = await proveConvergence({
+      sourceUrl: h.connectionString('source'),
+      targetUrl: h.connectionString('target'),
+      migrationSql: 'ALTER TABLE t ENABLE ROW LEVEL SECURITY; CREATE POLICY p ON t USING (true);',
+      checks: ['rls'],
+    })
+
+    expect(proof.skipped).toBeUndefined()
+    expect(proof.converged).toBe(true)
+    expect(proof.outOfScope?.some(l => l.includes('extra'))).toBe(true)
+  }, 300_000)
+
+  it('still refuses a scoped run that does not fix what it compares', async () => {
+    await h.applySql('source', 'CREATE TABLE t (id int); CREATE POLICY p ON t USING (true);')
+    await h.applySql('target', 'CREATE TABLE t (id int);')
+    const proof = await proveConvergence({
+      sourceUrl: h.connectionString('source'),
+      targetUrl: h.connectionString('target'),
+      migrationSql: 'SELECT 1;',
+      checks: ['rls'],
+    })
+
+    expect(proof.converged).toBe(false)
+    expect(proof.residual.some(l => l.startsWith('policy on'))).toBe(true)
+  }, 300_000)
 })

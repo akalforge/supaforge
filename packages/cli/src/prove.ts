@@ -72,6 +72,12 @@ export interface ProofResult {
   cloneName: string
   /** Set when the proof could not run at all (missing pg_dump, no CREATEDB). */
   skipped?: string
+  /**
+   * For a run limited to some checks: differences the target already had,
+   * still there, and of a kind none of those checks compares — see
+   * outsideTheRun(). They do not count against convergence.
+   */
+  outOfScope?: string[]
 }
 
 /** Replace the database name in a libpq URL, keeping everything else. */
@@ -162,6 +168,12 @@ export async function proveConvergence(opts: {
   targetUrl: string
   migrationSql: string
   schemas?: string[]
+  /**
+   * The checks the run compares. Without the schema check the migration only
+   * sets out to fix part of the difference, and must not be refused for the
+   * rest — see outsideTheRun(). Omitted, the whole schema must converge.
+   */
+  checks?: readonly string[]
 }): Promise<ProofResult> {
   const schemas = opts.schemas ?? ['public']
   const suffix = randomBytes(4).toString('hex')
@@ -220,6 +232,8 @@ export async function proveConvergence(opts: {
 
     const tools = { pgDump, psql, clientMajor, serverMajor }
     await copyStructure(opts.targetUrl, cloneUrl, schemas, tools)
+    const scoped = opts.checks !== undefined && !opts.checks.includes('schema')
+    const before = scoped ? await schemaState(cloneUrl, schemas) : undefined
 
     // The migration under test.
     await runSql(psql, cloneUrl, opts.migrationSql)
@@ -249,19 +263,13 @@ export async function proveConvergence(opts: {
       if (roundTrip.ok) {
         const wantRoundTripped = await fingerprint(roundTripUrl, schemas)
         if (wantRoundTripped === got) return { converged: true, residual: [], cloneName }
-        return {
-          converged: false,
-          residual: await describeDifference(roundTripUrl, cloneUrl, schemas, wantRoundTripped, got),
-          cloneName,
-        }
+        const residual = await describeDifference(roundTripUrl, cloneUrl, schemas, wantRoundTripped, got)
+        return withinScope(residual, before && diffState(await schemaState(roundTripUrl, schemas), before), opts.checks, cloneName)
       }
     }
 
-    return {
-      converged: false,
-      residual: await describeDifference(opts.sourceUrl, cloneUrl, schemas, want, got),
-      cloneName,
-    }
+    const residual = await describeDifference(opts.sourceUrl, cloneUrl, schemas, want, got)
+    return withinScope(residual, before && diffState(await schemaState(opts.sourceUrl, schemas), before), opts.checks, cloneName)
   } finally {
     if (sourceCopyCreated && roundTripName) {
       await dropDatabase(adminUrl, roundTripName)
@@ -670,4 +678,37 @@ async function absentRoles(dbUrl: string, sql: string): Promise<string[]> {
     Array<{ rolname: string }>
   const present = new Set(rows.map(r => r.rolname))
   return named.filter(r => !present.has(r))
+}
+
+/**
+ * The verdict for what remains after the migration.
+ *
+ * Unscoped — `baseline` undefined — everything remaining is a failure to
+ * converge. Scoped, a remaining difference is set aside when the target
+ * already had it and none of the run's checks compares that kind of object:
+ * `diff --check=rls --prove` was refused for every unrelated table the target
+ * lacked, which the run never set out to create.
+ */
+function withinScope(
+  residual: string[], baseline: string[] | undefined, checks: readonly string[] | undefined, cloneName: string,
+): ProofResult {
+  if (!baseline || !checks) return { converged: residual.length === 0, residual, cloneName }
+  const had = new Set(baseline)
+  const outOfScope = residual.filter(l => had.has(l) && outsideTheRun(l, checks))
+  const remaining = residual.filter(l => !outOfScope.includes(l))
+  return { converged: remaining.length === 0, residual: remaining, outOfScope, cloneName }
+}
+
+/** Which state-diff lines each check compares, beyond the schema check's all. */
+const GOVERNED: Record<string, RegExp> = {
+  'rls': /^policy on |: RLS (?:enabled|forced) /,
+  'rls-coverage': /: RLS enabled /,
+  'extensions': /^extension /,
+  'webhooks': /^trigger on /,
+}
+
+/** A difference none of the run's checks compares. */
+export function outsideTheRun(line: string, checks: readonly string[]): boolean {
+  if (checks.includes('schema')) return false
+  return !checks.some(c => GOVERNED[c]?.test(line))
 }

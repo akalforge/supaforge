@@ -8,6 +8,7 @@ import type { EnvironmentConfig, SupaForgeConfig } from './types/config'
 import { checkPgDumpCompat } from './pg-tools'
 import { BRANCHES_FILE, PG_PIPELINE_TIMEOUT_MS, CLONE_PROGRESS_INTERVAL_MS } from './constants'
 import { CLONE_STUBS_SQL } from './stubs'
+import { quoteIdent } from './utils/sql'
 
 /** Prefix for branch database names created by SupaForge. */
 export const BRANCH_DB_PREFIX = 'supaforge_branch_'
@@ -450,9 +451,9 @@ export interface CloneRemoteOptions {
  * Unlike `createBranch` (which works on a single server), this dumps from one
  * server and restores to another — the typical remote → local workflow.
  *
- * Returns the local database URL on success.
+ * Returns the local database URL, and what pg_restore could not reproduce.
  */
-export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<string> {
+export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<CloneResult> {
   const compat = await checkPgDumpCompat(opts.remoteUrl)
   if (!compat.compatible) {
     throw new Error(compat.message)
@@ -503,6 +504,8 @@ export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<stri
     }
   }
 
+  const extensions = await installRemoteExtensions(opts.remoteUrl, localDbUrl, opts.excludeSchemas ?? [])
+
   // pg_dump from remote | pg_restore to local
   const dumpArgs = ['--format=custom', '--no-owner', '--no-acl']
   if (opts.schemaOnly) dumpArgs.push('--schema-only')
@@ -523,8 +526,9 @@ export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<stri
     `--dbname=${localDbUrl}`,
   ]
 
+  let restoreLog = ''
   try {
-    await new Promise<void>((resolve, reject) => {
+    restoreLog = await new Promise<string>((resolve, reject) => {
       const dump = spawn(compat.pgDumpPath, dumpArgs, { stdio: ['ignore', 'pipe', 'pipe'] })
       const restore = spawn(compat.pgRestorePath, restoreArgs, { stdio: ['pipe', 'pipe', 'pipe'] })
 
@@ -581,10 +585,11 @@ export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<stri
         if (dumpExit !== 0) {
           reject(new Error(`pg_dump failed (exit ${dumpExit}): ${dumpError}`))
         } else if (restoreExit !== 0 && restoreExit !== 1) {
-          // exit 1 = warnings (expected with extensions) — treat as success
           reject(new Error(`pg_restore failed (exit ${restoreExit}): ${restoreStderr}`))
         } else {
-          resolve()
+          // Exit 1 is pg_restore carrying on past statements that failed.
+          // The clone exists, but what failed is not in it: see restoreFailures.
+          resolve(restoreStderr)
         }
       }
 
@@ -620,7 +625,141 @@ export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<stri
     throw err
   }
 
-  return localDbUrl
+  return {
+    url: localDbUrl,
+    failures: restoreFailures(restoreLog),
+    extensionsInstalled: extensions.installed,
+  }
+}
+
+/** What a clone produced, and what of the source it could not reproduce. */
+export interface CloneResult {
+  /** The local database URL. */
+  url: string
+  /**
+   * Statements pg_restore could not run. pg_restore carries on past them and
+   * exits 1, which used to be read as success — so a table typed by an
+   * extension the local server lacks was simply not in the clone, and the
+   * clone said nothing.
+   */
+  failures: RestoreFailure[]
+  /** Extensions installed locally ahead of the restore — see installRemoteExtensions. */
+  extensionsInstalled: string[]
+}
+
+export interface RestoreFailure {
+  /** The statement, summarised: `CREATE TABLE public.docs`, `extension vector`. */
+  object: string
+  /** PostgreSQL's error message. */
+  error: string
+}
+
+/**
+ * The statements pg_restore reported failing, from its stderr.
+ *
+ * Each failure is an `error: could not execute query: ERROR: …` line followed,
+ * a few lines later, by `Command was: …`. Two kinds are left out as not being
+ * failures of their own: `… already exists` (the object is there, as with
+ * `public` on PostgreSQL 15+), and anything said about an extension that is
+ * itself reported as not available — its comment, its absence. Each listed
+ * object is something the clone does not have.
+ */
+export function restoreFailures(stderr: string): RestoreFailure[] {
+  const entries: Array<{ error: string; command: string }> = []
+  for (const block of stderr.split(/^pg_restore: (?:error|warning): /m).slice(1)) {
+    const error = /could not execute query: ERROR:\s+(.*)/.exec(block)?.[1]?.trim()
+    const command = /^Command was: ([\s\S]*?)(?:\n\s*\n|$)/m.exec(block)?.[1]?.trim()
+    if (error && command) entries.push({ error, command })
+  }
+
+  const unavailable = new Set(entries
+    .filter(e => / is not available$/.test(e.error) && /^CREATE\s+EXTENSION\b/i.test(e.command))
+    .map(e => extensionName(e.command)))
+
+  const failures: RestoreFailure[] = []
+  for (const { error, command } of entries) {
+    if (/ already exists$/.test(error)) continue
+    if (/^CREATE\s+EXTENSION\b/i.test(command)) {
+      failures.push({ object: `extension ${extensionName(command)}`, error })
+      continue
+    }
+    const ext = /^COMMENT\s+ON\s+EXTENSION\s+("[^"]+"|[\w$]+)/i.exec(command)?.[1]
+    if (ext && unavailable.has(ext.replace(/"/g, ''))) continue
+    failures.push({ object: summariseCommand(command), error })
+  }
+  return failures
+}
+
+function extensionName(command: string): string {
+  const m = /^CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?("[^"]+"|[\w$]+)/i.exec(command)
+  return (m?.[1] ?? '?').replace(/"/g, '')
+}
+
+/** `CREATE TABLE public.docs`, `COPY public.docs`, `ALTER TABLE ONLY public.docs`. */
+function summariseCommand(command: string): string {
+  const firstLine = command.split('\n')[0].replace(/\s*\($/, '').replace(/;$/, '')
+  if (/^COPY\s/i.test(firstLine)) return `data for ${firstLine.split(/\s+/)[1]}`
+  return firstLine.length > 100 ? `${firstLine.slice(0, 97)}…` : firstLine
+}
+
+/**
+ * Install, on the local database, the source's extensions that live in a
+ * schema the dump leaves out — Supabase puts them in `extensions`.
+ *
+ * pg_dump still emits `CREATE EXTENSION … WITH SCHEMA extensions` for them,
+ * but with the schema excluded nothing creates it, so every one failed, and so
+ * did every table with a column typed by one or a default calling one:
+ * `uuid_generate_v4()` is enough to lose a table. The schema is created only
+ * for an extension this server ships, so one that is unavailable leaves no
+ * empty schema behind to be mistaken for it being installed.
+ *
+ * Best effort: whatever cannot be installed here fails in the restore and is
+ * reported there, with the objects that needed it.
+ */
+async function installRemoteExtensions(
+  remoteUrl: string,
+  localDbUrl: string,
+  excludeSchemas: readonly string[],
+): Promise<{ installed: string[] }> {
+  const installed: string[] = []
+  if (excludeSchemas.length === 0) return { installed }
+
+  const remote = new pg.Client(pgClientConfig(remoteUrl))
+  let wanted: Array<{ extname: string; schema: string }> = []
+  try {
+    await remote.connect()
+    const { rows } = await remote.query<{ extname: string; schema: string }>(
+      `SELECT e.extname, n.nspname AS schema
+       FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace
+       WHERE n.nspname = ANY($1::text[])
+         AND n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema'
+       ORDER BY e.extname`,
+      [excludeSchemas],
+    )
+    wanted = rows
+  } catch {
+    return { installed }
+  } finally {
+    await remote.end()
+  }
+
+  const local = new pg.Client(pgClientConfig(localDbUrl))
+  try {
+    await local.connect()
+    const { rows } = await local.query<{ name: string }>('SELECT name FROM pg_available_extensions')
+    const available = new Set(rows.map(r => r.name))
+    for (const { extname, schema } of wanted) {
+      if (!available.has(extname)) continue
+      try {
+        await local.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schema)}`)
+        await local.query(`CREATE EXTENSION IF NOT EXISTS ${quoteIdent(extname)} WITH SCHEMA ${quoteIdent(schema)} CASCADE`)
+        installed.push(extname)
+      } catch { /* reported by the restore, with what needed it */ }
+    }
+  } finally {
+    await local.end()
+  }
+  return { installed }
 }
 
 /**

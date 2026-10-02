@@ -168,12 +168,13 @@ describe('integration: cloneRemoteToLocal → diff', () => {
   it.skipIf(skip)('clones the remote schema so the schema diff is empty', async () => {
     const localBaseUrl = replaceDbName(TARGET_URL!, 'postgres')
 
-    await cloneRemoteToLocal({
+    const cloned = await cloneRemoteToLocal({
       remoteUrl: SOURCE_URL!,
       localBaseUrl,
       localDbName: cloneDbName,
       schemaOnly: true,
     })
+    expect(cloned.failures, JSON.stringify(cloned.failures)).toEqual([])
 
     // The clone database now exists with the source's tables.
     const cloneUrl = replaceDbName(TARGET_URL!, cloneDbName)
@@ -200,5 +201,74 @@ describe('integration: cloneRemoteToLocal → diff', () => {
     })
     const issues = sqlToIssues(result, 'schema', ['information_schema', 'pg_catalog', 'pg_toast'])
     expect(issues).toHaveLength(0)
+  })
+})
+
+/**
+ * What a clone does with the schemas it leaves out of the dump.
+ *
+ * Supabase keeps its extensions in `extensions`, which the clone excludes.
+ * pg_dump still emits `CREATE EXTENSION … WITH SCHEMA extensions`, nothing
+ * created the schema, and pg_restore carried on past every failure with exit
+ * 1 — read as success. A table whose default called `uuid_generate_v4()` was
+ * simply missing from the clone.
+ */
+describe('integration: clone of a source using excluded schemas', () => {
+  const sourceDb = `sf_clone_src_${Date.now()}`
+  const cloneDb = `sf_clone_dst_${Date.now()}`
+  const sourceUrl = () => replaceDbName(SOURCE_URL!, sourceDb)
+
+  beforeEach(async () => {
+    if (skip) return
+    await createDb(SOURCE_URL!, sourceDb)
+    const client = new pg.Client({ connectionString: sourceUrl() })
+    await client.connect()
+    try {
+      await client.query(`
+        CREATE SCHEMA extensions;
+        CREATE EXTENSION "uuid-ossp" WITH SCHEMA extensions;
+        CREATE TABLE public.tokens (id uuid PRIMARY KEY DEFAULT extensions.uuid_generate_v4(), label text);
+        CREATE SCHEMA sf_platform;
+        CREATE DOMAIN sf_platform.positive AS int CHECK (VALUE > 0);
+        CREATE TABLE public.counters (id int PRIMARY KEY, n sf_platform.positive);
+      `)
+    } finally {
+      await client.end()
+    }
+  })
+
+  afterEach(async () => {
+    if (skip) return
+    await dropDb(TARGET_URL!, cloneDb).catch(() => {})
+    await dropDb(SOURCE_URL!, sourceDb).catch(() => {})
+  })
+
+  it.skipIf(skip)('installs the extensions first, and reports what still could not be restored', async () => {
+    const cloned = await cloneRemoteToLocal({
+      remoteUrl: sourceUrl(),
+      localBaseUrl: replaceDbName(TARGET_URL!, 'postgres'),
+      localDbName: cloneDb,
+      schemaOnly: true,
+      excludeSchemas: ['extensions', 'sf_platform'],
+    })
+
+    expect(cloned.extensionsInstalled).toEqual(['uuid-ossp'])
+
+    const client = new pg.Client({ connectionString: replaceDbName(TARGET_URL!, cloneDb) })
+    await client.connect()
+    let tables: string[]
+    try {
+      const { rows } = await client.query<{ relname: string }>(
+        `SELECT relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = 'public' AND c.relkind = 'r' ORDER BY 1`)
+      tables = rows.map(r => r.relname)
+    } finally {
+      await client.end()
+    }
+    expect(tables).toContain('tokens')
+
+    // A type from a schema the dump leaves out cannot be restored, and is said so.
+    expect(tables).not.toContain('counters')
+    expect(cloned.failures.map(f => f.object)).toContain('CREATE TABLE public.counters')
   })
 })

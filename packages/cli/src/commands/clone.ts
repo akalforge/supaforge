@@ -13,7 +13,7 @@ import {
   deleteBranch,
   addBranchToManifest,
 } from '../branch.js'
-import type { BranchMeta } from '../branch.js'
+import type { BranchMeta, CloneResult, RestoreFailure } from '../branch.js'
 import { loadConfig } from '../config.js'
 import { checkPgDumpCompat } from '../pg-tools.js'
 import { startLocalPg, DEFAULT_LOCAL_PORT, LOCAL_PG_USER, LOCAL_PG_PASSWORD } from '../local-pg.js'
@@ -268,8 +268,9 @@ export default class Clone extends BaseCommand {
     this.log(`\n  ${bold(`Cloning "${envName}" to local database "${localDbName}"...`)}\n`)
 
     this.log('    [1/4] Creating local database...')
+    let cloned: CloneResult
     try {
-      await cloneRemoteToLocal({
+      cloned = await cloneRemoteToLocal({
         remoteUrl: env.dbUrl,
         localBaseUrl,
         localDbName,
@@ -284,6 +285,10 @@ export default class Clone extends BaseCommand {
       })
       process.stdout.write('\n')
       this.log(`      ${ok('✓')} Database created: ${bold(localDbName)}`)
+      if (cloned.extensionsInstalled.length > 0) {
+        this.log(`      ${dim(`Installed first, in the schema the source keeps them in: ${cloned.extensionsInstalled.join(', ')}`)}`)
+      }
+      for (const line of formatRestoreFailures(cloned.failures)) this.log(line)
     } catch (err) {
       process.stdout.write('\n')
       const msg = errMsg(err)
@@ -346,12 +351,16 @@ export default class Clone extends BaseCommand {
     }
     await addBranchToManifest(branchMeta)
 
+    const missing = cloned.failures.length
     if (flags.json) {
-      this.log(JSON.stringify({ snapshot: snapshot.manifest, config: newConfig }, null, 2))
+      this.log(JSON.stringify({ snapshot: snapshot.manifest, config: newConfig, restoreFailures: cloned.failures }, null, 2))
+      if (missing > 0) this.exit(1)
       return
     }
 
-    this.log(`\n  ${ok('Clone complete!')}\n`)
+    this.log(missing > 0
+      ? `\n  ${warn(`Clone complete, but ${missing} statement(s) could not be restored`)} ${dim('— listed under step 1.')}\n`
+      : `\n  ${ok('Clone complete!')}\n`)
 
     // ── What was NOT cloned (Issue: set expectations before the first diff) ───
     // The pg_dump pipeline deliberately excludes Supabase-managed schemas and
@@ -392,7 +401,31 @@ export default class Clone extends BaseCommand {
     this.log(`    ${dim('A clone is vanilla PostgreSQL, so')} ${cmd(skipFlags)} ${dim('belongs on those too.')}`)
     this.log('')
     this.log(renderTip({ command: 'clone', cloneApplied: true, schemaOnly: flags['schema-only'] }))
+    // The clone is usable, but it is not a copy of the source, and a script
+    // relying on it should not carry on as though it were.
+    if (missing > 0) this.exit(1)
   }
+}
+
+/** Shown at most, before "…and N more". */
+const RESTORE_FAILURES_SHOWN = 15
+
+/**
+ * What pg_restore could not reproduce, for step 1 of the output.
+ *
+ * pg_restore exits 1 and carries on when a statement fails, which used to be
+ * read as success: the step printed a tick and the objects were simply not in
+ * the clone.
+ */
+export function formatRestoreFailures(failures: readonly RestoreFailure[]): string[] {
+  if (failures.length === 0) return []
+  const lines = [`      ${warn('⚠')} ${failures.length} statement(s) failed, so these are not in the clone:`]
+  for (const f of failures.slice(0, RESTORE_FAILURES_SHOWN)) {
+    lines.push(`        ${dim('•')} ${f.object} ${dim(`— ${f.error}`)}`)
+  }
+  const rest = failures.length - RESTORE_FAILURES_SHOWN
+  if (rest > 0) lines.push(`        ${dim(`…and ${rest} more`)}`)
+  return lines
 }
 
 /**

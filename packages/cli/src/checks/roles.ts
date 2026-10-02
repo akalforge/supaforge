@@ -94,14 +94,31 @@ function grantSchemaFilter(ignoreSchemas: string[]): string {
   return `NOT IN (${quoted(excluded)})`
 }
 
+/**
+ * Table-level grants, read from `relacl` like the column grants below.
+ *
+ * `information_schema.role_table_grants` was read instead, and it is wrong
+ * twice over for a comparison. It includes the owner's own privileges, which
+ * are not grants: a table owned by `postgres` on one side and by another user
+ * on the other reported every privilege of both owners as drift — 35 findings
+ * for a project restored into plain PostgreSQL. And it lists only grants the
+ * connecting role takes part in, so a grant between two other roles was not
+ * seen at all.
+ */
 const grantsSql = (ignoreSchemas: string[]) => `
-  SELECT grantee, table_schema, table_name, privilege_type,
-         (is_grantable = 'YES') AS is_grantable
-  FROM information_schema.role_table_grants
-  WHERE grantee NOT IN (${quoted(PLATFORM_ROLES)})
-    AND grantee NOT LIKE 'pg_%'
-    AND table_schema ${grantSchemaFilter(ignoreSchemas)}
-  ORDER BY grantee, table_schema, table_name, privilege_type
+  SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+         n.nspname AS table_schema, c.relname AS table_name,
+         a.privilege_type, a.is_grantable
+  FROM pg_class c
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  CROSS JOIN LATERAL aclexplode(c.relacl) a
+  WHERE c.relacl IS NOT NULL
+    AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    AND a.grantee <> c.relowner
+    AND n.nspname ${grantSchemaFilter(ignoreSchemas)}
+    AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) NOT IN (${quoted(PLATFORM_ROLES)}))
+    AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) NOT LIKE 'pg_%')
+  ORDER BY 1, 2, 3, 4
 `
 
 /**

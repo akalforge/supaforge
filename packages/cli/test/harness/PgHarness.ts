@@ -191,7 +191,15 @@ export class PgHarness {
     const deadline = Date.now() + this.readyTimeoutSec * 1000;
     while (Date.now() < deadline) {
       try {
-        await this.rt(['exec', this.name(role), 'pg_isready', '-U', 'postgres', '-p', String(this.port(role))]);
+        // Over TCP, not the socket. The image's entrypoint first runs a
+        // temporary server for initdb's scripts, listening on the socket only,
+        // then stops it and starts the real one. A socket probe could succeed
+        // against the temporary server, and the first query then found no
+        // socket at all ("No such file or directory").
+        await this.rt([
+          'exec', this.name(role), 'pg_isready', '-U', 'postgres',
+          '-h', '127.0.0.1', '-p', String(this.port(role)),
+        ]);
         this.log(`${role} ready`);
         return;
       } catch { await new Promise((r) => setTimeout(r, 1000)); }

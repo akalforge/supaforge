@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { prepareClone } from '../src/prove.js'
+import { prepareClone, supportingSchemas, tolerateExistingSchemas } from '../src/prove.js'
 import type { QueryFn } from '../src/db.js'
 
 /**
@@ -107,5 +107,25 @@ describe('prepareClone: extensions in system schemas', () => {
     await expect(
       prepareClone('postgres://clone', 'postgres://target', ['public'], queryFn),
     ).resolves.toBeUndefined()
+  })
+})
+
+describe('the schemas a proof copies besides its own', () => {
+  it('follows what the proved schemas lean on, transitively, once each', async () => {
+    const asked: string[][] = []
+    const queryFn: QueryFn = async (_url, sql) => {
+      const from = [...sql.matchAll(/'([a-z_]+)'/g)].map(m => m[1]).filter(s => !['pg_class', 'pg_proc', 'pg_type', 'pg_constraint', 'pg_attrdef', 'pg_policy', 'pg_trigger', 'pg_rewrite', 'pg_catalog', 'information_schema', 'n', 'a', 'e'].includes(s))
+      asked.push(from)
+      const leans: Record<string, string[]> = { public: ['auth', 'extensions'], auth: ['extensions'], extensions: [] }
+      return from.flatMap(s => leans[s] ?? []).map(schema => ({ schema })) as never
+    }
+
+    expect(await supportingSchemas('postgres://x', ['public'], queryFn)).toEqual(['auth', 'extensions'])
+    expect(asked).toEqual([['public'], ['auth', 'extensions']])
+  })
+
+  it('lets a CREATE SCHEMA find its schema already there', () => {
+    expect(tolerateExistingSchemas('CREATE SCHEMA auth;\nCREATE SCHEMA IF NOT EXISTS x;\nSELECT 1;'))
+      .toBe('CREATE SCHEMA IF NOT EXISTS auth;\nCREATE SCHEMA IF NOT EXISTS x;\nSELECT 1;')
   })
 })

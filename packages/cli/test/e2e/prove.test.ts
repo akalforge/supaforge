@@ -63,6 +63,50 @@ describeE2E('convergence proof', () => {
     expect(proof.residual.join('\n')).toMatch(/not null yes → no/)
   }, 300_000)
 
+  // A CHECK, partial index or policy with `IN (...)` on a varchar column
+  // renders one way as written and another once recreated from that
+  // rendering, which is what the migration does in the clone. Compared with
+  // the source as written, every such correct migration was refused.
+  it('accepts an IN-list CHECK and partial index recreated from their rendering', async () => {
+    const schema = `CREATE TABLE t (id int, status varchar(20), CONSTRAINT c CHECK (status IN ('draft', 'active')));
+                    CREATE INDEX t_i ON t (id) WHERE status IN ('draft', 'active');`
+    await h.applySql('source', schema)
+    const proof = await prove(
+      `CREATE TABLE t (id int, status varchar(20), CONSTRAINT c CHECK (((status)::text = ANY ((ARRAY['draft'::character varying, 'active'::character varying])::text[]))));
+       CREATE INDEX t_i ON t (id) WHERE ((status)::text = ANY ((ARRAY['draft'::character varying, 'active'::character varying])::text[]));`,
+    )
+
+    expect(proof.converged, proof.residual.join('\n')).toBe(true)
+  }, 300_000)
+
+  it('still reports a real difference beside one, and only that', async () => {
+    await h.applySql('source', `CREATE TABLE t (id int, status varchar(20), CONSTRAINT c CHECK (status IN ('draft', 'active')));
+                                COMMENT ON TABLE t IS 'only on the source';`)
+    const proof = await prove(
+      `CREATE TABLE t (id int, status varchar(20), CONSTRAINT c CHECK (((status)::text = ANY ((ARRAY['draft'::character varying, 'active'::character varying])::text[]))));`,
+    )
+
+    expect(proof.converged).toBe(false)
+    expect(proof.residual).toEqual(['table public.t: comment only on the source → none'])
+  }, 300_000)
+
+  // The clone used to hold only the proved schemas, so anything in them
+  // leaning on another — a key onto auth.users, a policy calling auth.uid()
+  // on Supabase — could not even be copied: `schema "auth" does not exist`.
+  it('proves a schema leaning on another one', async () => {
+    const base = `DROP SCHEMA IF EXISTS app CASCADE; CREATE SCHEMA app;
+                  CREATE TABLE app.users (id int PRIMARY KEY);
+                  CREATE FUNCTION app.uid() RETURNS int LANGUAGE sql STABLE AS 'SELECT 1';
+                  CREATE TABLE profiles (id int, user_id int REFERENCES app.users (id));
+                  ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;`
+    await h.applySql('source', base + 'CREATE POLICY own ON profiles USING (user_id = app.uid());')
+    await h.applySql('target', base)
+    const proof = await prove('CREATE POLICY own ON profiles USING (user_id = app.uid());')
+
+    expect(proof.skipped).toBeUndefined()
+    expect(proof.converged, proof.residual.join('\n')).toBe(true)
+  }, 300_000)
+
   // The three below are regressions. The fingerprint used to compare objects
   // that carry a body by name alone, so each of these pairs — genuinely
   // different schemas, in the ways most likely to matter — was reported as

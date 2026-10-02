@@ -563,6 +563,8 @@ function issuesFromUnits(
     const downSql = down?.sql ?? ''
     const statements = splitStatements(upSql)
     const replaced = replacedObject(up, statements)
+    const manualOnly = manualEnumChange(up)
+    const manual = manualOnly ? { manualOnly } : {}
 
     if (replaced) {
       const report = REPLACEABLE_REPORT[replaced.kind]
@@ -573,6 +575,7 @@ function issuesFromUnits(
         title: `${report.label}: ${qualifySchemaName(replaced.name)}`,
         description: `${report.what} differs between source and target.`,
         sql: { up: upSql, down: downSql },
+        ...manual,
       }
     }
 
@@ -585,8 +588,26 @@ function issuesFromUnits(
       title: summariseStatement(lead, check, downSql),
       description: `${check === 'schema' ? 'Schema' : 'Data'} difference detected by @dbdiff/cli.`,
       sql: { up: upSql, down: downSql },
+      ...manual,
     }
   })
+}
+
+/**
+ * Why an enum change cannot be applied automatically, when dbdiff says so.
+ *
+ * Removing or reordering labels moves everything using the type to a new one;
+ * what a move cannot carry — a routine taking the type, a domain over it — dbdiff
+ * names in a comment and falls back to replacing the type, which PostgreSQL
+ * refuses. Applied, that one refusal rolled back every other fix with it, so
+ * it is reported as a manual step instead, naming what is in the way.
+ */
+function manualEnumChange(unit: DbDiffUnit): string | undefined {
+  if (unit.kind !== 'AlterEnum' || !/^--.*\benum labels\b/im.test(unit.sql)) return undefined
+  const blockers = [...unit.sql.matchAll(/^--\s{3}(.+)$/gm)].map(m => m[1].trim())
+  return 'removing or reordering these enum labels needs the type replaced'
+    + (blockers.length > 0 ? `, and these use it in ways that cannot be moved automatically: ${blockers.join(', ')}` : '')
+    + '. Migrate them first, then re-run, or apply the change by hand.'
 }
 
 /**

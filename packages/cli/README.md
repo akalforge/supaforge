@@ -867,6 +867,19 @@ These objects would still differ after applying.
 The target is never touched when the proof fails — it exits 1 having applied
 nothing. On success it reports `Converged` and proceeds.
 
+When the clone and the source differ, the source is copied onto the same
+server the way the clone was and compared again, so both sides have been
+through the same dump and restore. PostgreSQL does not render every expression
+the same way twice — `status IN ('draft', 'active')` on a `varchar` column
+comes back as an equivalent but differently written `ARRAY` expression — and
+compared with the source as written, every correct migration creating such a
+CHECK, partial index or policy was refused.
+
+The clone also gets the structure of any schema the proved ones lean on — a
+table referencing `auth.users`, a policy calling `auth.uid()` — so a real
+Supabase project can be proved at all; before, those failed with `schema
+"auth" does not exist`. Only the proved schemas are compared.
+
 The clone is created on the target's own server (no extra credentials), holds
 structure only (no data is copied), and is dropped even if the proof throws. It
 receives only the schemas being compared — `public` unless you say otherwise —
@@ -1258,7 +1271,12 @@ applies whole, and its DOWN is the same change's rather than whatever sat at
 the same position. A column dropped and re-added in one change is not held
 back as destructive: it is recomputed, not lost. And when a table or column
 *is* held back, so is the drop of a type, domain, function or sequence it
-still uses — otherwise that drop failed and took the whole apply with it. With a dbdiff that predates
+still uses, and in turn what that keeps — otherwise that drop failed and took
+the whole apply with it. Functions the source no longer has are dropped after
+the defaults, constraints, indexes and tables that call them. An enum change
+dbdiff cannot carry out on its own (a function takes the type, a domain is
+built on it) is reported as a manual step naming what is in the way, rather
+than run and refused. With a dbdiff that predates
 the markers, SupaForge reads the SQL statement by statement as before.
 
 One consequence: a policy that differs is found by both the schema layer and the

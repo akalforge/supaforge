@@ -110,6 +110,32 @@ describe('sqlToIssues with units', () => {
   })
 })
 
+describe('an enum change dbdiff cannot move', () => {
+  const blocked = [
+    '-- Removing or reordering enum labels moves its users to a new type,',
+    '-- but these cannot be moved automatically:',
+    '--   function fe(st)',
+    '--   type dst',
+    '-- Migrate them first, or apply this by hand.',
+    'DROP TYPE IF EXISTS "st";',
+    `CREATE TYPE "st" AS ENUM ('new', 'shipped');`,
+  ].join('\n')
+
+  it('is a manual step naming what is in the way, with its SQL kept for review', () => {
+    const [issue] = sqlToIssues({ up: units(['AlterEnum', 'st', blocked]), down: '' }, 'schema')
+    expect(issue.manualOnly).toMatch(/cannot be moved automatically: function fe\(st\), type dst/)
+    expect(issue.sql?.up).toContain('DROP TYPE IF EXISTS "st";')
+  })
+
+  it('leaves a swap or an addition to apply as usual', () => {
+    const issues = sqlToIssues({
+      up: units(['AlterEnum', 'st', SWAP_UP], ['AlterEnum', 'e2', `ALTER TYPE "e2" ADD VALUE IF NOT EXISTS 'x';`]),
+      down: '',
+    }, 'schema')
+    expect(issues.map(i => i.manualOnly)).toEqual([undefined, undefined])
+  })
+})
+
 describe('buildDbDiffArgs and --units', () => {
   const base = { sourceUrl: 'postgres://a', targetUrl: 'postgres://b', include: 'both' as const }
 

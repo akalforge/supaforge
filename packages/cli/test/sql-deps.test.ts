@@ -385,3 +385,18 @@ describe('statementPhase: a merged replacement pair', () => {
     expect(ordered[0]).toBe(merged)
   })
 })
+
+describe('dropping a routine', () => {
+  it('waits for the defaults, constraints, indexes and tables that may call it', () => {
+    const order = orderStatements([
+      'DROP FUNCTION IF EXISTS "lim"();',
+      'ALTER TABLE "t" DROP CONSTRAINT "t_id_check";',
+      'DROP INDEX "t_l";',
+      'ALTER TABLE "t" ALTER COLUMN "x" DROP DEFAULT;',
+      'DROP TABLE IF EXISTS "t2";',
+      'DROP TYPE IF EXISTS "e";',
+    ], s => s)
+    expect(order.indexOf('DROP FUNCTION IF EXISTS "lim"();')).toBe(4)
+    expect(order[5]).toBe('DROP TYPE IF EXISTS "e";')
+  })
+})

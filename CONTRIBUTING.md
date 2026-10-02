@@ -80,6 +80,39 @@ runtime is available, so `npm test` still passes without Podman or Docker.
 harness is destructive by design, so this is what stops a mistyped config
 pointing it at a real project.
 
+### Scenario suites
+
+`test/scenarios/` runs every case in
+[`@akalforge/pg-conformance`](https://github.com/akalforge/pg-conformance)'s
+`migrations` and `equivalences` corpora through the real CLI, in both
+directions, and judges each by what any correct run must do rather than by
+findings listed for one fixture:
+
+- a dry run writes nothing, and an apply never rolls back
+- `--apply --allow-destructive` converges, checked against the servers' own
+  catalogs rather than by asking DBDiff
+- `--prove` agrees, preserved rows survive, and a second scan is empty
+- no command changes a server's roles or databases
+- the same schema written two ways produces no findings from any check
+
+```bash
+cd packages/cli
+npx vitest run --config vitest.scenarios.config.ts
+
+# a different server on each side, as in an upgrade
+SCENARIO_SOURCE_IMAGE=postgres:17-alpine SCENARIO_TARGET_IMAGE=postgres:15-alpine \
+  npx vitest run --config vitest.scenarios.config.ts
+
+# against an unreleased DBDiff, e.g. a checkout's dbdiff script
+SUPAFORGE_DBDIFF_BIN=~/src/DBDiff/dbdiff npx vitest run --config vitest.scenarios.config.ts
+```
+
+A case added to the corpus is exercised here on the next version bump, with
+no test written for it. Cases that do not pass yet are listed with the reason
+in `test/scenarios/known-gaps.json`; the suite fails on any other failure, and
+on a listed one that starts passing, so the list can only shrink. CI runs it
+on several pairs of servers (`.github/workflows/scenarios.yml`).
+
 ### Testing against a DBDiff source checkout
 
 SupaForge delegates schema comparison to [`@dbdiff/cli`](https://github.com/DBDiff/DBDiff).

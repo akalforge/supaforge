@@ -18,7 +18,7 @@
  *    connection string that isn't loopback, so a misconfigured test can't point
  *    destructive operations at a real Supabase project.
  */
-import { fingerprintSql } from '@akalforge/pg-conformance';
+import { fingerprintSql, stateSql, type SchemaState } from '@akalforge/pg-conformance';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { promisify } from 'node:util';
@@ -37,6 +37,13 @@ export interface PgHarnessOptions {
   runtime?: Runtime;
   /** Postgres image. */
   image?: string;
+  /**
+   * A different image for one side — a Supabase source and a plain target,
+   * say, or two major versions. Every other suite runs twins of `image`,
+   * which can never show what differs between servers: a role is the whole
+   * server's, an extension may exist on one side only.
+   */
+  images?: Partial<Record<Role, string>>;
   /**
    * Host ports for each role. Omit to have a free port chosen at startup, which
    * is the default: fixed ports collide when suites run in parallel, and there
@@ -68,6 +75,7 @@ export interface CliResult {
 export class PgHarness {
   readonly runtime: Runtime;
   readonly image: string;
+  private readonly images: Partial<Record<Role, string>>;
   private resolvedPorts: { source: number; target: number } | null;
   readonly password: string;
   readonly database: string;
@@ -82,6 +90,7 @@ export class PgHarness {
   constructor(opts: PgHarnessOptions = {}) {
     this.runtime = opts.runtime ?? PgHarness.detectRuntime();
     this.image = opts.image ?? 'docker.io/library/postgres:16-alpine';
+    this.images = opts.images ?? {};
     // Resolved in up() when not supplied, so each run gets its own free ports.
     this.resolvedPorts = opts.ports ?? null;
     this.password = opts.password ?? 'supaforge-test';
@@ -105,6 +114,11 @@ export class PgHarness {
 
   private log(msg: string): void {
     if (this.verbose) process.stderr.write(`[PgHarness] ${msg}\n`);
+  }
+
+  /** The image a role runs. */
+  imageFor(role: Role): string {
+    return this.images[role] ?? this.image;
   }
 
   private name(role: Role): string {
@@ -183,7 +197,7 @@ export class PgHarness {
       '-e', `POSTGRES_PASSWORD=${this.password}`,
       '-e', `PGPORT=${this.port(role)}`,
       // Test databases are disposable — trade durability for speed.
-      this.image, '-c', 'fsync=off', '-c', 'full_page_writes=off',
+      this.imageFor(role), '-c', 'fsync=off', '-c', 'full_page_writes=off',
     ]);
   }
 
@@ -250,6 +264,54 @@ export class PgHarness {
       'psql', '-U', 'postgres', '-p', String(this.port(role)), '-d', this.database,
       '-v', 'ON_ERROR_STOP=1', '-f', '-',
     ], script);
+  }
+
+  /** libpq connection string for another database on a role's server. */
+  urlFor(role: Role, database: string): string {
+    return this.connectionString(role).replace(/\/[^/]*$/, `/${database}`);
+  }
+
+  /** Create an empty database on a role's server, replacing any of that name. */
+  async createDatabase(role: Role, database: string): Promise<void> {
+    await this.sql(role, `DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+    await this.sql(role, `CREATE DATABASE "${database}"`);
+  }
+
+  async dropDatabase(role: Role, database: string): Promise<void> {
+    await this.sql(role, `DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+  }
+
+  /** Apply a multi-statement script to another database on a role's server. */
+  async applySqlIn(role: Role, database: string, script: string): Promise<void> {
+    await this.rtStdin([
+      'exec', '-i', this.name(role),
+      'psql', '-U', 'postgres', '-p', String(this.port(role)), '-d', database,
+      '-v', 'ON_ERROR_STOP=1', '-f', '-',
+    ], script);
+  }
+
+  /**
+   * A database's schemas as data, from @akalforge/pg-conformance's state query.
+   *
+   * The oracle the scenario suites judge convergence by. It is independent of
+   * DBDiff: asking DBDiff whether its own migration worked can only ever agree
+   * with it.
+   */
+  async stateIn(role: Role, database: string, schemas = ['public']): Promise<SchemaState> {
+    return JSON.parse(await this.sqlIn(role, database, stateSql(schemas).replace(/;\s*$/, ''))) as SchemaState;
+  }
+
+  /**
+   * What exists across the whole server rather than in one database: roles and
+   * databases. A command that claims to change one database — or none, for a
+   * dry run or a proof — must leave this as it found it.
+   */
+  async serverState(role: Role): Promise<{ roles: string[]; databases: string[] }> {
+    const list = async (sql: string) => (await this.sql(role, sql)).split('\n').filter(Boolean);
+    return {
+      roles: await list('SELECT rolname FROM pg_roles ORDER BY 1'),
+      databases: await list('SELECT datname FROM pg_database ORDER BY 1'),
+    };
   }
 
   /** Structural fingerprint used to assert two databases match. */

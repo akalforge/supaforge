@@ -12,7 +12,7 @@ import { loadCorpus } from '@akalforge/pg-conformance'
 import { PgHarness } from '../harness/PgHarness.js'
 import { describeWithContainers } from '../harness/containers.js'
 import { runScenario, type Scenario } from './runner.js'
-import { scenarioHarness, topologyLabel, gapsFor } from './topology.js'
+import { scenarioHarness, topologyLabel, gapsFor, judge } from './topology.js'
 
 const describeE2E = describeWithContainers()
 
@@ -61,13 +61,6 @@ describeE2E('scenarios: the migrations corpus', () => {
     if (minPgVersion && Math.min(versions.source, versions.target) < minPgVersion) return
 
     const { violations } = await runScenario(h, key, scenario)
-    const gap = gaps[name]
-    if (gap) {
-      // Recorded so the suite fails on new failures, not on a known backlog.
-      // One that starts passing must come off the list, so it cannot rot.
-      expect(violations, `${name} now passes; remove it from known-gaps.json`).not.toEqual([])
-      return
-    }
-    expect(violations, violations.join('\n\n')).toEqual([])
+    judge(name, violations, gaps[name])
   }, 600_000)
 })

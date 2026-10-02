@@ -11,7 +11,7 @@ import { loadCorpus } from '@akalforge/pg-conformance'
 import { PgHarness } from '../harness/PgHarness.js'
 import { describeWithContainers } from '../harness/containers.js'
 import { comparisonFindings } from './runner.js'
-import { scenarioHarness, topologyLabel, gapsFor } from './topology.js'
+import { scenarioHarness, topologyLabel, gapsFor, judge } from './topology.js'
 
 const describeE2E = describeWithContainers()
 
@@ -43,10 +43,6 @@ describeE2E('scenarios: the equivalences corpus', () => {
   // is matched on.
   for (const { key, name, source, target } of pairs) it.concurrent(name, async () => {
     const findings = await comparisonFindings(h, key, source, target)
-    if (gaps[name]) {
-      expect(findings, `${name} now passes; remove it from known-gaps.json`).not.toEqual([])
-      return
-    }
-    expect(findings, findings.join('\n')).toEqual([])
+    judge(name, findings, gaps[name])
   }, 600_000)
 })

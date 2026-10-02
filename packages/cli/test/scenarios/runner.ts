@@ -7,8 +7,8 @@
  * the target as it starts. The properties:
  *
  * - **A dry run writes nothing.** The target's state is unchanged.
- * - **An apply never rolls back.** Every fix either applies or is held back
- *   with a reason; none fails.
+ * - **An apply never rolls back**, nor exits with an error. Every fix either
+ *   applies or is held back with a reason; none fails.
  * - **With --allow-destructive it converges.** The target's state then equals
  *   the source's, judged by @akalforge/pg-conformance's state query — not by
  *   asking DBDiff, which could only ever agree with its own migration.
@@ -129,6 +129,11 @@ export async function runScenario(h: PgHarness, key: string, s: Scenario): Promi
     const allOut = all.stdout + all.stderr
     if (/does not reproduce the source/.test(allOut)) violations.push(`--prove refused the migration:\n${short(all)}`)
     if (/Rolled back/.test(allOut)) violations.push(`the destructive apply rolled back:\n${short(all)}`)
+    // Anything else stopping it — an error the proof hit replaying the
+    // migration, a crash — shows only as the exit code.
+    else if (all.code !== 0 && !/does not reproduce the source/.test(allOut)) {
+      violations.push(`the destructive apply exited ${all.code}:\n${short(all)}`)
+    }
     // CI installs a pg_dump for every server, so there a proof that cannot
     // find one is a broken job, not a reason to pass having proved nothing.
     if (process.env.SCENARIO_REQUIRE_PROOF && /Convergence not proven: (pg_dump|could not resolve pg_dump)/.test(allOut)) {
@@ -193,4 +198,66 @@ export async function comparisonFindings(h: PgHarness, key: string, source: stri
   } finally {
     await Promise.all([h.dropDatabase('source', src), h.dropDatabase('target', tgt)])
   }
+}
+
+export interface DataScenario {
+  id: string
+  /** Built on both sides. */
+  schema: string
+  /** The target's rows. */
+  before: string
+  /** The source's rows. */
+  after: string
+  /** Queries that must return the source's rows on the target once applied. */
+  compare: string[]
+}
+
+/**
+ * One case of the data corpus through the data check, which syncs a project's
+ * reference data. The check reads only the tables configured for it, so the
+ * case's public tables are configured. Judged by the case's compare queries:
+ * a dry run leaves the target's rows alone, an apply never rolls back, the
+ * target then returns the source's rows, and a second scan finds nothing.
+ */
+export async function runDataScenario(h: PgHarness, key: string, s: DataScenario): Promise<string[]> {
+  const src = `sc_${key}_s`
+  const tgt = `sc_${key}_t`
+  const violations: string[] = []
+  await Promise.all([h.createDatabase('source', src), h.createDatabase('target', tgt)])
+  try {
+    await Promise.all([h.applySqlIn('source', src, s.schema + s.after), h.applySqlIn('target', tgt, s.schema + s.before)])
+    const tables = (await h.sqlIn('source', src, "SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY 1"))
+      .split('\n').filter(Boolean)
+    const ws = await h.workspace({
+      environments: {
+        source: { dbUrl: h.urlFor('source', src) },
+        target: { dbUrl: h.urlFor('target', tgt) },
+      },
+      checks: { data: { tables } },
+    })
+    const cli = (...args: string[]) => h.cli(['diff', '--check=data', ...args], { cwd: ws })
+    const rowsOf = (role: 'source' | 'target', db: string) => rows(h, role, db, s.compare)
+
+    const original = await rowsOf('target', tgt)
+    json<PromoteResult>(await cli('--dry-run', '--json'), 'dry run')
+    if (JSON.stringify(await rowsOf('target', tgt)) !== JSON.stringify(original)) violations.push('a dry run changed the rows')
+
+    // Deleting rows is destructive, so it is allowed: the case is the whole set.
+    const applied = json<PromoteResult>(await cli('--apply', '--allow-destructive', '--json'), 'apply')
+    if (applied.rolledBack?.length || applied.errors.length) {
+      violations.push(`the apply failed: ${applied.errors.map(e => e.error).join('; ')}`)
+    }
+
+    const [want, got] = await Promise.all([rowsOf('source', src), rowsOf('target', tgt)])
+    s.compare.forEach((q, i) => {
+      if (want[i] !== got[i]) violations.push(`rows differ for ${q}:\n  source: ${want[i]}\n  target: ${got[i]}`)
+    })
+
+    const again = json<ScanResult>(await cli('--json'), 'second scan')
+    const left = again.checks.flatMap(c => c.issues.map(i => `${c.check}: ${i.title}`))
+    if (left.length > 0 && violations.length === 0) violations.push(`the synced pair still reports:\n  ${left.join('\n  ')}`)
+  } finally {
+    await Promise.all([h.dropDatabase('source', src), h.dropDatabase('target', tgt)])
+  }
+  return violations
 }

@@ -50,8 +50,15 @@ export interface DbDiffResult {
  * Uses createRequire to locate the installed package, then returns
  * the path to `bin/dbdiff.js`. Falls back to 'npx' if the package
  * is not installed locally (e.g. global install).
+ *
+ * `SUPAFORGE_DBDIFF_BIN` overrides both with an executable of your own — a
+ * DBDiff checkout's `dbdiff` script, say. That is how DBDiff's CI runs
+ * SupaForge's scenarios against an unreleased change, and how a fix can be
+ * tried through SupaForge before it ships, without touching node_modules.
  */
 export function resolveDbDiffBin(): { command: string; prefixArgs: string[] } {
+  const override = process.env.SUPAFORGE_DBDIFF_BIN?.trim()
+  if (override) return { command: override, prefixArgs: [] }
   try {
     const require = createRequire(import.meta.url)
     const binPath = require.resolve('@dbdiff/cli/bin/dbdiff.js')

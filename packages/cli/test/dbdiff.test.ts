@@ -59,12 +59,30 @@ describe('stripDbDiffNoise', () => {
 })
 
 describe('resolveDbDiffBin', () => {
+  const saved = process.env.SUPAFORGE_DBDIFF_BIN
+  afterEach(() => {
+    if (saved === undefined) delete process.env.SUPAFORGE_DBDIFF_BIN
+    else process.env.SUPAFORGE_DBDIFF_BIN = saved
+  })
+
   it('resolves to local binary when @dbdiff/cli is installed', () => {
+    delete process.env.SUPAFORGE_DBDIFF_BIN
     const { command, prefixArgs } = resolveDbDiffBin()
     // When @dbdiff/cli is a dependency, it resolves to node + bin/dbdiff.js
     expect(command).toBe(process.execPath)
     expect(prefixArgs).toHaveLength(1)
     expect(prefixArgs[0]).toContain('dbdiff.js')
+  })
+
+  // How DBDiff's CI runs SupaForge's scenarios against an unreleased change.
+  it('runs the executable SUPAFORGE_DBDIFF_BIN names instead, with no prefix', () => {
+    process.env.SUPAFORGE_DBDIFF_BIN = '/src/DBDiff/dbdiff'
+    expect(resolveDbDiffBin()).toEqual({ command: '/src/DBDiff/dbdiff', prefixArgs: [] })
+  })
+
+  it('ignores an empty override', () => {
+    process.env.SUPAFORGE_DBDIFF_BIN = '  '
+    expect(resolveDbDiffBin().command).toBe(process.execPath)
   })
 })
 

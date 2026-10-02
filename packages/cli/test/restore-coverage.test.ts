@@ -5,10 +5,10 @@ import { tmpdir } from 'node:os'
 import {
   previewSnapshotRestore,
   summarizeStatement,
-  rolesToCreate,
   createRoleIfMissing,
   conditionalPublicationMembership,
 } from '../src/restore.js'
+import { rolesNamedBy } from '../src/sql-deps.js'
 
 /**
  * Which of a snapshot's twelve layers a restore actually replays.
@@ -155,42 +155,42 @@ describe('previewSnapshotRestore: layer coverage', () => {
  * written: `role "anon" does not exist`, and `relation "orders" is already
  * member of publication`.
  */
-describe('rolesToCreate', () => {
+describe('rolesNamedBy', () => {
   it('names the role a grant needs', () => {
-    expect(rolesToCreate('GRANT SELECT ON "public"."orders" TO "anon";')).toEqual(['anon'])
+    expect(rolesNamedBy('GRANT SELECT ON "public"."orders" TO "anon";')).toEqual(['anon'])
   })
 
   it('reads an unquoted grantee, folded as PostgreSQL folds it', () => {
-    expect(rolesToCreate('GRANT ALL ON public.orders TO service_role;')).toEqual(['service_role'])
-    expect(rolesToCreate('GRANT ALL ON public.orders TO Service_Role;')).toEqual(['service_role'])
+    expect(rolesNamedBy('GRANT ALL ON public.orders TO service_role;')).toEqual(['service_role'])
+    expect(rolesNamedBy('GRANT ALL ON public.orders TO Service_Role;')).toEqual(['service_role'])
   })
 
   it('reads every grantee, and stops before the grant options', () => {
-    expect(rolesToCreate('GRANT SELECT ON t TO "anon", authenticated WITH GRANT OPTION;'))
+    expect(rolesNamedBy('GRANT SELECT ON t TO "anon", authenticated WITH GRANT OPTION;'))
       .toEqual(['anon', 'authenticated'])
   })
 
   it('does not try to create PUBLIC or the current user', () => {
     // Not roles: keywords. `CREATE ROLE public` is an error.
-    expect(rolesToCreate('GRANT SELECT ON public.orders TO PUBLIC;')).toEqual([])
-    expect(rolesToCreate('GRANT SELECT ON public.orders TO CURRENT_USER;')).toEqual([])
+    expect(rolesNamedBy('GRANT SELECT ON public.orders TO PUBLIC;')).toEqual([])
+    expect(rolesNamedBy('GRANT SELECT ON public.orders TO CURRENT_USER;')).toEqual([])
   })
 
   it('does not try to create a built-in role', () => {
     // A `pg_` role either exists already or cannot be created.
-    expect(rolesToCreate('GRANT pg_read_all_data TO app;')).toEqual(['app'])
-    expect(rolesToCreate('GRANT SELECT ON public.orders TO pg_monitor;')).toEqual([])
+    expect(rolesNamedBy('GRANT pg_read_all_data TO app;')).toEqual(['app'])
+    expect(rolesNamedBy('GRANT SELECT ON public.orders TO pg_monitor;')).toEqual([])
   })
 
   it('is empty for anything that names no roles', () => {
-    expect(rolesToCreate('CREATE TABLE public.t (id int);')).toEqual([])
-    expect(rolesToCreate('REVOKE SELECT ON public.orders FROM anon;')).toEqual([])
-    expect(rolesToCreate('CREATE POLICY p ON t USING (true);')).toEqual([])
+    expect(rolesNamedBy('CREATE TABLE public.t (id int);')).toEqual([])
+    expect(rolesNamedBy('REVOKE SELECT ON public.orders FROM anon;')).toEqual([])
+    expect(rolesNamedBy('CREATE POLICY p ON t USING (true);')).toEqual([])
   })
 
   it('does not read a role name out of a function body', () => {
     // Read off the skeleton, so a literal mentioning a role is not a grantee.
-    expect(rolesToCreate(
+    expect(rolesNamedBy(
       `CREATE FUNCTION f() RETURNS text AS $$ SELECT 'GRANT SELECT ON t TO nobody' $$ LANGUAGE sql;`,
     )).toEqual([])
   })
@@ -199,23 +199,23 @@ describe('rolesToCreate', () => {
   // roles layer: a policy for service_role restored into plain PostgreSQL
   // failed on the missing role and rolled the whole restore back.
   it('names every role a policy is for', () => {
-    expect(rolesToCreate(
+    expect(rolesNamedBy(
       'CREATE POLICY auth_read ON public.notes FOR SELECT TO authenticated, service_role USING (id > 0);',
     )).toEqual(['authenticated', 'service_role'])
-    expect(rolesToCreate(
+    expect(rolesNamedBy(
       'CREATE POLICY "p" ON "public"."t" AS PERMISSIVE FOR ALL TO "service_role" USING (true) WITH CHECK (true);',
     )).toEqual(['service_role'])
-    expect(rolesToCreate('ALTER POLICY p ON t TO anon;')).toEqual(['anon'])
+    expect(rolesNamedBy('ALTER POLICY p ON t TO anon;')).toEqual(['anon'])
   })
 
   it('reads a quoted role exactly, and not one out of a policy expression', () => {
-    expect(rolesToCreate(
+    expect(rolesNamedBy(
       `CREATE POLICY p ON t FOR SELECT TO "We""ird" USING (x = 'TO bob');`,
     )).toEqual(['We"ird'])
   })
 
   it('does not take a policy being renamed for a role', () => {
-    expect(rolesToCreate('ALTER POLICY p ON t RENAME TO q;')).toEqual([])
+    expect(rolesNamedBy('ALTER POLICY p ON t RENAME TO q;')).toEqual([])
   })
 })
 

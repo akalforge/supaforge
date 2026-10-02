@@ -563,3 +563,41 @@ export function policyOnlyKeys(sql: string | undefined): string[] | null {
   if (!statements.every(s => /^\s*(?:CREATE|DROP)\s+POLICY\b/i.test(sqlSkeleton(s)))) return null
   return [...new Set([...createdPolicies(sql), ...droppedPolicies(sql)])]
 }
+
+/** Role specifications that are keywords rather than roles, so never created. */
+const ROLE_KEYWORDS = new Set(['public', 'current_user', 'current_role', 'session_user'])
+
+/**
+ * Every role a statement grants to or scopes a policy to.
+ *
+ * A restore creates them first where the target lacks them, and `--prove`
+ * declines to run when the server lacks them, since creating a role is never
+ * confined to a throwaway database.
+ *
+ * A snapshot's `roles.sql` grants to Supabase's Data API roles — `anon`,
+ * `authenticated`, `service_role` — and the usual restore target is plain
+ * PostgreSQL, where none of them exist. A policy names roles too, and the
+ * schema dump and the RLS layer both replay policies long before the roles
+ * layer's grants: `CREATE POLICY … TO service_role` into plain PostgreSQL
+ * failed with `role "service_role" does not exist` and, in one transaction,
+ * rolled the whole restore back. Every role in the list is returned, not just
+ * the first, since a policy for `authenticated, service_role` needs both.
+ *
+ * Read off the skeleton, so a role named inside a function body or a string
+ * literal is not mistaken for one. `PUBLIC` and `CURRENT_USER` are keywords,
+ * not roles, and a `pg_` role is built in: none of them can be created.
+ * `ALTER POLICY … RENAME TO` names a policy, not a role.
+ */
+export function rolesNamedBy(sql: string): string[] {
+  const skeleton = sqlSkeleton(sql)
+  const list =
+    /^\s*GRANT\b[\s\S]*?\bTO\s+([\s\S]*?)(?=\s+WITH\b|\s+GRANTED\s+BY\b|\s*;|\s*$)/i.exec(skeleton)
+    ?? /^\s*(?:CREATE|ALTER)\s+POLICY\b(?![\s\S]*\bRENAME\s+TO\b)[\s\S]*?\bTO\s+([\s\S]*?)(?=\s+USING\b|\s+WITH\s+CHECK\b|\s*;|\s*$)/i.exec(skeleton)
+  if (!list) return []
+
+  const roles = (list[1].match(/"(?:[^"]|"")+"|[\w$]+/g) ?? [])
+    // Unquoted, PostgreSQL folds the name to lower case.
+    .map(r => r.startsWith('"') ? r.slice(1, -1).replace(/""/g, '"') : r.toLowerCase())
+    .filter(r => !ROLE_KEYWORDS.has(r.toLowerCase()) && !r.startsWith('pg_'))
+  return [...new Set(roles)]
+}

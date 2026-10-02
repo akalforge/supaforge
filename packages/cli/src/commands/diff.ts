@@ -14,7 +14,7 @@ import { formatGitHubAnnotations, computeCiExitCode, formatCiSummary, type FailO
 import { resolveTableFilter, isFiltered, describeTableFilter } from '../utils/table-filter.js'
 import { parseFlagList } from '../utils/strings.js'
 import { isCloneDatabase, sourceLooksLikeCloneOf } from '../branch.js'
-import { proveConvergence, residualHeldBack } from '../prove.js'
+import { proveConvergence, residualHeldBack, proofScope } from '../prove.js'
 import { summarizeByKind } from '../scoring.js'
 import { CLONE_SKIP_FLAGS } from '../defaults.js'
 
@@ -366,14 +366,26 @@ export default class Diff extends BaseCommand {
           allowDestructive: flags['allow-destructive'], tableFilter,
           applyPosture: flags['apply-posture'],
         })
-        const migrationSql = planned.sqlStatements.map(s => s.sql).join('\n')
+        const { replay, unproved } = proofScope(planned.sqlStatements)
+        const migrationSql = replay.map(s => s.sql).join('\n')
 
         this.log(`\n  ${dim('Proving convergence on a throwaway clone…')}`)
-        const proof = await proveConvergence({
-          sourceUrl: sourceEnv.dbUrl,
-          targetUrl: targetEnv.dbUrl,
-          migrationSql,
-        })
+        if (unproved.length > 0) {
+          // Applied all the same; the proof just cannot speak for them.
+          const byCheck = [...new Set(unproved.map(s => s.check))]
+            .map(c => `${c} ×${unproved.filter(s => s.check === c).length}`).join(', ')
+          this.log(`  ${dim(`Not proved — act outside the proved schemas or on the whole server: ${byCheck}`)}`)
+        }
+        // Nothing left to replay means nothing to prove. Running it anyway
+        // compared the whole schema, and refused a cron-only apply over
+        // tables it was never going to touch.
+        const proof = replay.length === 0
+          ? { converged: false, residual: [], cloneName: '', skipped: 'none of the planned fixes is one the proof can replay' }
+          : await proveConvergence({
+            sourceUrl: sourceEnv.dbUrl,
+            targetUrl: targetEnv.dbUrl,
+            migrationSql,
+          })
 
         if (proof.skipped) {
           // Could not prove is not the same as failed to converge; say which.

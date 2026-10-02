@@ -28,6 +28,8 @@ import { fingerprintSql, stateSql, type SchemaState } from '@akalforge/pg-confor
 import { pgQuery, type QueryFn } from './db'
 import { diffState } from './state-diff'
 import { resolvePgDumpPath, getServerMajorVersion } from './pg-tools'
+import { rolesNamedBy, sqlSkeleton } from './sql-deps'
+import { splitSqlStatements, isCommentOnly } from './utils/sql-split.js'
 import { join, dirname } from 'node:path'
 
 const exec = promisify(execFile)
@@ -184,6 +186,19 @@ export async function proveConvergence(opts: {
     return {
       converged: false, residual: [], cloneName,
       skipped: `could not resolve pg_dump: ${(err as Error).message}`,
+    }
+  }
+
+  // A role is the server's, not the database's: creating one for the proof
+  // would create it for real, and the apply's own CREATE ROLE then failed
+  // with "already exists". So a migration that needs a role the server does
+  // not have yet cannot be proved here — say so rather than create it.
+  const absent = await absentRoles(opts.targetUrl, opts.migrationSql)
+  if (absent.length > 0) {
+    return {
+      converged: false, residual: [], cloneName,
+      skipped: `the migration needs role(s) this server does not have yet (${absent.join(', ')}), `
+        + 'and creating a role is server-wide, so it cannot be done in a throwaway database',
     }
   }
 
@@ -604,3 +619,55 @@ export function residualHeldBack(
   return { heldBack, unexplained }
 }
 
+/**
+ * The checks whose fixes the proof replays: the ones that act on the proved
+ * schemas, which is all the fingerprint compares.
+ *
+ * The others act on something the throwaway database does not have, or that
+ * is not its own. pg_cron lives in one database per server, so
+ * `cron.schedule()` failed in the clone with `schema "cron" does not exist`
+ * and aborted the proof, blocking an apply that would have worked. A role
+ * belongs to the whole server, so `CREATE ROLE` in the clone created it for
+ * real. A publication, a reference-data row, a storage policy: none of them
+ * is in the fingerprint, so replaying them could only fail, never prove.
+ */
+const PROVED_CHECKS: ReadonlySet<string> = new Set(['schema', 'rls', 'rls-coverage', 'extensions', 'webhooks'])
+
+/** A statement that acts on the server rather than the database it runs in. */
+const SERVER_WIDE = [
+  /^\s*(?:CREATE|ALTER|DROP)\s+(?:ROLE|USER|GROUP|DATABASE|TABLESPACE)\b/i,
+  /^\s*ALTER\s+SYSTEM\b/i,
+  // Role membership: a GRANT or REVOKE with no ON names roles, not objects.
+  /^\s*(?:GRANT|REVOKE)\b(?![\s\S]*\bON\b)/i,
+]
+
+/**
+ * Split the planned fixes into those the proof replays and those it cannot.
+ *
+ * A fix holding a server-wide statement is never replayed, whichever check it
+ * came from: the proof must not change anything outside the database it made.
+ */
+export function proofScope<T extends { check: string; sql: string }>(
+  statements: readonly T[],
+): { replay: T[]; unproved: T[] } {
+  const replay: T[] = []
+  const unproved: T[] = []
+  for (const stmt of statements) {
+    const serverWide = splitSqlStatements(stmt.sql)
+      .filter(s => !isCommentOnly(s))
+      .some(s => SERVER_WIDE.some(re => re.test(sqlSkeleton(s))))
+    if (PROVED_CHECKS.has(stmt.check) && !serverWide) replay.push(stmt)
+    else unproved.push(stmt)
+  }
+  return { replay, unproved }
+}
+
+/** Roles the migration grants to or scopes a policy to that the server lacks. */
+async function absentRoles(dbUrl: string, sql: string): Promise<string[]> {
+  const named = [...new Set(splitSqlStatements(sql).flatMap(s => rolesNamedBy(s)))]
+  if (named.length === 0) return []
+  const rows = await pgQuery(dbUrl, 'SELECT rolname FROM pg_roles WHERE rolname = ANY($1::text[])', [named]) as unknown as
+    Array<{ rolname: string }>
+  const present = new Set(rows.map(r => r.rolname))
+  return named.filter(r => !present.has(r))
+}

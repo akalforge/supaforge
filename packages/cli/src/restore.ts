@@ -15,7 +15,7 @@ import { DEFAULT_IGNORE_SCHEMAS, SUPABASE_PLATFORM_SCHEMAS } from './defaults'
 import { dropUnsupportedSetStatements, knownParameters } from './prove'
 import { splitSqlStatements, isCommentOnly, isPsqlMetaCommand, stripPsqlMetaCommands } from './utils/sql-split'
 import { quoteIdent, quoteLiteral } from './utils/sql.js'
-import { sqlSkeleton, statementSubject } from './sql-deps.js'
+import { sqlSkeleton, statementSubject, rolesNamedBy } from './sql-deps.js'
 import { ABSENT_ON_TARGET, EXTENSION_UNAVAILABLE } from './pg-errors.js'
 import {
   replaceableSchemas, findExternalDependents, dropSchemaContents, recreateExternalDependents,
@@ -808,7 +808,7 @@ async function applyStatement(
 
     // `GRANT … TO anon` and `CREATE POLICY … TO service_role` need the role to
     // exist, and on plain PostgreSQL none of Supabase's Data API roles do.
-    for (const role of rolesToCreate(sql)) await client.query(createRoleIfMissing(role))
+    for (const role of rolesNamedBy(sql)) await client.query(createRoleIfMissing(role))
 
     await client.query(conditionalPublicationMembership(sql))
     if (transactional) await client.query('RELEASE SAVEPOINT sf_restore_statement')
@@ -874,41 +874,6 @@ export function extensionTargetSchema(sql: string): string | undefined {
 
   const schema = match[1].replace(/"/g, '')
   return isSystemSchema(schema) ? undefined : schema
-}
-
-/** Role specifications that are keywords rather than roles, so never created. */
-const ROLE_KEYWORDS = new Set(['public', 'current_user', 'current_role', 'session_user'])
-
-/**
- * Every role a statement grants to or scopes a policy to, which a restore
- * creates first if the target lacks it.
- *
- * A snapshot's `roles.sql` grants to Supabase's Data API roles — `anon`,
- * `authenticated`, `service_role` — and the usual restore target is plain
- * PostgreSQL, where none of them exist. A policy names roles too, and the
- * schema dump and the RLS layer both replay policies long before the roles
- * layer's grants: `CREATE POLICY … TO service_role` into plain PostgreSQL
- * failed with `role "service_role" does not exist` and, in one transaction,
- * rolled the whole restore back. Every role in the list is returned, not just
- * the first, since a policy for `authenticated, service_role` needs both.
- *
- * Read off the skeleton, so a role named inside a function body or a string
- * literal is not mistaken for one. `PUBLIC` and `CURRENT_USER` are keywords,
- * not roles, and a `pg_` role is built in: none of them can be created.
- * `ALTER POLICY … RENAME TO` names a policy, not a role.
- */
-export function rolesToCreate(sql: string): string[] {
-  const skeleton = sqlSkeleton(sql)
-  const list =
-    /^\s*GRANT\b[\s\S]*?\bTO\s+([\s\S]*?)(?=\s+WITH\b|\s+GRANTED\s+BY\b|\s*;|\s*$)/i.exec(skeleton)
-    ?? /^\s*(?:CREATE|ALTER)\s+POLICY\b(?![\s\S]*\bRENAME\s+TO\b)[\s\S]*?\bTO\s+([\s\S]*?)(?=\s+USING\b|\s+WITH\s+CHECK\b|\s*;|\s*$)/i.exec(skeleton)
-  if (!list) return []
-
-  const roles = (list[1].match(/"(?:[^"]|"")+"|[\w$]+/g) ?? [])
-    // Unquoted, PostgreSQL folds the name to lower case.
-    .map(r => r.startsWith('"') ? r.slice(1, -1).replace(/""/g, '"') : r.toLowerCase())
-    .filter(r => !ROLE_KEYWORDS.has(r.toLowerCase()) && !r.startsWith('pg_'))
-  return [...new Set(roles)]
 }
 
 /**

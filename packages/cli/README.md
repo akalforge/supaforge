@@ -1226,7 +1226,7 @@ supaforge diff                # schema + data checks active out of the box
 
 The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.
 
-**What the schema layer reaches.** `3.0.0-rc.17`, the pinned version, models
+**What the schema layer reaches.** `3.0.0-rc.18`, the pinned version, models
 composite types, domains, materialized views (and their indexes), standalone
 sequences and RLS policies — five kinds that earlier releases did not read at
 all, and therefore reported as no drift whether they matched or not. A schema
@@ -1242,7 +1242,7 @@ member, C-language ones included, which no managed-database role can run.
 Since rc.14 they are excluded via `pg_depend.deptype = 'e'`, the catalogue's own record of
 that ownership, so what is left in the report is yours.
 
-**Migrations that run (rc.15–rc.17).** A column type change under a view, policy or
+**Migrations that run (rc.15–rc.18).** A column type change under a view, policy or
 trigger condition now comes as one bracket — drop what reads the column, retype
 it, put everything back with its options, grants and comments — and SupaForge
 keeps that bracket as one finding so it applies as a unit. An added enum label
@@ -1260,7 +1260,9 @@ moves its columns to a new type, keeping the rows and everything reading them;
 identity changes are made in place, so the sequence carries on; a `serial`
 column can become an identity and back; column storage and compression are
 compared; and types and functions are created before, and dropped after,
-whatever uses them, in both directions.
+whatever uses them, in both directions. Since rc.18, a foreign key onto
+another schema's table is rendered with its schema and a multi-column key with
+all its columns; both used to produce SQL PostgreSQL rejected.
 
 **One finding per change (rc.17).** Some changes are several statements that
 only work together and in order — an enum whose labels are removed is moved to

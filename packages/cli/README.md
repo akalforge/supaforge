@@ -1262,7 +1262,10 @@ column can become an identity and back; column storage and compression are
 compared; and types and functions are created before, and dropped after,
 whatever uses them, in both directions. Since rc.18, a foreign key onto
 another schema's table is rendered with its schema and a multi-column key with
-all its columns; both used to produce SQL PostgreSQL rejected.
+all its columns; both used to produce SQL PostgreSQL rejected. So a key from
+your schema onto an ignored one — a table referencing `auth.users` — is now
+synced when the target has the table it references; until now such keys were
+filtered out, because the SQL for them could not run.
 
 **One finding per change (rc.17).** Some changes are several statements that
 only work together and in order — an enum whose labels are removed is moved to

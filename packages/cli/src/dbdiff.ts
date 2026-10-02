@@ -1017,7 +1017,8 @@ function filterCrossSchemaFks(
  *
  * Handles three forms:
  *   REFERENCES "" ("")              — broken ref from dbdiff, always filtered
- *   REFERENCES "auth"."users" ("id") — schema-qualified, filtered if schema ignored
+ *   REFERENCES "auth"."users" ("id") — schema-qualified into an ignored schema: kept
+ *                                       when the target has that table, else filtered
  *   REFERENCES "users" ("id")        — unqualified, filtered if "users" is in
  *                                       ignoredSchemaTables (queried from target DB)
  */
@@ -1027,9 +1028,15 @@ function hasCrossSchemaRef(sql: string, schemas: string[], ignoredSchemaTables?:
   const [, first, second] = refsMatch
   // Broken: REFERENCES "" ("")
   if (first === '') return true
-  // Schema-qualified: REFERENCES "auth"."users" ("id")
+  // Schema-qualified: REFERENCES "auth"."users" ("id"). A key from the user's
+  // own schema onto an ignored one — every Supabase table referencing
+  // auth.users — is real drift, kept when the target has the table it
+  // references. Filtered only when that is not known, as before: dbdiff
+  // before 3.0.0-rc.18 rendered these without the schema, which is why they
+  // were all dropped, and so they were never synced.
   if (second !== undefined) {
-    return schemas.some(s => s.toLowerCase() === first.toLowerCase())
+    if (!schemas.some(s => s.toLowerCase() === first.toLowerCase())) return false
+    return !ignoredSchemaTables?.has(`${first}.${second}`.toLowerCase())
   }
   // Unqualified: REFERENCES "users" ("id") — filter if the table lives in an ignored schema.
   // This catches the case where pg_dump or dbdiff drops the schema prefix due to

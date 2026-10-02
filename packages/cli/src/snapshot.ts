@@ -537,11 +537,16 @@ async function captureVaultSecrets(
 ): Promise<SnapshotLayerInfo> {
   const file = 'vault.sql'
   try {
+    // vault.secrets, not decrypted_secrets: only names and descriptions are
+    // wanted, and the view decrypts every value to show them. `unique_name`
+    // is gone from supabase_vault 0.3, and asking for it failed with
+    // `column "unique_name" does not exist` — which the catch below then read
+    // as Vault not being installed, on a project holding secrets.
     const rows = await queryFn(dbUrl, `
-      SELECT name, description, coalesce(unique_name, name) AS unique_name
-      FROM vault.decrypted_secrets
-      ORDER BY coalesce(unique_name, name)
-    `) as unknown as Array<{ name: string; description: string | null; unique_name: string }>
+      SELECT coalesce(name, id::text) AS name, description
+      FROM vault.secrets
+      ORDER BY 1
+    `) as unknown as Array<{ name: string; description: string | null }>
 
     // Names and descriptions only. A secret's value cannot be read out of
     // Vault across environments, so this is a list of what to recreate by hand
@@ -549,7 +554,7 @@ async function captureVaultSecrets(
     // cannot create a secret with an invented value the way the vault check
     // used to (issue #91).
     const lines = rows.map(row =>
-      `--   ${row.unique_name}${row.description ? ` — ${row.description}` : ''}`)
+      `--   ${row.name}${row.description ? ` — ${row.description}` : ''}`)
 
     const output = rows.length > 0
       ? `-- SupaForge Vault Snapshot\n-- ${rows.length} secret(s), names only:\n`
@@ -559,11 +564,24 @@ async function captureVaultSecrets(
     await writeFile(join(dir, file), output)
     return { captured: true, file, itemCount: rows.length }
   } catch (err) {
-    const msg = errMsg(err)
-    if (msg.includes(RELATION_NOT_FOUND) || msg.includes('schema "vault" does not exist')) {
+    // Only the schema being absent means Vault is not there. Any other
+    // failure — a permission, a column — is an error to report, not a reason
+    // to call the layer skipped.
+    if (!(await vaultInstalled(dbUrl, queryFn))) {
       return { captured: false, file, itemCount: 0, skipReason: 'vault extension not installed' }
     }
-    return { captured: false, file, itemCount: 0, error: msg }
+    return { captured: false, file, itemCount: 0, error: errMsg(err) }
+  }
+}
+
+async function vaultInstalled(dbUrl: string, queryFn: QueryFn): Promise<boolean> {
+  try {
+    const [row] = await queryFn(dbUrl, `SELECT to_regnamespace('vault') IS NOT NULL AS installed`) as unknown as
+      Array<{ installed: boolean }>
+    return row?.installed === true
+  } catch {
+    // Cannot even ask: report the original failure rather than guess.
+    return true
   }
 }
 

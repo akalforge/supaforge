@@ -370,3 +370,75 @@ describe('captureSnapshot: webhooks', () => {
     expect(result.manifest.layers.webhooks.error).toContain('permission denied')
   })
 })
+
+/**
+ * The Vault layer: names and descriptions, and an honest reason when it
+ * cannot read them.
+ *
+ * The capture asked `vault.decrypted_secrets` for `unique_name`, a column
+ * supabase_vault 0.3 does not have. The error said "does not exist", which
+ * the catch read as Vault not being installed — so a snapshot of a project
+ * holding secrets reported the layer skipped, with nothing in it.
+ */
+describe('captureSnapshot: vault', () => {
+  let tempDir: string
+
+  beforeEach(async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'sf-vault-snap-'))
+  })
+
+  afterEach(async () => {
+    await rm(tempDir, { recursive: true, force: true })
+  })
+
+  async function capture(answer: (sql: string) => unknown[]) {
+    const seen: string[] = []
+    const queryFn = (async (_dbUrl: string, sql: string) => {
+      seen.push(sql)
+      return answer(sql)
+    }) as unknown as QueryFn
+    const result = await captureSnapshot({
+      envName: 'prod',
+      env: { dbUrl: 'postgres://example' },
+      config: { environments: { prod: { dbUrl: 'postgres://example' } } } as never,
+      outputDir: tempDir,
+      queryFn,
+      fetchFn: (async () => new Response('[]', { status: 200 })) as never,
+    })
+    return { layer: result.manifest.layers.vault, dir: result.dir, vaultSql: seen.find(s => s.includes('FROM vault.')) ?? '' }
+  }
+
+  it('lists secrets by name from vault.secrets, without decrypting them', async () => {
+    const { layer, dir, vaultSql } = await capture(sql =>
+      sql.includes('FROM vault.secrets') ? [{ name: 'stripe_key', description: 'live key' }] : [])
+
+    expect(vaultSql).not.toContain('decrypted_secrets')
+    expect(vaultSql).not.toContain('unique_name')
+    expect(layer.captured).toBe(true)
+    expect(layer.itemCount).toBe(1)
+    expect(await readFile(join(dir, 'vault.sql'), 'utf8')).toContain('stripe_key — live key')
+  })
+
+  it('says Vault is not installed only when its schema is absent', async () => {
+    const { layer } = await capture(sql => {
+      if (sql.includes('FROM vault.secrets')) throw new Error('relation "vault.secrets" does not exist')
+      if (sql.includes("to_regnamespace('vault')")) return [{ installed: false }]
+      return []
+    })
+
+    expect(layer.captured).toBe(false)
+    expect(layer.skipReason).toBe('vault extension not installed')
+  })
+
+  it('reports any other failure as an error, not as Vault being absent', async () => {
+    const { layer } = await capture(sql => {
+      if (sql.includes('FROM vault.secrets')) throw new Error('column "unique_name" does not exist')
+      if (sql.includes("to_regnamespace('vault')")) return [{ installed: true }]
+      return []
+    })
+
+    expect(layer.captured).toBe(false)
+    expect(layer.skipReason).toBeUndefined()
+    expect(layer.error).toContain('unique_name')
+  })
+})

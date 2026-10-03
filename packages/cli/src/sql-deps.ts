@@ -86,6 +86,12 @@ const PHASE_RULES: Array<[RegExp, number]> = [
   [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\b/i, PHASE.CREATE_ROUTINE],
   [/\bCREATE\s+(?:TYPE|DOMAIN|SEQUENCE)\b/i, PHASE.CREATE_BASE],
   [/\bCREATE\s+TABLE\b/i, PHASE.CREATE_TABLE],
+  // A serial default removed with its sequence, as one change: the sequence
+  // can only go once every table defaulting to it has, so the change runs
+  // with the other sequence drops, not as the ALTER TABLE it opens with —
+  // which dropped it while a table still to be dropped used it ("cannot drop
+  // sequence ... because other objects depend on it").
+  [/^\s*ALTER\s+TABLE\b[\s\S]*;\s*DROP\s+SEQUENCE\b/i, PHASE.DROP_BASE],
   [/^\s*ALTER\s+TABLE\b/i, PHASE.ALTER_TABLE],
   [/^\s*DROP\s+(?:TRIGGER|POLICY|INDEX)\b/i, PHASE.DROP_DEPENDANT],
   [/^\s*DROP\s+(?:MATERIALIZED\s+)?VIEW\b/i, PHASE.DROP_DEPENDANT],

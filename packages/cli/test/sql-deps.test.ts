@@ -400,3 +400,21 @@ describe('dropping a routine', () => {
     expect(order[5]).toBe('DROP TYPE IF EXISTS "e";')
   })
 })
+
+// A serial default removed together with its sequence used to be phased as the
+// ALTER TABLE it opens with, ahead of dropping another table still defaulting
+// to the sequence: "cannot drop sequence shared_seq because other objects
+// depend on it".
+describe('statementPhase: a serial default dropped with its sequence', () => {
+  const unit = 'ALTER TABLE "a" ALTER COLUMN "id" DROP DEFAULT; DROP SEQUENCE IF EXISTS public.shared_seq;'
+
+  it('runs with the sequence drops, after the tables are dropped', () => {
+    expect(statementPhase(unit)).toBe(PHASE.DROP_BASE)
+    const ordered = orderStatements([unit, 'DROP TABLE "b";'], s => s)
+    expect(ordered).toEqual(['DROP TABLE "b";', unit])
+  })
+
+  it('leaves an ordinary column change where it was', () => {
+    expect(statementPhase('ALTER TABLE "a" ALTER COLUMN "id" DROP DEFAULT;')).toBe(PHASE.ALTER_TABLE)
+  })
+})

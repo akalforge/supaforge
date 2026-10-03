@@ -1223,12 +1223,18 @@ supaforge diff                # schema + data checks active out of the box
 
 The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.
 
-**What the schema layer reaches.** `3.0.0-rc.18`, the pinned version, models
+**What the schema layer reaches.** `3.0.0-rc.19`, the pinned version, models
 composite types, domains, materialized views (and their indexes), standalone
 sequences and RLS policies — five kinds that earlier releases did not read at
 all, and therefore reported as no drift whether they matched or not. A schema
 that SupaForge has synced can now be diffed again and come back clean, which is
 what makes `--prove` meaningful.
+
+**Not yet: schemas other than `public`.** DBDiff reads the `public` schema
+only, so a table, type or function in another schema you own (`app`,
+`private`) is not compared, and a difference confined to one reads as no
+drift. Supabase's own schemas are ignored either way. Comparing every schema is
+in progress in DBDiff; until then, keep what you want compared in `public`.
 
 **Objects an extension owns are no longer compared.** An extension brings its
 own functions, tables and types — `CREATE EXTENSION pg_trgm` alone installs 31
@@ -1239,7 +1245,7 @@ member, C-language ones included, which no managed-database role can run.
 Since rc.14 they are excluded via `pg_depend.deptype = 'e'`, the catalogue's own record of
 that ownership, so what is left in the report is yours.
 
-**Migrations that run (rc.15–rc.18).** A column type change under a view, policy or
+**Migrations that run (rc.15–rc.19).** A column type change under a view, policy or
 trigger condition now comes as one bracket — drop what reads the column, retype
 it, put everything back with its options, grants and comments — and SupaForge
 keeps that bracket as one finding so it applies as a unit. An added enum label
@@ -1262,7 +1268,16 @@ another schema's table is rendered with its schema and a multi-column key with
 all its columns; both used to produce SQL PostgreSQL rejected. So a key from
 your schema onto an ignored one — a table referencing `auth.users` — is now
 synced when the target has the table it references; until now such keys were
-filtered out, because the SQL for them could not run.
+filtered out, because the SQL for them could not run. Since rc.19, an index
+on a partitioned table reaches every partition, a sequence owned by a column
+keeps its own options, and a new materialized view keeps its comment.
+
+**Reference data (rc.19).** The data layer's SQL is written for PostgreSQL:
+values with quotes, backslashes or JSON apply as they are instead of failing or
+coming back altered, `bytea` is read rather than crashing the diff, booleans
+are `true` and `false`, NULL and an empty string are told apart, a table with
+no primary key is compared row by row instead of skipped, and generated and
+`GENERATED ALWAYS` identity columns are handled.
 
 **One finding per change (rc.17).** Some changes are several statements that
 only work together and in order — an enum whose labels are removed is moved to

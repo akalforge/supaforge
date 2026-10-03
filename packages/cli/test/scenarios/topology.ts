@@ -7,6 +7,7 @@
  * the two sides different servers — a version upgrade, a Supabase source and a
  * plain target. Twins can never show what differs between servers.
  */
+import { expect } from 'vitest'
 import { PgHarness } from '../harness/PgHarness.js'
 import knownGaps from './known-gaps.json' with { type: 'json' }
 
@@ -30,14 +31,39 @@ export async function topologyLabel(h: PgHarness): Promise<string> {
 }
 
 type Gaps = Record<string, string>
+type Corpus = 'migrations' | 'equivalences' | 'data'
 interface KnownGaps {
   migrations: Gaps
   equivalences: Gaps
-  topologies: Record<string, { migrations?: Gaps; equivalences?: Gaps }>
+  data?: Gaps
+  topologies: Record<string, Partial<Record<Corpus, Gaps>>>
 }
 
 /** The known gaps for a corpus on this topology: everywhere's, plus its own. */
-export function gapsFor(corpus: 'migrations' | 'equivalences', topology: string): Gaps {
+export function gapsFor(corpus: Corpus, topology: string): Gaps {
   const all = knownGaps as unknown as KnownGaps
-  return { ...all[corpus], ...(all.topologies[topology]?.[corpus] ?? {}) }
+  return { ...(all[corpus] ?? {}), ...(all.topologies[topology]?.[corpus] ?? {}) }
+}
+
+/**
+ * Judge one scenario's violations against its known gap, if it has one.
+ *
+ * A listed scenario must still fail: one that passes fails the suite until it
+ * is removed, so the list can only shrink. Except with SCENARIO_FIXED_GAPS=
+ * report — DBDiff's CI runs these against its own unreleased change, and a
+ * gap that change fixes is SupaForge's to clear when it takes the release,
+ * not a failure there.
+ */
+export function judge(name: string, violations: string[], gap: string | undefined): void {
+  if (gap) {
+    if (violations.length === 0) {
+      if (process.env.SCENARIO_FIXED_GAPS === 'report') {
+        process.stderr.write(`known gap fixed by this DBDiff: ${name}\n`)
+        return
+      }
+      expect.fail(`${name} now passes; remove it from known-gaps.json`)
+    }
+    return
+  }
+  expect(violations, violations.join('\n\n')).toEqual([])
 }

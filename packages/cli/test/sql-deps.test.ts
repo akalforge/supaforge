@@ -418,3 +418,33 @@ describe('statementPhase: a serial default dropped with its sequence', () => {
     expect(statementPhase('ALTER TABLE "a" ALTER COLUMN "id" DROP DEFAULT;')).toBe(PHASE.ALTER_TABLE)
   })
 })
+
+/**
+ * DBDiff orders its migration from the catalog; this module can only read
+ * names in the text. Between two of DBDiff's own fixes its order now stands,
+ * and the phase table only places the other checks' fixes around them.
+ */
+describe('orderStatements: DBDiff\'s order kept for its own fixes', () => {
+  const serialDrop = { sql: 'ALTER TABLE "a" ALTER COLUMN "id" DROP DEFAULT; DROP SEQUENCE IF EXISTS public.shared_seq;', rank: 1 }
+  const dropTable = { sql: 'DROP TABLE "b";', rank: 0 }
+
+  it('keeps DBDiff\'s order where the phase table would swap it', () => {
+    // b's default uses shared_seq: DBDiff drops b first. By phase alone the
+    // ALTER TABLE ran first and the sequence could not be dropped.
+    const ordered = orderStatements([serialDrop, dropTable], s => s.sql, s => s.rank)
+    expect(ordered.map(s => s.rank)).toEqual([0, 1])
+  })
+
+  it('still lets a dependency read from the names come first', () => {
+    // An older DBDiff wrote a trigger before the function it executes.
+    const trigger = { sql: 'CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW EXECUTE FUNCTION touch();', rank: 0 }
+    const fn = { sql: 'CREATE FUNCTION touch() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;', rank: 1 }
+    expect(orderStatements([trigger, fn], s => s.sql, s => s.rank)).toEqual([fn, trigger])
+  })
+
+  it('places a fix without a rank by its phase', () => {
+    const policy = { sql: 'CREATE POLICY p ON t USING (true);', rank: undefined }
+    const table = { sql: 'CREATE TABLE t (id int);', rank: 0 }
+    expect(orderStatements([policy, table], s => s.sql, s => s.rank)).toEqual([table, policy])
+  })
+})

@@ -361,6 +361,8 @@ export function referencedTables(sql: string): string[] {
 
 /** One statement, with everything the sort needs precomputed. */
 interface Node {
+  /** The fix's position in the order its producer wrote it, when that order is to be kept. */
+  rank?: number
   phase: number
   /** Indices that must execute before this one. */
   after: Set<number>
@@ -427,9 +429,26 @@ function nextReady(remaining: number[], nodes: Node[], done: Set<number>): numbe
   let best: number | undefined
   for (const index of remaining) {
     if (!isSatisfied(nodes[index].after, done)) continue
-    if (best === undefined || nodes[index].phase < nodes[best].phase) best = index
+    if (best === undefined || runsBefore(nodes[index], nodes[best])) best = index
   }
   return best ?? remaining[0]
+}
+
+/**
+ * Which of two ready statements goes first.
+ *
+ * Two fixes that both carry a rank — DBDiff's own, in the order DBDiff wrote
+ * them — keep that order: DBDiff orders its migration from the catalog, which
+ * knows what depends on what, and this module can only guess from the text.
+ * Re-sorting them by kind here dropped a serial's sequence before a table
+ * still using it, though DBDiff had them the right way round. Anything else —
+ * a policy from the RLS check, a webhook, a row — is placed by its phase. A
+ * dependency read from the names still comes first either way: `after` is
+ * satisfied before any of this is asked.
+ */
+function runsBefore(a: Node, b: Node): boolean {
+  if (a.rank !== undefined && b.rank !== undefined) return a.rank < b.rank
+  return a.phase < b.phase
 }
 
 /** Have all of `after` already run? Iterated rather than spread — this is the
@@ -448,12 +467,16 @@ function isSatisfied(after: Set<number>, done: Set<number>): boolean {
  * differ in kind come out in the order the diff reported them, so the plan
  * stays recognisable against `--detail`.
  */
-export function orderStatements<T>(items: T[], sqlOf: (item: T) => string): T[] {
+export function orderStatements<T>(
+  items: T[],
+  sqlOf: (item: T) => string,
+  rankOf: (item: T) => number | undefined = () => undefined,
+): T[] {
   if (items.length < 2) return [...items]
 
   const texts = items.map(sqlOf)
   const provides = texts.map(providedNames)
-  const nodes: Node[] = texts.map(sql => ({ phase: statementPhase(sql), after: new Set<number>() }))
+  const nodes: Node[] = texts.map((sql, i) => ({ phase: statementPhase(sql), rank: rankOf(items[i]), after: new Set<number>() }))
 
   linkDependencies(nodes, texts, provides)
 

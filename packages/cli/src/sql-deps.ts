@@ -86,12 +86,6 @@ const PHASE_RULES: Array<[RegExp, number]> = [
   [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\b/i, PHASE.CREATE_ROUTINE],
   [/\bCREATE\s+(?:TYPE|DOMAIN|SEQUENCE)\b/i, PHASE.CREATE_BASE],
   [/\bCREATE\s+TABLE\b/i, PHASE.CREATE_TABLE],
-  // A serial default removed with its sequence, as one change: the sequence
-  // can only go once every table defaulting to it has, so the change runs
-  // with the other sequence drops, not as the ALTER TABLE it opens with —
-  // which dropped it while a table still to be dropped used it ("cannot drop
-  // sequence ... because other objects depend on it").
-  [/^\s*ALTER\s+TABLE\b[\s\S]*;\s*DROP\s+SEQUENCE\b/i, PHASE.DROP_BASE],
   [/^\s*ALTER\s+TABLE\b/i, PHASE.ALTER_TABLE],
   [/^\s*DROP\s+(?:TRIGGER|POLICY|INDEX)\b/i, PHASE.DROP_DEPENDANT],
   [/^\s*DROP\s+(?:MATERIALIZED\s+)?VIEW\b/i, PHASE.DROP_DEPENDANT],
@@ -426,31 +420,23 @@ function withoutDropStatements(sql: string): string {
  * no worse than the behaviour this replaces.
  */
 function nextReady(remaining: number[], nodes: Node[], done: Set<number>): number {
-  let best: number | undefined
-  for (const index of remaining) {
-    if (!isSatisfied(nodes[index].after, done)) continue
-    if (best === undefined || runsBefore(nodes[index], nodes[best])) best = index
-  }
-  return best ?? remaining[0]
-}
+  const ready = remaining.filter(i => isSatisfied(nodes[i].after, done))
+  const first = (from: number[], key: (n: Node) => number) =>
+    from.reduce<number | undefined>((best, i) => best === undefined || key(nodes[i]) < key(nodes[best]) ? i : best, undefined)
 
-/**
- * Which of two ready statements goes first.
- *
- * Two fixes that both carry a rank — DBDiff's own, in the order DBDiff wrote
- * them — keep that order: DBDiff orders its migration from the catalog, which
- * knows what depends on what, and this module can only guess from the text.
- * Re-sorting them by kind here dropped a serial's sequence before a table
- * still using it, though DBDiff had them the right way round. Anything else —
- * a policy from the RLS check, a webhook, a row — is placed by its phase. A
- * dependency read from the names still comes first either way: `after` is
- * satisfied before any of this is asked.
- */
-function runsBefore(a: Node, b: Node): boolean {
-  if (a.rank !== undefined && b.rank !== undefined) return a.rank < b.rank
-  return a.phase < b.phase
-}
+  const head = first(ready.filter(i => nodes[i].rank !== undefined), n => n.rank as number)
+  const free = first(ready.filter(i => nodes[i].rank === undefined), n => n.phase)
+  if (head === undefined || free === undefined) return head ?? free ?? remaining[0]
 
+  // DBDiff's fixes are one sequence, in DBDiff's order. Another check's fix
+  // goes ahead of it only when it belongs before everything the sequence
+  // still has to do — the earliest phase left in it, not the phase of the
+  // fix at its head. Compared with the head alone, an RLS policy jumped ahead
+  // of a column change it needed whenever a late-phase fix happened to come
+  // first: "operator does not exist: text = uuid".
+  const sequence = Math.min(...remaining.filter(i => nodes[i].rank !== undefined).map(i => nodes[i].phase))
+  return nodes[free].phase < sequence ? free : head
+}
 /** Have all of `after` already run? Iterated rather than spread — this is the
  * inner loop of the sort, and a large fix set runs it thousands of times. */
 function isSatisfied(after: Set<number>, done: Set<number>): boolean {

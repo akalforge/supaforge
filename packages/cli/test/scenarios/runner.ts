@@ -100,7 +100,11 @@ export async function runScenario(h: PgHarness, key: string, s: Scenario): Promi
         target: { dbUrl: h.urlFor('target', tgt) },
       },
     })
-    const cli = (...args: string[]) => h.cli(['diff', '--check=schema', ...args], { cwd: ws })
+    // Every check, as a plain `diff --apply` runs: the RLS check fixes the same
+    // policies the schema check reports, and how the two interleave is part of
+    // what has to work. Limited to the schema check, a policy placed ahead of
+    // the column change it needs could not show.
+    const cli = (...args: string[]) => h.cli(['diff', ...args], { cwd: ws })
     const preserve = s.preserve ?? []
     const rowsBefore = await rows(h, 'target', tgt, preserve)
 
@@ -114,6 +118,14 @@ export async function runScenario(h: PgHarness, key: string, s: Scenario): Promi
     if (diffState(before, await h.stateIn('target', tgt, schemas)).length > 0) {
       violations.push('a dry run changed the target')
     }
+
+    // The whole migration proved first, on a fresh copy of the target. The
+    // apply retries a fix that fails for something not yet there, which can
+    // hide a fix placed too early; the proof replays the script once, as
+    // written, so it cannot. Proved only after the safe apply below, there
+    // was nothing left to prove — and a policy ordered ahead of the column
+    // change it needed went unseen.
+    await provedOnACopy(h, `sc_${key}_p`, s, src, violations)
 
     // Applied as a user would first: drops held back, nothing rolled back.
     const safe = await cli('--apply', '--json')
@@ -197,6 +209,25 @@ export async function comparisonFindings(h: PgHarness, key: string, source: stri
       .flatMap(c => [...c.issues.map(i => `${c.check}: ${i.title}`), ...(c.status === 'error' ? [`${c.check}: error ${c.error}`] : [])])
   } finally {
     await Promise.all([h.dropDatabase('source', src), h.dropDatabase('target', tgt)])
+  }
+}
+
+async function provedOnACopy(h: PgHarness, copy: string, s: Scenario, src: string, violations: string[]): Promise<void> {
+  await h.createDatabase('target', copy)
+  try {
+    await h.applySqlIn('target', copy, s.target)
+    const ws = await h.workspace({
+      environments: { source: { dbUrl: h.urlFor('source', src) }, target: { dbUrl: h.urlFor('target', copy) } },
+    })
+    const r = await h.cli(['diff', '--apply', '--allow-destructive', '--prove'], { cwd: ws })
+    const out = r.stdout + r.stderr
+    if (/does not reproduce the source/.test(out)) violations.push(`--prove refused the whole migration:\n${short(r)}`)
+    else if (r.code !== 0) violations.push(`--prove on the whole migration exited ${r.code}:\n${short(r)}`)
+    else if (process.env.SCENARIO_REQUIRE_PROOF && /Convergence not proven: (pg_dump|could not resolve pg_dump)/.test(out)) {
+      violations.push(`--prove did not run:\n${short(r)}`)
+    }
+  } finally {
+    await h.dropDatabase('target', copy)
   }
 }
 

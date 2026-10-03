@@ -231,7 +231,7 @@ export async function proveConvergence(opts: {
     }
 
     const tools = { pgDump, psql, clientMajor, serverMajor }
-    await copyStructure(opts.targetUrl, cloneUrl, schemas, tools)
+    await copyStructure(opts.targetUrl, cloneUrl, schemas, tools, opts.sourceUrl)
     const scoped = opts.checks !== undefined && !opts.checks.includes('schema')
     const before = scoped ? await schemaState(cloneUrl, schemas) : undefined
 
@@ -296,7 +296,9 @@ interface PgTools { pgDump: string; psql: string; clientMajor: number; serverMaj
  * into a clone that deliberately has no such schema. `--prove` therefore
  * failed on every real Supabase project, whatever the client version.
  */
-async function copyStructure(fromUrl: string, intoUrl: string, schemas: string[], tools: PgTools): Promise<void> {
+async function copyStructure(
+  fromUrl: string, intoUrl: string, schemas: string[], tools: PgTools, migratingFrom?: string,
+): Promise<void> {
   // Prepare the copy to receive the proved schemas, and nothing else.
   await prepareClone(intoUrl, fromUrl, schemas)
 
@@ -304,7 +306,20 @@ async function copyStructure(fromUrl: string, intoUrl: string, schemas: string[]
   // a policy calling auth.uid(), cannot be created without them — every real
   // project failed here with `schema "auth" does not exist`. Copied, not
   // compared: the fingerprint covers only the proved schemas.
+  //
+  // The schemas the source's objects lean on as well, when it is a migration
+  // from that source being proved: a foreign key the migration adds onto
+  // another schema's table needs that schema in the clone, though nothing in
+  // the target uses it yet — the proof failed with `schema "app" does not
+  // exist` where the apply itself would have worked. Only those the target
+  // has: one it lacks would fail the real apply as well.
   const supporting = await supportingSchemas(fromUrl, schemas)
+  if (migratingFrom) {
+    const present = new Set((await pgQuery(fromUrl, 'SELECT nspname FROM pg_namespace') as Array<{ nspname: string }>).map(r => r.nspname))
+    for (const name of await supportingSchemas(migratingFrom, schemas)) {
+      if (present.has(name) && !supporting.includes(name)) supporting.push(name)
+    }
+  }
 
   const dumpArgs = [
     fromUrl, '--schema-only', '--no-owner', '--no-privileges',

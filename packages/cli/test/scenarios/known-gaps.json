@@ -10,20 +10,10 @@
     "objects_in_quoted_schema (before → after)": "DBDiff compares the public schema only.",
     "objects_in_quoted_schema (after → before)": "DBDiff compares the public schema only.",
     "objects_in_another_schema (before → after)": "DBDiff compares the public schema only.",
-    "objects_in_another_schema (after → before)": "DBDiff compares the public schema only.",
-    "partitions_added_with_default_and_index (before → after)": "@dbdiff/cli rc.18 creates a partitioned table's index ON ONLY, so it never reaches the partitions. Fixed in DBDiff#245.",
-    "sequence_shared_and_owned_with_options (before → after)": "@dbdiff/cli rc.18 treats a sequence owned by a column as its serial, losing its options. Fixed in DBDiff#245."
+    "objects_in_another_schema (after → before)": "DBDiff compares the public schema only."
   },
   "equivalences": {},
-  "data": {
-    "text_escaping": "@dbdiff/cli rc.18 quotes data values MySQL's way, so a quote or backslash breaks the INSERT on PostgreSQL. Fixed in DBDiff#245.",
-    "json_values": "@dbdiff/cli rc.18 quotes data values MySQL's way, so a JSON value with a quote fails to apply. Fixed in DBDiff#245.",
-    "array_values": "@dbdiff/cli rc.18 quotes data values MySQL's way, so an array literal with quotes is malformed. Fixed in DBDiff#245.",
-    "binary_values": "@dbdiff/cli rc.18 cannot read bytea, which PDO returns as a stream. Fixed in DBDiff#245.",
-    "no_primary_key": "@dbdiff/cli rc.18 skips a table with no primary key. Fixed in DBDiff#245.",
-    "identity_always": "@dbdiff/cli rc.18 inserts into a GENERATED ALWAYS identity without OVERRIDING SYSTEM VALUE. Fixed in DBDiff#245.",
-    "generated_column": "@dbdiff/cli rc.18 writes generated columns. Fixed in DBDiff#245."
-  },
+  "data": {},
   "topologies": {
     "pg17→pg15": {
       "migrations": {

@@ -136,3 +136,26 @@ describe('diffGrants', () => {
     expect(diffGrants([grant({ column_name: 'a' })], [grant({ column_name: 'b' })])).toHaveLength(2)
   })
 })
+
+/**
+ * Read from PostgreSQL's parse tree (sql-ast.ts), not the text. The text
+ * version took a column added to *another* table as the dropped one coming
+ * back, and let a drop that loses data through without --allow-destructive.
+ */
+describe('destructiveReason: from the parse tree', () => {
+  it('does not take a column added to another table as the dropped one re-added', () => {
+    expect(destructiveReason('ALTER TABLE a DROP COLUMN x; ALTER TABLE b ADD COLUMN x int;')).toMatch(/drops a column/)
+  })
+
+  it('still lets a column dropped and re-added on the same table through', () => {
+    expect(destructiveReason('ALTER TABLE a DROP COLUMN x; ALTER TABLE a ADD COLUMN x int GENERATED ALWAYS AS (1) STORED;')).toBeUndefined()
+  })
+
+  it('reads a policy dropped from a schema-qualified table', () => {
+    expect(destructiveReason('DROP POLICY "Owner only" ON "app"."docs";')).toMatch(/removes the policy docs.owner only/)
+  })
+
+  it('falls back to the text for SQL the parser does not accept', () => {
+    expect(destructiveReason('DROP TABLE x; THIS IS NOT SQL')).toMatch(/drops a table/)
+  })
+})

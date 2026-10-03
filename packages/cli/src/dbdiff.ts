@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import type { DriftIssue } from './types/drift'
 import { errMsg, friendlyDbError, DiagnosticError } from './utils/error'
 import { DBDIFF_EXEC_TIMEOUT_MS, DBDIFF_MAX_BUFFER } from './constants'
+import { parseStatements, names, relationName, type Statement } from './sql-ast.js'
 import { sqlSkeleton, policiesRemoved } from './sql-deps'
 import { escapeRegex } from './utils/strings'
 import { pairUnits, parseUnits, REPLACING_KINDS, type DbDiffUnit } from './dbdiff-units'
@@ -396,6 +397,65 @@ export function destructiveReason(
   sql: string,
   recreatedElsewhere: ReadonlySet<string> = new Set(),
 ): string | undefined {
+  const statements = parseStatements(sql)
+  return statements
+    ? destructiveInTree(statements, recreatedElsewhere)
+    : destructiveInText(sql, recreatedElsewhere)
+}
+
+/**
+ * destructiveReason() read from PostgreSQL's parse tree — see sql-ast.ts.
+ *
+ * The tree says what each statement is, so none of the cases the text
+ * version guards against can arise: `GRANT TRUNCATE` is a GrantStmt, not a
+ * TruncateStmt, and a function body mentioning `DROP TABLE` is a string.
+ */
+function destructiveInTree(statements: Statement[], recreatedElsewhere: ReadonlySet<string>): string | undefined {
+  const dropped = (type: string) => statements.some(s => s.kind === 'DropStmt' && s.node.removeType === type)
+  if (dropped('OBJECT_SCHEMA')) return 'drops a schema and everything in it'
+  if (dropped('OBJECT_TABLE')) return 'drops a table and its rows'
+  if (statements.some(s => s.kind === 'TruncateStmt')) return 'deletes every row in a table'
+  if (columnsDroppedForGoodInTree(statements).length > 0) return 'drops a column and its values'
+  if (statements.some(s => s.kind === 'DeleteStmt')) return 'deletes rows'
+  if (statements.some(s => s.kind === 'DropRoleStmt')) return 'drops a role, and every login and grant it holds'
+
+  // A policy the same SQL creates again is being replaced, not removed — as
+  // is one another fix in the apply recreates (recreatedElsewhere).
+  const key = (table: string, policy: string) => `${table.toLowerCase()}.${policy.toLowerCase()}`
+  const created = new Set(statements.filter(s => s.kind === 'CreatePolicyStmt')
+    .map(s => key(relationName(s.node.table), s.node.policy_name)))
+  const policies = statements
+    .filter(s => s.kind === 'DropStmt' && s.node.removeType === 'OBJECT_POLICY')
+    .flatMap(s => (s.node.objects as Array<Record<string, any>>).map(o => names(o.List?.items)))
+    .map(parts => key(parts.at(-2) ?? '', parts.at(-1) ?? ''))
+    .filter(k => !created.has(k) && !recreatedElsewhere.has(k))
+  if (policies.length > 0) {
+    return policies.length === 1
+      ? `removes the policy ${policies[0]}, which may widen access`
+      : `removes ${policies.length} policies, which may widen access`
+  }
+  return undefined
+}
+
+/** Columns an ALTER TABLE drops, unless a later command in the same SQL adds them back. */
+function columnsDroppedForGoodInTree(statements: Statement[]): string[] {
+  const commands = statements
+    .filter(s => s.kind === 'AlterTableStmt')
+    .flatMap(s => (s.node.cmds as Array<Record<string, any>>).map(c => ({ table: relationName(s.node.relation), cmd: c.AlterTableCmd })))
+  return commands.flatMap(({ table, cmd }, i) => {
+    if (cmd?.subtype !== 'AT_DropColumn') return []
+    const readded = commands.slice(i + 1).some(later =>
+      later.table === table && later.cmd?.subtype === 'AT_AddColumn' && later.cmd.def?.ColumnDef?.colname === cmd.name)
+    return readded ? [] : [cmd.name as string]
+  })
+}
+
+/**
+ * destructiveReason() read from the text, for SQL PostgreSQL's parser does not
+ * accept — a fragment, or a dialect it does not speak. What it did before the
+ * parse tree was used.
+ */
+function destructiveInText(sql: string, recreatedElsewhere: ReadonlySet<string>): string | undefined {
   const skeleton = sqlSkeleton(sql).toUpperCase()
 
   if (/\bDROP\s+SCHEMA\b/.test(skeleton)) return 'drops a schema and everything in it'

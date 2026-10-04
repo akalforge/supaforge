@@ -4,7 +4,7 @@ import { execFile as execFileCb } from 'node:child_process'
 import { promisify } from 'node:util'
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
-import { quoteIdent, quoteLiteral } from './utils/sql'
+import { quoteIdent, quoteLiteral, quoteName } from './utils/sql'
 import { normalizeRoles } from './utils/strings'
 import type { EnvironmentConfig, SupaForgeConfig, SnapshotManifest, SnapshotLayerInfo } from './types/config'
 import { DEFAULT_IGNORE_SCHEMAS, RELATION_NOT_FOUND } from './defaults'
@@ -223,7 +223,8 @@ async function captureSchemaSql(
 
     const { stdout } = await execFile(resolved.path, [
       dbUrl, '--schema-only', '--no-owner', '--no-privileges',
-      ...schemasIn(schema).map(s => `--schema=${s}`),
+      // Quoted: pg_dump reads --schema as a pattern, folding `App Data` to lower case.
+      ...schemasIn(schema).map(s => `--schema=${quoteName(s)}`),
     ], { maxBuffer: 256 * 1024 * 1024, timeout: 300_000 })
 
     if (stdout.trim().length === 0) {

@@ -30,6 +30,8 @@ import { diffState } from './state-diff'
 import { resolvePgDumpPath, getServerMajorVersion } from './pg-tools'
 import { rolesNamedBy, sqlSkeleton } from './sql-deps'
 import { splitSqlStatements, isCommentOnly } from './utils/sql-split.js'
+import { quoteName } from './utils/sql.js'
+import { globToRegExp } from './utils/strings.js'
 import { join, dirname } from 'node:path'
 
 const exec = promisify(execFile)
@@ -171,8 +173,7 @@ export async function comparedSchemas(
       AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'
       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_namespace'::regclass
                         AND d.objid = n.oid AND d.deptype = 'e')`
-  const glob = (p: string) => new RegExp(`^${p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`)
-  const ignored = ignore.map(glob)
+  const ignored = ignore.map(globToRegExp)
   const names = (await Promise.all([sourceUrl, targetUrl].map(url => query(url, sql))))
     .flat().map(r => String((r as { name: unknown }).name))
   return [...new Set(names)].filter(n => !ignored.some(g => g.test(n))).sort()
@@ -342,10 +343,12 @@ async function copyStructure(
     }
   }
 
-  // A proved schema only the source has is the migration's to create.
+  // A proved schema only the source has is the migration's to create. Each
+  // name quoted: pg_dump reads --schema as a pattern, folding `App Data` to
+  // lower case, which matched nothing.
   const dumpArgs = [
     fromUrl, '--schema-only', '--no-owner', '--no-privileges',
-    ...[...schemas.filter(s => present.has(s)), ...supporting].map(s => `--schema=${s}`),
+    ...[...schemas.filter(s => present.has(s)), ...supporting].map(s => `--schema=${quoteName(s)}`),
   ]
   const { stdout: structure } = await exec(tools.pgDump, dumpArgs, {
     maxBuffer: 256 * 1024 * 1024, timeout: 300_000,

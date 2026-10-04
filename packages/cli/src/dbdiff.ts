@@ -7,6 +7,7 @@ import { promisify } from 'node:util'
 import type { DriftIssue } from './types/drift'
 import { errMsg, friendlyDbError, DiagnosticError } from './utils/error'
 import { DBDIFF_EXEC_TIMEOUT_MS, DBDIFF_MAX_BUFFER } from './constants'
+import { schemaDiffIgnores } from './defaults'
 import { parseStatements, names, relationName, type Statement } from './sql-ast.js'
 import { sqlSkeleton, policiesRemoved } from './sql-deps'
 import { escapeRegex } from './utils/strings'
@@ -191,13 +192,14 @@ export function buildDbDiffArgs(options: DbDiffOptions, outputFile: string): str
     args.push(`--memory-limit=${memoryLimit}`)
   }
 
-  // Both --tables and --ignore-tables take one comma-separated list, so the
-  // ignoreSchemas globs (auth.*, storage.*) have to merge into any existing
-  // --ignore-tables value rather than be appended as a second flag.
-  const ignore = [
-    ...(options.ignoreTables ?? []),
-    ...(options.ignoreSchemas ?? []).map(s => `${s}.*`),
-  ]
+  // A schema diff compares every schema but the ignored ones. dbdiff named
+  // tables without their schema, so these were once passed as table globs
+  // (auth.*) that matched nothing: dbdiff read `public` alone. Data diffs
+  // name their tables in checks.data.tables, which are in `public`.
+  if (options.type === 'schema' && options.ignoreSchemas) {
+    args.push(`--ignore-schemas=${schemaDiffIgnores(options.ignoreSchemas).join(',')}`)
+  }
+  const ignore = options.ignoreTables ?? []
 
   if (options.tables?.length) {
     args.push(`--tables=${options.tables.join(',')}`)

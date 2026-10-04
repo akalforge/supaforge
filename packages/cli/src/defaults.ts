@@ -36,6 +36,17 @@ export const SUPABASE_PLATFORM_SCHEMAS = [
   'graphql',
 ]
 
+/**
+ * The schemas a schema diff leaves out: the project's `ignoreSchemas`, and
+ * always the platform's own — those above, and the self-hosted stack's
+ * `_realtime` and `_analytics`, and pgsodium's `pgsodium_masks`. Every other
+ * schema is compared.
+ */
+export function schemaDiffIgnores(ignoreSchemas: readonly string[] = DEFAULT_IGNORE_SCHEMAS): string[] {
+  return [...new Set([...ignoreSchemas, ...SUPABASE_PLATFORM_SCHEMAS.filter(s => !DEFAULT_IGNORE_SCHEMAS.includes(s)),
+    '_realtime', '_analytics', 'pgsodium_masks'])]
+}
+
 /** Hint text shown during `supaforge init` to guide users through the Supabase UI. */
 export const INIT_HINTS = {
   DB_URL: [

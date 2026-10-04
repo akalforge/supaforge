@@ -14,9 +14,9 @@ import { formatGitHubAnnotations, computeCiExitCode, formatCiSummary, type FailO
 import { resolveTableFilter, isFiltered, describeTableFilter } from '../utils/table-filter.js'
 import { parseFlagList } from '../utils/strings.js'
 import { isCloneDatabase, sourceLooksLikeCloneOf } from '../branch.js'
-import { proveConvergence, residualHeldBack, proofScope } from '../prove.js'
+import { proveConvergence, residualHeldBack, proofScope, comparedSchemas } from '../prove.js'
 import { summarizeByKind } from '../scoring.js'
-import { CLONE_SKIP_FLAGS } from '../defaults.js'
+import { CLONE_SKIP_FLAGS, DEFAULT_IGNORE_SCHEMAS, schemaDiffIgnores } from '../defaults.js'
 
 /**
  * Glyph and text for a finished check, so the three outcomes are visually
@@ -393,6 +393,10 @@ export default class Diff extends BaseCommand {
             sourceUrl: sourceEnv.dbUrl,
             targetUrl: targetEnv.dbUrl,
             migrationSql,
+            // Every schema the schema diff compares, not `public` alone: a
+            // migration dropping a schema the source lacks runs against it.
+            schemas: await comparedSchemas(sourceEnv.dbUrl, targetEnv.dbUrl,
+              schemaDiffIgnores(config.ignoreSchemas ?? DEFAULT_IGNORE_SCHEMAS)),
             // The checks this run compares: without the schema check, what the
             // target already lacks elsewhere is not this migration's to fix.
             checks: scanResult.checks.map(c => c.check),

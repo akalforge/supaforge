@@ -51,6 +51,20 @@ jobs:
             | docker login ghcr.io -u "${{ github.actor }}" --password-stdin \
             || echo "::warning::ghcr login failed — pulls will be anonymous"
 
+      # --prove needs a pg_dump at least as new as the server. Without one it
+      # steps aside, and yy-cli-prove would pass having proved nothing.
+      - name: Install PostgreSQL client 18
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -fsSL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list > /dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends postgresql-client-18
+          /usr/lib/postgresql/18/bin/pg_dump --version
+
       - name: Install dependencies
         working-directory: packages/cli
         run: npm ci

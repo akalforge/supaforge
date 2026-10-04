@@ -7,10 +7,8 @@
     "starts passing, so the list can only shrink."
   ],
   "migrations": {
-    "objects_in_quoted_schema (before → after)": "DBDiff compares the public schema only.",
-    "objects_in_quoted_schema (after → before)": "DBDiff compares the public schema only.",
-    "objects_in_another_schema (before → after)": "DBDiff compares the public schema only.",
-    "objects_in_another_schema (after → before)": "DBDiff compares the public schema only."
+    "objects_in_quoted_schema (before → after)": "DBDiff does not compare or migrate a column's comment, so its COMMENT ON COLUMN is lost.",
+    "objects_in_quoted_schema (after → before)": "DBDiff does not compare or migrate a column's comment, so its COMMENT ON COLUMN is lost."
   },
   "equivalences": {},
   "data": {},

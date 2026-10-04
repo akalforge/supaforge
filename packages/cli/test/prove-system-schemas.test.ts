@@ -85,12 +85,19 @@ describe('prepareClone: extensions in system schemas', () => {
     expect(created).toContain('"graphql"')
   })
 
-  it('does not create a schema it is about to drop and replay into', async () => {
+  // pg_dump --schema=public does not dump an extension installed in public,
+  // so the clone has it installed after the schema is dropped; the dump's own
+  // CREATE SCHEMA is made tolerant of finding the schema there.
+  it('recreates a proved schema to install its extension, after dropping it', async () => {
     const { ran, queryFn } = harness([{ name: 'ext_in_public', schema: 'public' }])
 
     await prepareClone('postgres://clone', 'postgres://target', ['public'], queryFn)
 
-    expect(ran.filter(sql => sql.startsWith('CREATE SCHEMA'))).toEqual([])
+    const at = (sql: string) => ran.indexOf(sql)
+    expect(at('DROP SCHEMA IF EXISTS "public" CASCADE')).toBeGreaterThanOrEqual(0)
+    expect(at('CREATE SCHEMA IF NOT EXISTS "public"')).toBeGreaterThan(at('DROP SCHEMA IF EXISTS "public" CASCADE'))
+    expect(at('CREATE EXTENSION IF NOT EXISTS "ext_in_public" WITH SCHEMA "public"'))
+      .toBeGreaterThan(at('CREATE SCHEMA IF NOT EXISTS "public"'))
   })
 
   it('survives a schema the clone will not accept', async () => {

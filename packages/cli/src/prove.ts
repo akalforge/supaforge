@@ -30,6 +30,8 @@ import { diffState } from './state-diff'
 import { resolvePgDumpPath, getServerMajorVersion } from './pg-tools'
 import { rolesNamedBy, sqlSkeleton } from './sql-deps'
 import { splitSqlStatements, isCommentOnly } from './utils/sql-split.js'
+import { quoteName } from './utils/sql.js'
+import { globToRegExp } from './utils/strings.js'
 import { join, dirname } from 'node:path'
 
 const exec = promisify(execFile)
@@ -155,6 +157,26 @@ async function schemaState(dbUrl: string, schemas: string[]): Promise<SchemaStat
   const value = rows[0]?.state
   if (!value) throw new Error('state query returned no "state" column')
   return JSON.parse(value) as SchemaState
+}
+
+/**
+ * The schemas a schema diff compares between two databases: every schema
+ * either has, but the system's own, an extension's own, and `ignore`
+ * (globs: `*`, `?`), as `dbdiff --ignore-schemas` chooses them. What a
+ * proof must cover, and nothing more.
+ */
+export async function comparedSchemas(
+  sourceUrl: string, targetUrl: string, ignore: readonly string[], query: QueryFn = pgQuery,
+): Promise<string[]> {
+  const sql = `SELECT n.nspname AS name FROM pg_namespace n
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema')
+      AND n.nspname NOT LIKE 'pg\\_toast%' AND n.nspname NOT LIKE 'pg\\_temp\\_%'
+      AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_namespace'::regclass
+                        AND d.objid = n.oid AND d.deptype = 'e')`
+  const ignored = ignore.map(globToRegExp)
+  const names = (await Promise.all([sourceUrl, targetUrl].map(url => query(url, sql))))
+    .flat().map(r => String((r as { name: unknown }).name))
+  return [...new Set(names)].filter(n => !ignored.some(g => g.test(n))).sort()
 }
 
 /**
@@ -314,16 +336,19 @@ async function copyStructure(
   // exist` where the apply itself would have worked. Only those the target
   // has: one it lacks would fail the real apply as well.
   const supporting = await supportingSchemas(fromUrl, schemas)
+  const present = new Set((await pgQuery(fromUrl, 'SELECT nspname FROM pg_namespace') as Array<{ nspname: string }>).map(r => r.nspname))
   if (migratingFrom) {
-    const present = new Set((await pgQuery(fromUrl, 'SELECT nspname FROM pg_namespace') as Array<{ nspname: string }>).map(r => r.nspname))
     for (const name of await supportingSchemas(migratingFrom, schemas)) {
       if (present.has(name) && !supporting.includes(name)) supporting.push(name)
     }
   }
 
+  // A proved schema only the source has is the migration's to create. Each
+  // name quoted: pg_dump reads --schema as a pattern, folding `App Data` to
+  // lower case, which matched nothing.
   const dumpArgs = [
     fromUrl, '--schema-only', '--no-owner', '--no-privileges',
-    ...[...schemas, ...supporting].map(s => `--schema=${s}`),
+    ...[...schemas.filter(s => present.has(s)), ...supporting].map(s => `--schema=${quoteName(s)}`),
   ]
   const { stdout: structure } = await exec(tools.pgDump, dumpArgs, {
     maxBuffer: 256 * 1024 * 1024, timeout: 300_000,

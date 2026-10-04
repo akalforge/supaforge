@@ -1223,18 +1223,19 @@ supaforge diff                # schema + data checks active out of the box
 
 The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.
 
-**What the schema layer reaches.** `3.0.0-rc.19`, the pinned version, models
+**What the schema layer reaches.** `3.0.0-rc.20`, the pinned version, models
 composite types, domains, materialized views (and their indexes), standalone
 sequences and RLS policies — five kinds that earlier releases did not read at
 all, and therefore reported as no drift whether they matched or not. A schema
 that SupaForge has synced can now be diffed again and come back clean, which is
 what makes `--prove` meaningful.
 
-**Not yet: schemas other than `public`.** DBDiff reads the `public` schema
-only, so a table, type or function in another schema you own (`app`,
-`private`) is not compared, and a difference confined to one reads as no
-drift. Supabase's own schemas are ignored either way. Comparing every schema is
-in progress in DBDiff; until then, keep what you want compared in `public`.
+**Every schema you own.** The schema check compares every schema but the ones
+in `ignoreSchemas` (Supabase's own by default) and those the platform always
+keeps — `cron`, `pgbouncer`, `graphql` and the like. A table, type or function
+in `app` or `private` is compared like one in `public`, a schema only one side
+has is created or dropped, and `--prove` covers all of them. To leave a schema
+of your own out, add it to `ignoreSchemas`.
 
 **Objects an extension owns are no longer compared.** An extension brings its
 own functions, tables and types — `CREATE EXTENSION pg_trgm` alone installs 31

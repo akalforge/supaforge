@@ -125,19 +125,23 @@ describe('buildDbDiffArgs', () => {
     expect(buildDbDiffArgs(base, '/tmp/o.sql')).toContain('--memory-limit=2G')
   })
 
-  it('merges ignoreSchemas globs into a single --ignore-tables flag', () => {
-    // dbdiff takes one comma-separated list, so these must not be two flags.
+  it('compares every schema but the ignored ones', () => {
     const args = buildDbDiffArgs(
-      { ...base, ignoreTables: ['cache_x'], ignoreSchemas: ['auth', 'storage'] },
+      { ...base, type: 'schema', ignoreTables: ['cache_x'], ignoreSchemas: ['auth', 'storage'] },
       '/tmp/o.sql',
     )
-    const ignore = args.filter(a => a.startsWith('--ignore-tables='))
-    expect(ignore).toEqual(['--ignore-tables=cache_x,auth.*,storage.*'])
+    const schemas = args.find(a => a.startsWith('--ignore-schemas='))?.slice('--ignore-schemas='.length).split(',')
+    // The project's own, and the platform's always.
+    expect(schemas).toEqual(expect.arrayContaining(['auth', 'storage', 'pgbouncer', 'cron', 'graphql', '_analytics']))
+    expect(schemas).not.toContain('public')
+    expect(args.filter(a => a.startsWith('--ignore-tables='))).toEqual(['--ignore-tables=cache_x'])
   })
 
-  it('emits --ignore-tables from ignoreSchemas alone', () => {
-    const args = buildDbDiffArgs({ ...base, ignoreSchemas: ['auth'] }, '/tmp/o.sql')
-    expect(args).toContain('--ignore-tables=auth.*')
+  // checks.data.tables names tables in public; a data diff stays there.
+  it('leaves a data diff in public', () => {
+    const args = buildDbDiffArgs({ ...base, type: 'data', ignoreSchemas: ['auth'] }, '/tmp/o.sql')
+    expect(args.some(a => a.startsWith('--ignore-schemas='))).toBe(false)
+    expect(args.some(a => a.startsWith('--ignore-tables='))).toBe(false)
   })
 
   it('omits --tables and --ignore-tables when nothing is filtered', () => {

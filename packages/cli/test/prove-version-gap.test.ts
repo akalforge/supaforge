@@ -206,11 +206,14 @@ describe('prepareClone (issue #72)', () => {
     expect(sql).toContain('CREATE EXTENSION IF NOT EXISTS "pg_graphql" WITH SCHEMA "graphql"')
   })
 
-  it('leaves an extension living in a proved schema to the dump', async () => {
-    // The dump carries it, so creating it first would collide.
-    const { calls, queryFn } = recorder([{ name: 'pgcrypto', schema: 'public' }])
+  it('installs an extension living in a proved schema too', async () => {
+    // pg_dump --schema=public does not dump btree_gist installed in public,
+    // so an exclusion constraint using it could not be replayed on the clone.
+    const { calls, queryFn } = recorder([{ name: 'btree_gist', schema: 'public' }])
     await prepareClone('postgres://clone/db', 'postgres://target/db', ['public'], queryFn)
-    expect(calls.map(c => c.sql).join('\n')).not.toContain('pgcrypto')
+    const sql = calls.map(c => c.sql)
+    expect(sql.indexOf('CREATE EXTENSION IF NOT EXISTS "btree_gist" WITH SCHEMA "public"'))
+      .toBeGreaterThan(sql.indexOf('DROP SCHEMA IF EXISTS "public" CASCADE'))
   })
 
   it('reads the extension list from the target, not the clone', async () => {

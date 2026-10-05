@@ -56,6 +56,11 @@ export const PHASE = {
   OTHER: 85,
   /** Triggers and policies: the last things to be created. */
   CREATE_DEPENDANT: 90,
+  /**
+   * Comments, once what they name exists: a policy or trigger is created at
+   * CREATE_DEPENDANT, and a COMMENT ON it read as OTHER ran before it.
+   */
+  COMMENT: 95,
   /** Row changes, once the structure holding them is in place. */
   DATA: 100,
   DROP_TABLE: 110,
@@ -72,6 +77,11 @@ export const PHASE = {
   /** Once nothing that used it is left. */
   DROP_EXTENSION: 125,
 } as const
+
+/** The phases that take something away rather than make it. */
+const DROP_PHASES: ReadonlySet<number> = new Set([
+  PHASE.DROP_DEPENDANT, PHASE.DROP_TABLE, PHASE.DROP_ROUTINE, PHASE.DROP_BASE, PHASE.DROP_EXTENSION,
+])
 
 /**
  * Phase rules, first match wins.
@@ -94,6 +104,7 @@ const PHASE_RULES: Array<[RegExp, number]> = [
   [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\b/i, PHASE.CREATE_VIEW],
   [/\bCREATE\s+(?:UNIQUE\s+)?INDEX\b/i, PHASE.CREATE_INDEX],
   [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\b/i, PHASE.CREATE_ROUTINE],
+  [/^\s*COMMENT\s+ON\b/i, PHASE.COMMENT],
   [/^\s*CREATE\s+SCHEMA\b/i, PHASE.CREATE_SCHEMA],
   [/^\s*CREATE\s+EXTENSION\b/i, PHASE.CREATE_EXTENSION],
   [/^\s*DROP\s+EXTENSION\b/i, PHASE.DROP_EXTENSION],
@@ -458,7 +469,14 @@ function nextReady(remaining: number[], nodes: Node[], done: Set<number>): numbe
   // fix at its head. Compared with the head alone, an RLS policy jumped ahead
   // of a column change it needed whenever a late-phase fix happened to come
   // first: "operator does not exist: text = uuid".
-  const sequence = Math.min(...remaining.filter(i => nodes[i].rank !== undefined).map(i => nodes[i].phase))
+  //
+  // What it has left to make, that is: a drop provides nothing another fix
+  // could need. Counted, a DROP INDEX DBDiff sequences after its tables held
+  // CREATE EXTENSION back until after the table whose exclusion constraint
+  // needs it.
+  const sequence = Math.min(...remaining
+    .filter(i => nodes[i].rank !== undefined && !DROP_PHASES.has(nodes[i].phase))
+    .map(i => nodes[i].phase))
   return nodes[free].phase < sequence ? free : head
 }
 /** Have all of `after` already run? Iterated rather than spread — this is the

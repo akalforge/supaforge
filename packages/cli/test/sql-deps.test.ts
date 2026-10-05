@@ -434,6 +434,15 @@ describe('orderStatements: DBDiff\'s order kept for its own fixes', () => {
     expect(orderStatements([policy, identity, retype], s => s.sql, s => s.rank)).toEqual([identity, retype, policy])
   })
 
+  // DBDiff drops an index after the tables it creates; that drop provides
+  // nothing, and must not hold back the extension a new table needs.
+  it('puts an extension ahead of the DBDiff tables needing it, whatever DBDiff drops later', () => {
+    const table = { sql: 'CREATE TABLE public.bookings (room integer, during tsrange, EXCLUDE USING gist (room WITH =, during WITH &&));', rank: 0 }
+    const dropIndex = { sql: 'DROP INDEX "accounts_legacy";', rank: 1 }
+    const extension = { sql: 'CREATE EXTENSION IF NOT EXISTS "btree_gist" SCHEMA "extensions";', rank: undefined }
+    expect(orderStatements([table, dropIndex, extension], s => s.sql, s => s.rank)).toEqual([extension, table, dropIndex])
+  })
+
   it('places a fix without a rank by its phase', () => {
     const policy = { sql: 'CREATE POLICY p ON t USING (true);', rank: undefined }
     const table = { sql: 'CREATE TABLE t (id int);', rank: 0 }
@@ -455,6 +464,15 @@ describe('statementPhase: schemas and extensions', () => {
   it('drops an extension after what used it', () => {
     expect(statementPhase('DROP EXTENSION IF EXISTS "btree_gist";')).toBeGreaterThan(statementPhase('DROP TABLE b;'))
     expect(statementPhase('DROP EXTENSION IF EXISTS "btree_gist";')).toBeGreaterThan(statementPhase('DROP TYPE t;'))
+  })
+})
+
+describe('statementPhase: comments', () => {
+  // A COMMENT ON a policy the RLS check creates ran before the policy existed.
+  it('sets a comment after what it names is created', () => {
+    const comment = statementPhase(`COMMENT ON POLICY "own" ON "public"."orders" IS 'x';`)
+    expect(comment).toBeGreaterThan(statementPhase('CREATE POLICY "own" ON "public"."orders" USING (true);'))
+    expect(comment).toBeGreaterThan(statementPhase('CREATE TRIGGER t BEFORE INSERT ON x FOR EACH ROW EXECUTE FUNCTION f();'))
   })
 })
 

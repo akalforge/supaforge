@@ -120,10 +120,11 @@ export interface CheckResult {
   skipReason?: string
   /**
    * Findings left out because another check reports the same object — the
-   * schema check's policy findings where the RLS check has them (issue #97).
-   * Counted so the difference from the live progress line is explained.
+   * schema check's policy findings where the RLS check has them (issue #97),
+   * its extension findings where the extensions check has them. Counted so
+   * the difference from the live progress line is explained.
    */
-  folded?: { count: number; into: CheckName }
+  folded?: Array<{ count: number; into: CheckName }>
   durationMs: number
 }
 

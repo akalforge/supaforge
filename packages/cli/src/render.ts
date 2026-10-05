@@ -223,9 +223,9 @@ function formatCheckLine(lr: CheckResult): string {
   const errLabel = errText ? `  ${warn(`(error: ${errText})`)}` : ''
   // The live progress line counted these before they were folded; saying so
   // keeps the two numbers from looking inconsistent (issue #97).
-  const folded = lr.folded
-    ? `  ${dim(`(+${lr.folded.count} reported under ${CHECK_META[lr.folded.into].label})`)}`
-    : ''
+  const folded = (lr.folded ?? [])
+    .map(f => `  ${dim(`(+${f.count} reported under ${CHECK_META[f.into].label})`)}`)
+    .join('')
   return `${prefix.padEnd(CHECK_LINE_PADDING)}${count} ${noun}${sevLabel}${folded}${errLabel}`
 }
 

@@ -442,3 +442,36 @@ describe('captureSnapshot: vault', () => {
     expect(layer.error).toContain('unique_name')
   })
 })
+
+// The RLS layer drops and recreates each policy, which took the comment the
+// schema dump had set on it: a restore came back without it.
+describe('captureSnapshot: a policy keeps its comment', () => {
+  let dir: string
+  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'supaforge-snap-')) })
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }) })
+
+  async function rlsSql(rows: unknown[]): Promise<string> {
+    const queryFn = (async (_url: string, sql: string) => sql.includes('pg_policies') ? rows : []) as unknown as QueryFn
+    const result = await captureSnapshot({
+      envName: 'prod',
+      env: { dbUrl: 'postgres://example' },
+      config: { environments: { prod: { dbUrl: 'postgres://example' } } } as never,
+      outputDir: dir,
+      queryFn,
+      fetchFn: (async () => new Response('[]', { status: 200 })) as never,
+    })
+    return readFile(join(result.dir, 'rls.sql'), 'utf8')
+  }
+
+  const policy = { schemaname: 'public', tablename: 'orders', policyname: 'own', permissive: 'PERMISSIVE', roles: ['authenticated'], cmd: 'SELECT', qual: 'true', with_check: null }
+
+  it('sets the comment after recreating the policy', async () => {
+    const sql = await rlsSql([{ ...policy, comment: "buyers' own orders" }])
+    expect(sql).toContain(`COMMENT ON POLICY "own" ON "public"."orders" IS 'buyers'' own orders';`)
+    expect(sql.indexOf('COMMENT ON POLICY')).toBeGreaterThan(sql.indexOf('CREATE POLICY'))
+  })
+
+  it('writes no comment for a policy without one', async () => {
+    expect(await rlsSql([{ ...policy, comment: null }])).not.toContain('COMMENT ON')
+  })
+})

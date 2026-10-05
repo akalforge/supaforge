@@ -84,6 +84,10 @@ export default class Restore extends BaseCommand {
     if (flags.apply) {
       const tables = await getPublicTables(env.dbUrl)
       if (tables.length > 0 && !flags.force) {
+        if (flags.json) {
+          this.log(JSON.stringify({ error: 'Target database is not empty', tables }, null, 2))
+          this.exit(1)
+        }
         this.log(`\n${warn('Target database is not empty.')} Found ${tables.length} table(s) in public schema:`)
         for (const t of tables.slice(0, 10)) {
           this.log(`  • ${t}`)
@@ -134,8 +138,12 @@ export default class Restore extends BaseCommand {
     }
 
     if (!flags.apply) {
-      this.log('\nRestore preview (dry-run) -- from snapshot\n')
       const preview = await previewSnapshotRestore(snapshotDir)
+      if (flags.json) {
+        this.log(JSON.stringify({ dryRun: true, snapshot: snapshotDir, layers: preview }, null, 2))
+        return
+      }
+      this.log('\nRestore preview (dry-run) -- from snapshot\n')
       if (preview.length === 0) {
         this.log('  No executable SQL found in snapshot.')
         return
@@ -161,7 +169,7 @@ export default class Restore extends BaseCommand {
       return
     }
 
-    this.log(`\nRestoring from snapshot...\n`)
+    if (!flags.json) this.log(`\nRestoring from snapshot...\n`)
 
     const result = await restoreFromSnapshot({
       targetUrl,
@@ -185,8 +193,21 @@ export default class Restore extends BaseCommand {
     const fromVersion = flags.from as string | undefined
 
     if (!flags.apply) {
-      this.log('\nRestore preview (dry-run) -- from migrations\n')
       const migrations = await previewMigrationRestore(process.cwd(), toVersion, fromVersion)
+      if (flags.json) {
+        this.log(JSON.stringify({
+          dryRun: true,
+          migrations: migrations.map(m => ({
+            version: m.version,
+            description: m.description,
+            layers: m.layers,
+            sqlStatements: m.up.sql.length,
+            apiActions: m.up.api.length,
+          })),
+        }, null, 2))
+        return
+      }
+      this.log('\nRestore preview (dry-run) -- from migrations\n')
       if (migrations.length === 0) {
         this.log('  No migrations found.')
         return
@@ -203,7 +224,7 @@ export default class Restore extends BaseCommand {
       return
     }
 
-    this.log(`\nRestoring from migrations...\n`)
+    if (!flags.json) this.log(`\nRestoring from migrations...\n`)
 
     // --no-transaction is deliberately not forwarded: the migration path
     // applies and records one migration at a time, so wrapping the set in a
@@ -224,7 +245,11 @@ export default class Restore extends BaseCommand {
     json: boolean,
   ): void {
     if (json) {
+      // Only the JSON on stdout, so it parses, and the same exit code as the
+      // text report: a restore that failed or left things out is not one a
+      // script should read as success.
       this.log(JSON.stringify(result, null, 2))
+      if (result.errors.length > 0 || result.incomplete) this.exit(1)
       return
     }
 
@@ -250,6 +275,13 @@ export default class Restore extends BaseCommand {
       // back applied nothing, and saying otherwise would be the most
       // misleading thing this command could print (issue #95).
       this.log(`\n↩  Rolled back ${result.rolledBack.length} operation(s) — the target is unchanged.`)
+    }
+
+    if (result.incomplete && result.errors.length === 0) {
+      // Restored, but not all of it: what was left out is listed above, each
+      // with what it needed. Not a success a script should take as one.
+      this.log(`\n⚠  Restored everything this target can hold. What it cannot is listed above as skipped.`)
+      process.exitCode = 1
     }
 
     if (result.errors.length > 0) {

@@ -68,6 +68,12 @@ export interface RestoreResult {
   errors: { type: 'sql' | 'api'; label: string; error: string }[]
   mode: 'snapshot' | 'migrations'
   /**
+   * Objects of the snapshot left out because they need something this target
+   * cannot have — an extension it does not ship, a Supabase schema it lacks —
+   * listed in `skipped`. The rest was restored; the copy is not complete.
+   */
+  incomplete?: boolean
+  /**
    * Statements that ran and were then rolled back, when the restore was
    * transactional and something failed.
    *
@@ -126,6 +132,9 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
   // gives in promote().
   const transactional = !options.noTransaction
   if (transactional) await client.query('BEGIN')
+
+  /** What the target turned out to lack — see tolerableFailure. */
+  const missing = new Set<string>()
 
   /** Webhook triggers the schema dump creates, so the webhooks layer can skip them. */
   const createdBySchemaLayer = new Set<string>()
@@ -248,7 +257,7 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
         }
 
         for (const sql of statements) {
-          await applyStatement(client, sql, transactional, result)
+          await applyStatement(client, sql, transactional, result, missing)
         }
       } catch (err) {
         if (err instanceof RestoreAborted) throw err
@@ -768,6 +777,7 @@ export function tolerableFailure(
   sql: string,
   err: unknown,
   targetSchemas: ReadonlySet<string>,
+  missing: ReadonlySet<string> = new Set(),
 ): string | undefined {
   const code = (err as { code?: string } | null)?.code
   if (!code) return undefined
@@ -778,13 +788,33 @@ export function tolerableFailure(
       ? `extension not available on this server: ${errMsg(err)}`
       : undefined
   }
-  if (!ABSENT_ON_TARGET.has(code) || !ATTACHMENT.test(skeleton)) return undefined
+  // A snapshot of PostgreSQL 17 grants MAINTAIN, which an older server has no
+  // word for: restoring it into 15 rolled back everything.
+  if (/^\s*GRANT\s+MAINTAIN\b/i.test(skeleton) && /unrecognized privilege type/i.test(errMsg(err))) {
+    return 'MAINTAIN is a PostgreSQL 17 privilege this server does not have'
+  }
+  if (!ABSENT_ON_TARGET.has(code)) return undefined
 
   const schema = mentionedPlatformSchema(sql, targetSchemas)
-  return schema
-    ? `depends on ${schema}, which this target does not have (${errMsg(err)})`
-    : undefined
+  if (schema && (ATTACHMENT.test(skeleton) || ROUTINE.test(skeleton))) {
+    return `depends on ${schema}, which this target does not have (${errMsg(err)})`
+  }
+  // Once the target has turned out to lack something the snapshot needs, what
+  // needs it fails in turn: the table typed by the extension, then its
+  // indexes, keys and rows. Each is left out and named, and the rest is
+  // restored — one missing extension rolled back everything before.
+  if (missing.size > 0) {
+    return `${errMsg(err)}, as this target lacks ${[...missing].join(', ')}`
+  }
+  return undefined
 }
+
+/**
+ * A routine, which fails when its signature names a type or table in a schema
+ * the target lacks. Its body is not checked: the schema dump turns
+ * check_function_bodies off.
+ */
+const ROUTINE = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\b/i
 
 /**
  * Run one restore statement, with what it needs prepared first.
@@ -798,6 +828,7 @@ async function applyStatement(
   sql: string,
   transactional: boolean,
   result: RestoreResult,
+  missing: Set<string>,
 ): Promise<void> {
   if (transactional) await client.query('SAVEPOINT sf_restore_statement')
   try {
@@ -818,9 +849,18 @@ async function applyStatement(
     // query, and deciding needs one.
     if (transactional) await client.query('ROLLBACK TO SAVEPOINT sf_restore_statement')
     const { rows } = await client.query<{ nspname: string }>('SELECT nspname FROM pg_namespace')
-    const tolerated = tolerableFailure(sql, err, new Set(rows.map(r => r.nspname)))
+    const targetSchemas = new Set(rows.map(r => r.nspname))
+    const tolerated = tolerableFailure(sql, err, targetSchemas, missing)
     if (tolerated) {
       result.skipped.push({ type: 'sql', label: summarizeStatement(sql), reason: tolerated })
+      // What the target lacks, for what fails after it; and whether this was
+      // one of the snapshot's own objects rather than something the platform
+      // or the server is missing.
+      const extension = /^\s*CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?("[^"]+"|[\w$-]+)/i.exec(sqlSkeleton(sql))
+      const schema = mentionedPlatformSchema(sql, targetSchemas)
+      if (extension) missing.add(`the ${extension[1].replace(/"/g, '')} extension`)
+      else if (schema && tolerated.startsWith('depends on')) missing.add(`the ${schema} schema`)
+      else result.incomplete = true
       return
     }
     result.errors.push({ type: 'sql', label: summarizeStatement(sql), error: errMsg(err) })

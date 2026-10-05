@@ -67,6 +67,29 @@ describe('tolerableFailure', () => {
       { code: '42883', message: 'function storage.my_helper() does not exist' }, supabase)).toBeUndefined()
   })
 
+  it('skips a routine whose signature needs a Supabase schema the target lacks', () => {
+    expect(tolerableFailure('CREATE FUNCTION public.me() RETURNS SETOF auth.users LANGUAGE sql AS $$ SELECT * FROM auth.users $$;',
+      missing('auth'), plain)).toMatch(/depends on auth/)
+  })
+
+  // A snapshot of PostgreSQL 17 restored into an older server.
+  it('skips a MAINTAIN grant on a server without the privilege', () => {
+    expect(tolerableFailure('GRANT MAINTAIN ON TABLE public.t TO app;',
+      { code: '22023', message: 'unrecognized privilege type "maintain"' }, plain)).toMatch(/PostgreSQL 17/)
+    expect(tolerableFailure('GRANT SELECT ON TABLE public.t TO app;',
+      { code: '22023', message: 'unrecognized privilege type "maintain"' }, plain)).toBeUndefined()
+  })
+
+  // One missing extension rolled back the whole restore: the table typed by
+  // it failed, then everything after that needed the table.
+  it('skips what fails once the target has turned out to lack something', () => {
+    const lacks = new Set(['the vector extension'])
+    const noType = { code: '42704', message: 'type "public.vector" does not exist' }
+    expect(tolerableFailure('CREATE TABLE public.docs (id int, e public.vector(3));', noType, plain, lacks))
+      .toBe('type "public.vector" does not exist, as this target lacks the vector extension')
+    expect(tolerableFailure('CREATE TABLE public.docs (id int, e public.vector(3));', noType, plain)).toBeUndefined()
+  })
+
   it('never skips a table, whatever it references', () => {
     expect(tolerableFailure('CREATE TABLE public.t (id uuid DEFAULT auth.uid());', missing('auth'), plain)).toBeUndefined()
   })

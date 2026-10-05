@@ -156,20 +156,25 @@ export class RolesCheck extends Check {
 
   async scan(ctx: CheckContext): Promise<DriftIssue[]> {
     const ignore = ctx.config.ignoreSchemas ?? []
-    const [sourceRoles, targetRoles, sourceGrants, targetGrants, sourceColumns, targetColumns] = await Promise.all([
+    const version = async (url: string) =>
+      Number((await this.queryFn(url, `SELECT current_setting('server_version_num') AS v`) as Array<{ v: string }>)[0]?.v ?? 0)
+    const [sourceRoles, targetRoles, sourceGrants, targetGrants, sourceColumns, targetColumns, sourceVersion, targetVersion] = await Promise.all([
       this.queryFn(ctx.source.dbUrl, ROLES_SQL) as unknown as Promise<PgRole[]>,
       this.queryFn(ctx.target.dbUrl, ROLES_SQL) as unknown as Promise<PgRole[]>,
       this.queryFn(ctx.source.dbUrl, grantsSql(ignore)) as unknown as Promise<RoleGrant[]>,
       this.queryFn(ctx.target.dbUrl, grantsSql(ignore)) as unknown as Promise<RoleGrant[]>,
       this.queryFn(ctx.source.dbUrl, columnGrantsSql(ignore)) as unknown as Promise<RoleGrant[]>,
       this.queryFn(ctx.target.dbUrl, columnGrantsSql(ignore)) as unknown as Promise<RoleGrant[]>,
+      version(ctx.source.dbUrl),
+      version(ctx.target.dbUrl),
     ])
+    const comparable = comparablePrivileges(sourceVersion, targetVersion)
 
     return [
       ...diffRoles(sourceRoles, targetRoles),
       ...diffGrants(
-        [...(sourceGrants ?? []), ...(sourceColumns ?? [])],
-        [...(targetGrants ?? []), ...(targetColumns ?? [])],
+        [...(sourceGrants ?? []), ...(sourceColumns ?? [])].filter(comparable),
+        [...(targetGrants ?? []), ...(targetColumns ?? [])].filter(comparable),
       ),
     ]
   }
@@ -292,24 +297,73 @@ const grantSql = (g: RoleGrant, withOption = g.is_grantable) =>
   `GRANT ${grantTarget(g)} TO ${granteeSql(g.grantee)}${withOption ? ' WITH GRANT OPTION' : ''};`
 const revokeSql = (g: RoleGrant) => `REVOKE ${grantTarget(g)} FROM ${granteeSql(g.grantee)};`
 
+/**
+ * The grants both servers can hold. MAINTAIN is a PostgreSQL 17 privilege:
+ * a 17 source reported it missing from a 15 target, and the fix failed with
+ * `unrecognized privilege type "maintain"`, rolling back every grant with it.
+ */
+export function comparablePrivileges(sourceVersion: number, targetVersion: number): (g: RoleGrant) => boolean {
+  const both = Math.min(sourceVersion || Infinity, targetVersion || Infinity)
+  return g => g.privilege_type !== 'MAINTAIN' || both >= 170000
+}
+
+/** Grants that differ the same way, on one table (or column) to one role, as one finding. */
+function grouped(grants: RoleGrant[]): RoleGrant[][] {
+  const groups = new Map<string, RoleGrant[]>()
+  for (const g of grants) {
+    const key = `${g.grantee}.${g.table_schema}.${g.table_name}${g.column_name ? `.${g.column_name}` : ''}.${Boolean(g.is_grantable)}`
+    groups.set(key, [...(groups.get(key) ?? []), g])
+  }
+  return [...groups.values()]
+}
+
+/** `SELECT, INSERT ON "s"."t"` for a group of grants on one object. */
+function groupTarget(gs: RoleGrant[]): string {
+  const column = gs[0].column_name ? ` ("${gs[0].column_name.replace(/"/g, '""')}")` : ''
+  return `${gs.map(g => `${g.privilege_type}${column}`).join(', ')} ON "${gs[0].table_schema}"."${gs[0].table_name}"`
+}
+
+function describeGroup(gs: RoleGrant[]): string {
+  const column = gs[0].column_name ? `(${gs[0].column_name}) ` : ''
+  return `${gs.map(g => g.privilege_type).join(', ')} ${column}ON ${gs[0].table_schema}.${gs[0].table_name} TO ${gs[0].grantee}`
+}
+
+/** A group's key: the grant key without its privilege. */
+const groupKey = (gs: RoleGrant[]) => grantKey(gs[0]).replace(/\.[^.]+$/, '')
+
+/**
+ * Grants on the target that differ from the source's.
+ *
+ * Missing and extra grants are one finding per role, table (or column) and
+ * grant option, listing the privileges: one finding per privilege made a
+ * table granted to Supabase's three API roles twenty-odd findings, most of a
+ * report.
+ */
 export function diffGrants(source: RoleGrant[], target: RoleGrant[]): DriftIssue[] {
   const issues: DriftIssue[] = []
   const sourceMap = new Map(source.map(g => [grantKey(g), g]))
   const targetMap = new Map(target.map(g => [grantKey(g), g]))
 
+  const missing = [...sourceMap].filter(([key]) => !targetMap.has(key)).map(([, g]) => g)
+  for (const gs of grouped(missing)) {
+    const plural = gs.length > 1 ? 's' : ''
+    issues.push({
+      id: `roles-grant-missing-${groupKey(gs)}`,
+      check: 'roles',
+      severity: 'warning',
+      title: `Missing grant${plural}: ${describeGroup(gs)}`,
+      description: `Grant${plural} "${describeGroup(gs)}" ${gs.length > 1 ? 'are' : 'is'} missing from target.`,
+      sourceValue: gs.length > 1 ? gs : gs[0],
+      sql: {
+        up: `GRANT ${groupTarget(gs)} TO ${granteeSql(gs[0].grantee)}${gs[0].is_grantable ? ' WITH GRANT OPTION' : ''};`,
+        down: `REVOKE ${groupTarget(gs)} FROM ${granteeSql(gs[0].grantee)};`,
+      },
+    })
+  }
+
   for (const [key, sg] of sourceMap) {
     const tg = targetMap.get(key)
-    if (!tg) {
-      issues.push({
-        id: `roles-grant-missing-${key}`,
-        check: 'roles',
-        severity: 'warning',
-        title: `Missing grant: ${describeGrant(sg)}`,
-        description: `Grant "${describeGrant(sg)}" is missing from target.`,
-        sourceValue: sg,
-        sql: { up: grantSql(sg), down: revokeSql(sg) },
-      })
-    } else if (Boolean(sg.is_grantable) !== Boolean(tg.is_grantable)) {
+    if (tg && Boolean(sg.is_grantable) !== Boolean(tg.is_grantable)) {
       // The same privilege, held with the grant option on one side only.
       // Keying on the privilege alone reported these identical; the grant
       // option is what lets the grantee pass the privilege on.
@@ -330,18 +384,21 @@ export function diffGrants(source: RoleGrant[], target: RoleGrant[]): DriftIssue
     }
   }
 
-  for (const [key, tg] of targetMap) {
-    if (!sourceMap.has(key)) {
-      issues.push({
-        id: `roles-grant-extra-${key}`,
-        check: 'roles',
-        severity: 'info',
-        title: `Extra grant: ${describeGrant(tg)}`,
-        description: `Grant "${describeGrant(tg)}" exists in target but not in source.`,
-        targetValue: tg,
-        sql: { up: revokeSql(tg), down: grantSql(tg) },
-      })
-    }
+  const extra = [...targetMap].filter(([key]) => !sourceMap.has(key)).map(([, g]) => g)
+  for (const gs of grouped(extra)) {
+    const plural = gs.length > 1 ? 's' : ''
+    issues.push({
+      id: `roles-grant-extra-${groupKey(gs)}`,
+      check: 'roles',
+      severity: 'info',
+      title: `Extra grant${plural}: ${describeGroup(gs)}`,
+      description: `Grant${plural} "${describeGroup(gs)}" exist${gs.length > 1 ? '' : 's'} in target but not in source.`,
+      targetValue: gs.length > 1 ? gs : gs[0],
+      sql: {
+        up: `REVOKE ${groupTarget(gs)} FROM ${granteeSql(gs[0].grantee)};`,
+        down: `GRANT ${groupTarget(gs)} TO ${granteeSql(gs[0].grantee)}${gs[0].is_grantable ? ' WITH GRANT OPTION' : ''};`,
+      },
+    })
   }
 
   return issues

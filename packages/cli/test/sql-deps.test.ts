@@ -440,3 +440,21 @@ describe('orderStatements: DBDiff\'s order kept for its own fixes', () => {
     expect(orderStatements([policy, table], s => s.sql, s => s.rank)).toEqual([table, policy])
   })
 })
+
+describe('statementPhase: schemas and extensions', () => {
+  // The extensions check's CREATE EXTENSION, read as OTHER, ran after the
+  // table whose exclusion constraint needs btree_gist.
+  it('makes a schema, then an extension, before the types and tables that use them', () => {
+    const schema = statementPhase('CREATE SCHEMA IF NOT EXISTS "app";')
+    const ext = statementPhase('CREATE EXTENSION IF NOT EXISTS "btree_gist";')
+    expect(schema).toBeLessThan(ext)
+    expect(ext).toBeLessThan(statementPhase('CREATE TYPE t AS ENUM (\'a\');'))
+    expect(ext).toBeLessThan(statementPhase('CREATE TABLE b (room int, EXCLUDE USING gist (room WITH =));'))
+  })
+
+  it('drops an extension after what used it', () => {
+    expect(statementPhase('DROP EXTENSION IF EXISTS "btree_gist";')).toBeGreaterThan(statementPhase('DROP TABLE b;'))
+    expect(statementPhase('DROP EXTENSION IF EXISTS "btree_gist";')).toBeGreaterThan(statementPhase('DROP TYPE t;'))
+  })
+})
+

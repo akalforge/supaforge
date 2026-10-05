@@ -35,6 +35,14 @@ import { escapeRegex } from './utils/strings.js'
 export const PHASE = {
   /** Triggers, policies, views, indexes — dropped before what they depend on. */
   DROP_DEPENDANT: 10,
+  /** A schema, before anything is made in it. */
+  CREATE_SCHEMA: 15,
+  /**
+   * An extension, before the types and tables that may use it — an exclusion
+   * constraint's btree_gist operator class. Read as OTHER it came after the
+   * table, which failed (`no default operator class for access method gist`).
+   */
+  CREATE_EXTENSION: 20,
   /** Types, domains, sequences: no dependencies of their own. */
   CREATE_BASE: 30,
   CREATE_TABLE: 40,
@@ -61,6 +69,8 @@ export const PHASE = {
    */
   DROP_ROUTINE: 115,
   DROP_BASE: 120,
+  /** Once nothing that used it is left. */
+  DROP_EXTENSION: 125,
 } as const
 
 /**
@@ -84,6 +94,9 @@ const PHASE_RULES: Array<[RegExp, number]> = [
   [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\b/i, PHASE.CREATE_VIEW],
   [/\bCREATE\s+(?:UNIQUE\s+)?INDEX\b/i, PHASE.CREATE_INDEX],
   [/\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\b/i, PHASE.CREATE_ROUTINE],
+  [/^\s*CREATE\s+SCHEMA\b/i, PHASE.CREATE_SCHEMA],
+  [/^\s*CREATE\s+EXTENSION\b/i, PHASE.CREATE_EXTENSION],
+  [/^\s*DROP\s+EXTENSION\b/i, PHASE.DROP_EXTENSION],
   [/\bCREATE\s+(?:TYPE|DOMAIN|SEQUENCE)\b/i, PHASE.CREATE_BASE],
   [/\bCREATE\s+TABLE\b/i, PHASE.CREATE_TABLE],
   [/^\s*ALTER\s+TABLE\b/i, PHASE.ALTER_TABLE],
@@ -152,6 +165,17 @@ const IDENT = String.raw`(?:"[^"]+"|[\w$]+)(?:\s*\.\s*(?:"[^"]+"|[\w$]+))?`
 export function bareName(identifier: string): string {
   const last = identifier.split('.').pop() ?? identifier
   return last.trim().replace(/^"|"$/g, '').toLowerCase()
+}
+
+/**
+ * A relation's name with its schema, `public` where it names none:
+ * `"app"."accounts"` → `app.accounts`, `users` → `public.users`. Folded the
+ * way bareName folds, so the same relation written either way agrees.
+ */
+export function schemaQualified(identifier: string): string {
+  const parts = identifier.match(/"[^"]+"|[A-Za-z_][\w$]*/g) ?? [identifier]
+  const fold = (part: string) => part.trim().replace(/^"|"$/g, '').toLowerCase()
+  return `${parts.length > 1 ? fold(parts[0]) : 'public'}.${fold(parts[parts.length - 1])}`
 }
 
 /** `CREATE [OR REPLACE] [UNIQUE|MATERIALIZED|TEMP] <kind> [IF NOT EXISTS] <name>` */
@@ -248,7 +272,7 @@ export function createdPolicies(sql: string): string[] {
   const out: string[] = []
   const re = /CREATE\s+POLICY\s+("[^"]+"|[A-Za-z_][\w$]*)\s+ON\s+((?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))?)/gi
   for (const m of sqlSkeleton(sql).matchAll(re)) {
-    out.push(`${bareName(m[2])}.${bareName(m[1])}`)
+    out.push(`${schemaQualified(m[2])}.${bareName(m[1])}`)
   }
   return out
 }
@@ -273,7 +297,7 @@ export function droppedPolicies(sql: string): string[] {
   const out: string[] = []
   const re = /DROP\s+POLICY\s+(?:IF\s+EXISTS\s+)?("[^"]+"|[A-Za-z_][\w$]*)\s+ON\s+((?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))?)/gi
   for (const m of sqlSkeleton(sql).matchAll(re)) {
-    out.push(`${bareName(m[2])}.${bareName(m[1])}`)
+    out.push(`${schemaQualified(m[2])}.${bareName(m[1])}`)
   }
   return out
 }
@@ -568,7 +592,7 @@ export function statementSubject(sql: string): QualifiedName | undefined {
 }
 
 /**
- * The policies (`table.policy`) a fix consists of, when it is nothing but
+ * The policies (`schema.table.policy`) a fix consists of, when it is nothing but
  * CREATE and DROP POLICY statements; otherwise null.
  */
 export function policyOnlyKeys(sql: string | undefined): string[] | null {

@@ -152,7 +152,7 @@ describe('destructiveReason: from the parse tree', () => {
   })
 
   it('reads a policy dropped from a schema-qualified table', () => {
-    expect(destructiveReason('DROP POLICY "Owner only" ON "app"."docs";')).toMatch(/removes the policy docs.owner only/)
+    expect(destructiveReason('DROP POLICY "Owner only" ON "app"."docs";')).toMatch(/removes the policy app\.docs\.owner only/)
   })
 
   it('falls back to the text for SQL the parser does not accept', () => {

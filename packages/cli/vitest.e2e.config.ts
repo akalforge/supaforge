@@ -28,6 +28,8 @@ export default defineConfig({
   test: {
     globals: true,
     include: ['tests/e2e/supabase/**/*.test.ts'],
+    // yy-cli-prove runs the CLI, which runs from dist.
+    globalSetup: ['./test/scenarios/global-setup.ts'],
     testTimeout: 60_000,
     hookTimeout: 30_000,
     fileParallelism: false,

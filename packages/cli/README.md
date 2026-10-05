@@ -1223,7 +1223,7 @@ supaforge diff                # schema + data checks active out of the box
 
 The adapter (`src/dbdiff.ts`) resolves the local `@dbdiff/cli` binary, invokes it directly (no `npx`), and parses the UP/DOWN marker output into `DriftIssue` objects.
 
-**What the schema layer reaches.** `3.0.0-rc.21`, the pinned version, models
+**What the schema layer reaches.** `3.0.0-rc.22`, the pinned version, models
 composite types, domains, materialized views (and their indexes), standalone
 sequences and RLS policies — five kinds that earlier releases did not read at
 all, and therefore reported as no drift whether they matched or not. A schema
@@ -1275,6 +1275,12 @@ keeps its own options, and a new materialized view keeps its comment.
 Since rc.21, comments are compared and migrated on every kind of object —
 tables, columns, views, functions, types, constraints, triggers, policies —
 and an object a change recreates keeps its comment.
+Since rc.22, an extension installed in a compared schema is created and
+dropped with the schema (an exclusion constraint's `btree_gist`, say), a check
+added `NOT VALID` stays so, tables referencing each other in a cycle can be
+created, and a partitioned partition and a partition's own constraints and
+indexes are reproduced. An extension both layers report is counted once, under
+Postgres Extensions.
 
 **Reference data (rc.19).** The data layer's SQL is written for PostgreSQL:
 values with quotes, backslashes or JSON apply as they are instead of failing or

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { foldDuplicatePolicyFindings } from '../src/scanner.js'
+import { foldDuplicatePolicyFindings, foldDuplicateExtensionFindings, extensionOnlyKeys } from '../src/scanner.js'
 import { policyOnlyKeys } from '../src/sql-deps.js'
 import { dropEquivalentPolicyChanges, type PolicyCanonicalizer } from '../src/utils/policy-equivalence.js'
 import type { CheckResult, DriftIssue } from '../src/types/drift.js'
@@ -11,7 +11,11 @@ const issue = (check: string, id: string, up: string, extra: Partial<DriftIssue>
 describe('policyOnlyKeys', () => {
   it('keys a fix made only of policy statements', () => {
     expect(policyOnlyKeys('DROP POLICY IF EXISTS "own" ON "orders";\nCREATE POLICY "own" ON "orders" USING (true);'))
-      .toEqual(['orders.own'])
+      .toEqual(['public.orders.own'])
+  })
+  it('keys a policy with its schema, public where none is named', () => {
+    expect(policyOnlyKeys('CREATE POLICY "own" ON "app"."orders" USING (true);\nDROP POLICY "own" ON orders;'))
+      .toEqual(['app.orders.own', 'public.orders.own'])
   })
   it('is null for anything else in the fix', () => {
     expect(policyOnlyKeys('CREATE TABLE t (id int);\nCREATE POLICY p ON t USING (true);')).toBeNull()
@@ -31,7 +35,7 @@ describe('foldDuplicatePolicyFindings (issue #97)', () => {
 
     expect(results[0].issues).toEqual([])
     expect(results[0].status).toBe('clean')
-    expect(results[0].folded).toEqual({ count: 1, into: 'rls' })
+    expect(results[0].folded).toEqual([{ count: 1, into: 'rls' }])
     expect(results[1].issues).toHaveLength(1)
   })
 
@@ -55,6 +59,53 @@ describe('foldDuplicatePolicyFindings (issue #97)', () => {
       { check: 'rls', status: 'skipped', issues: [], durationMs: 0 } as CheckResult]
     foldDuplicatePolicyFindings(results)
     expect(results[0].issues).toHaveLength(1)
+  })
+})
+
+describe('foldDuplicateExtensionFindings', () => {
+  const result = (check: CheckResult['check'], issues: DriftIssue[]): CheckResult => ({ check, status: 'drifted', issues, durationMs: 1 })
+  const missing = issue('extensions', 'ext-missing-btree_gist', 'CREATE EXTENSION IF NOT EXISTS "btree_gist";')
+
+  it('keys a fix that only creates or drops extensions', () => {
+    expect(extensionOnlyKeys('CREATE EXTENSION IF NOT EXISTS "btree_gist" WITH SCHEMA "public";')).toEqual(['btree_gist'])
+    expect(extensionOnlyKeys('DROP EXTENSION IF EXISTS "uuid-ossp";')).toEqual(['uuid-ossp'])
+    expect(extensionOnlyKeys('CREATE EXTENSION x; CREATE TABLE t (id int);')).toBeNull()
+    expect(extensionOnlyKeys(undefined)).toBeNull()
+  })
+
+  // @dbdiff/cli creates the extensions of the schemas it compares (rc.22); the
+  // extensions check reports the same one, with what the server can offer.
+  it('keeps the extensions check finding and folds the schema copy', () => {
+    const results = [
+      result('schema', [issue('schema', 's1', 'CREATE EXTENSION IF NOT EXISTS "btree_gist" WITH SCHEMA "public";')]),
+      result('extensions', [missing]),
+    ]
+    foldDuplicateExtensionFindings(results)
+    expect(results[0].issues).toEqual([])
+    expect(results[0].folded).toEqual([{ count: 1, into: 'extensions' }])
+  })
+
+  // The extensions check offers no fix for an extra extension: the schema
+  // check's DROP EXTENSION is the only one, and stays.
+  it('keeps a schema finding the extensions check offers no fix for', () => {
+    const extra = issue('extensions', 'ext-extra-btree_gist', '', { sql: undefined })
+    const results = [result('schema', [issue('schema', 's1', 'DROP EXTENSION IF EXISTS "btree_gist";')]), result('extensions', [extra])]
+    foldDuplicateExtensionFindings(results)
+    expect(results[0].issues).toHaveLength(1)
+  })
+
+  it('records a fold into each check that has one', () => {
+    const results = [
+      result('schema', [
+        issue('schema', 's1', 'CREATE EXTENSION IF NOT EXISTS "btree_gist" WITH SCHEMA "public";'),
+        issue('schema', 's2', 'CREATE POLICY "own" ON "orders" USING (true);'),
+      ]),
+      result('extensions', [missing]),
+      result('rls', [issue('rls', 'r1', 'CREATE POLICY "own" ON "public"."orders" USING (true);')]),
+    ]
+    foldDuplicatePolicyFindings(results)
+    foldDuplicateExtensionFindings(results)
+    expect(results[0].folded).toEqual([{ count: 1, into: 'rls' }, { count: 1, into: 'extensions' }])
   })
 })
 

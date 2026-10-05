@@ -1,4 +1,5 @@
-import { policyOnlyKeys } from './sql-deps.js'
+import { policyOnlyKeys, sqlSkeleton } from './sql-deps.js'
+import { splitSqlStatements } from './utils/sql-split.js'
 import type { HookBus } from './hooks'
 import type { CheckRegistry } from './checks/registry'
 import type { SupaForgeConfig } from './types/config'
@@ -194,6 +195,7 @@ export async function scan(
   )
 
   foldDuplicatePolicyFindings(results)
+  foldDuplicateExtensionFindings(results)
 
   const summary = summarize(results)
   const score = computeScore(results)
@@ -225,30 +227,57 @@ export async function scan(
  * one kept: it is the one that names the policy's risk, and it is there
  * whenever that check runs. A schema finding that does anything besides the
  * policies — the table the policy sits on, say — is kept whole.
+ *
+ * Keyed with their schema: @dbdiff/cli diffs every schema the project owns
+ * (rc.20), and `storage.objects` may have a policy named like one on a table
+ * of the project's.
  */
 export function foldDuplicatePolicyFindings(results: CheckResult[]): void {
-  const rls = results.find(r => r?.check === 'rls' && (r.status === 'drifted' || r.status === 'clean'))
+  foldInto(results, 'rls', policyOnlyKeys)
+}
+
+/**
+ * Leave out the schema check's extension findings that the extensions check
+ * reports too: @dbdiff/cli creates and drops the extensions installed in the
+ * schemas it compares (rc.22), and the extensions check reports every
+ * extension, with what this server can offer and the version. Its finding is
+ * kept; a schema finding doing anything besides is kept whole.
+ */
+export function foldDuplicateExtensionFindings(results: CheckResult[]): void {
+  foldInto(results, 'extensions', extensionOnlyKeys)
+}
+
+/** The extensions a fix creates or drops, when that is all it does; otherwise null. */
+export function extensionOnlyKeys(sql: string | undefined): string[] | null {
+  const statements = splitSqlStatements(sql ?? '').map(s => sqlSkeleton(s).trim()).filter(Boolean)
+  const keys = statements.map(s =>
+    /^(?:CREATE\s+EXTENSION\s+(?:IF\s+NOT\s+EXISTS\s+)?|DROP\s+EXTENSION\s+(?:IF\s+EXISTS\s+)?)("[^"]+"|[\w$-]+)/i.exec(s)?.[1])
+  if (keys.length === 0 || keys.some(k => k === undefined)) return null
+  return [...new Set(keys.map(k => (k as string).replace(/^"|"$/g, '').toLowerCase()))]
+}
+
+/**
+ * Leave out each schema finding whose fix only touches what `into` reports
+ * too, keyed by `keysOf`, and count them on the schema result.
+ */
+function foldInto(results: CheckResult[], into: CheckName, keysOf: (sql: string | undefined) => string[] | null): void {
+  const owner = results.find(r => r?.check === into && (r.status === 'drifted' || r.status === 'clean'))
   const schema = results.find(r => r?.check === 'schema' && r.status === 'drifted')
-  if (!rls || !schema) return
+  if (!owner || !schema) return
 
   const covered = new Set<string>()
-  for (const issue of rls.issues) {
-    // @dbdiff/cli diffs `public` only, so only a public policy can be the
-    // same one; keys carry no schema, and `storage.objects` may have a policy
-    // named like one on a public table.
-    const policy = (issue.sourceValue ?? issue.targetValue) as { schemaname?: string } | undefined
-    if (policy?.schemaname !== undefined && policy.schemaname !== 'public') continue
-    for (const key of policyOnlyKeys(issue.sql?.up) ?? []) covered.add(key)
+  for (const issue of owner.issues) {
+    for (const key of keysOf(issue.sql?.up) ?? []) covered.add(key)
   }
 
   const before = schema.issues.length
   schema.issues = schema.issues.filter(issue => {
-    const keys = policyOnlyKeys(issue.sql?.up)
+    const keys = keysOf(issue.sql?.up)
     return !(keys && keys.length > 0 && keys.every(k => covered.has(k)))
   })
   const folded = before - schema.issues.length
   if (folded === 0) return
 
-  schema.folded = { count: folded, into: 'rls' }
+  schema.folded = [...(schema.folded ?? []), { count: folded, into }]
   if (schema.issues.length === 0) schema.status = 'clean'
 }

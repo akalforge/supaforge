@@ -387,7 +387,7 @@ export function isDestructiveSql(sql: string): boolean {
 /**
  * Why this statement is gated, in the words the skip line should use.
  *
- * `recreatedElsewhere` holds the policies (`table.policy`, as createdPolicies
+ * `recreatedElsewhere` holds the policies (`schema.table.policy`, as createdPolicies
  * keys them) that other fixes applied alongside this one create.
  *
  * "Destructive (drops data)" was printed for every case once policies joined
@@ -423,13 +423,16 @@ function destructiveInTree(statements: Statement[], recreatedElsewhere: Readonly
 
   // A policy the same SQL creates again is being replaced, not removed — as
   // is one another fix in the apply recreates (recreatedElsewhere).
-  const key = (table: string, policy: string) => `${table.toLowerCase()}.${policy.toLowerCase()}`
+  // Keyed `schema.table.policy`, as createdPolicies keys them: `public` where
+  // the table names no schema.
+  const key = (schema: string | undefined, table: string, policy: string) =>
+    `${(schema || 'public').toLowerCase()}.${table.toLowerCase()}.${policy.toLowerCase()}`
   const created = new Set(statements.filter(s => s.kind === 'CreatePolicyStmt')
-    .map(s => key(relationName(s.node.table), s.node.policy_name)))
+    .map(s => key(s.node.table?.schemaname, relationName(s.node.table), s.node.policy_name)))
   const policies = statements
     .filter(s => s.kind === 'DropStmt' && s.node.removeType === 'OBJECT_POLICY')
     .flatMap(s => (s.node.objects as Array<Record<string, any>>).map(o => names(o.List?.items)))
-    .map(parts => key(parts.at(-2) ?? '', parts.at(-1) ?? ''))
+    .map(parts => key(parts.at(-3), parts.at(-2) ?? '', parts.at(-1) ?? ''))
     .filter(k => !created.has(k) && !recreatedElsewhere.has(k))
   if (policies.length > 0) {
     return policies.length === 1

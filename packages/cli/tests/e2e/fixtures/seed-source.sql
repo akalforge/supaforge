@@ -273,3 +273,27 @@ COMMENT ON FUNCTION app.tier_of(bigint) IS 'tier lookup';
 CREATE SCHEMA "Reporting";
 CREATE VIEW "Reporting"."Accounts By Tier" AS SELECT tier, count(*) AS n FROM app.accounts GROUP BY tier;
 COMMENT ON VIEW "Reporting"."Accounts By Tier" IS 'rollup';
+
+-- === Shapes a migration has to order with care ===
+-- An exclusion constraint whose operator class comes from btree_gist in the
+-- extensions schema, which only the source has: the extension must come first
+-- even while DBDiff drops an index on the target later in its sequence. A
+-- check added NOT VALID that the target's rows ('kept too') do not hold for, tables referencing
+-- each other, a partition with an index and a check of its own, and comments
+-- on a policy and a function.
+DROP TABLE IF EXISTS public.bookings, public.members, public.teams, public.logs CASCADE;
+CREATE EXTENSION IF NOT EXISTS btree_gist WITH SCHEMA extensions;
+CREATE TABLE public.bookings (id int PRIMARY KEY, room int, during tsrange,
+  CONSTRAINT no_overlap EXCLUDE USING gist (room WITH =, during WITH &&));
+ALTER TABLE app.accounts ADD CONSTRAINT accounts_note_short CHECK (length(note) < 5) NOT VALID;
+CREATE TABLE public.teams (id int PRIMARY KEY, lead_id int);
+CREATE TABLE public.members (id int PRIMARY KEY, team_id int REFERENCES public.teams (id));
+ALTER TABLE public.teams ADD CONSTRAINT teams_lead_fk FOREIGN KEY (lead_id) REFERENCES public.members (id);
+CREATE TABLE public.logs (id bigint, at date, msg text) PARTITION BY RANGE (at);
+CREATE INDEX logs_at ON public.logs (at);
+CREATE TABLE public.logs_2025 PARTITION OF public.logs FOR VALUES FROM ('2025-01-01') TO ('2026-01-01');
+CREATE INDEX logs_2025_msg ON public.logs_2025 (msg);
+ALTER TABLE public.logs_2025 ADD CONSTRAINT logs_2025_msg_present CHECK (msg <> '');
+COMMENT ON POLICY "posts_select_published" ON public.posts IS 'anyone reads what is published';
+COMMENT ON FUNCTION app.tier_of(bigint) IS 'tier lookup, by account';
+

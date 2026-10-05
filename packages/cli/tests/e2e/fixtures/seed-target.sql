@@ -264,3 +264,12 @@ INSERT INTO app.accounts (owner, legacy_code, note) VALUES (NULL, 'L1', 'kept'),
 COMMENT ON TABLE app.accounts IS 'old comment';
 CREATE SCHEMA old_stuff;
 CREATE TABLE old_stuff.junk (id int);
+
+-- === Shapes a migration has to order with care ===
+-- None of the source's new tables, btree_gist not installed, the partitioned
+-- parent alone. app.accounts' rows break the source's NOT VALID check.
+DROP TABLE IF EXISTS public.bookings, public.members, public.teams, public.logs CASCADE;
+DROP EXTENSION IF EXISTS btree_gist;
+CREATE TABLE public.logs (id bigint, at date, msg text) PARTITION BY RANGE (at);
+CREATE INDEX logs_at ON public.logs (at);
+

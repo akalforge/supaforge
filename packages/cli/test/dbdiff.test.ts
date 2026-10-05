@@ -487,6 +487,15 @@ describe('classifyStatement', () => {
 describe('summariseStatement', () => {
   it.each([
     ['CREATE VIEW "v_active_users" AS SELECT * FROM users;', 'schema', 'View missing: public.v_active_users'],
+    // Comments (rc.21), extensions (rc.22) and schemas: once "Schema change: unknown".
+    [`COMMENT ON POLICY "own_orders" ON "public"."orders" IS 'x';`, 'schema', 'Comment changed: public.orders.own_orders (policy)'],
+    [`COMMENT ON COLUMN "App Data"."T".n IS 'x';`, 'schema', 'Comment changed: App Data.T.n (column)'],
+    [`COMMENT ON FUNCTION public.f(integer) IS NULL;`, 'schema', 'Comment changed: public.f(integer) (function)'],
+    [`COMMENT ON CONSTRAINT "d_pos" ON DOMAIN public.d IS 'x';`, 'schema', 'Comment changed: public.d.d_pos (constraint)'],
+    [`COMMENT ON SCHEMA app IS 'x';`, 'schema', 'Comment changed: schema app'],
+    ['CREATE EXTENSION IF NOT EXISTS "btree_gist" WITH SCHEMA "public";', 'schema', 'Extension missing: public.btree_gist'],
+    ['CREATE SCHEMA IF NOT EXISTS "Reporting";', 'schema', 'Schema missing: Reporting'],
+    ['DROP SCHEMA IF EXISTS "old";', 'schema', 'Extra schema: old'],
     ['DROP VIEW "v_active_users";', 'schema', 'Extra view: public.v_active_users'],
     ['ALTER VIEW "v_active_users" RENAME TO "v_old";', 'schema', 'View altered: public.v_active_users'],
     // Titles carry the argument signature so overloads are distinguishable
@@ -1253,8 +1262,13 @@ describe('every schema finding uses one title format (issue #70)', () => {
   })
 
   it('leaves an unclassified change in the same shape', () => {
-    expect(summariseStatement('COMMENT ON TABLE "orders" IS \'x\';', 'schema'))
+    expect(summariseStatement('GRANT SELECT ON TABLE "orders" TO anon;', 'schema'))
       .toBe('Schema change: public.orders')
+  })
+
+  it('names a comment by the object it is on', () => {
+    expect(summariseStatement('COMMENT ON TABLE "orders" IS \'x\';', 'schema'))
+      .toBe('Comment changed: public.orders (table)')
   })
 })
 

@@ -1371,10 +1371,50 @@ const SCHEMA_RULES: SummaryRule[] = [
   { match: /^\s*ALTER\s+POLICY\b/i, label: 'Policy altered', name: policyLabel },
   { match: /^\s*DROP\s+POLICY\b/i, label: 'Extra policy', name: policyLabel },
 
+  // Comments (rc.21) and extensions (rc.22), named like everything else, and
+  // a comment by the object it is on and that object's kind.
+  { match: /^\s*COMMENT\s+ON\b/i, label: 'Comment changed', name: commentLabel },
+  { match: /^\s*CREATE\s+EXTENSION\b/i, label: 'Extension missing', name: extensionLabel },
+  { match: /^\s*DROP\s+EXTENSION\b/i, label: 'Extra extension', name: extensionLabel },
+
   { match: /^\s*CREATE\s+SEQUENCE\b/i, label: 'Sequence missing', name: named(AFTER.sequence) },
   { match: /^\s*ALTER\s+SEQUENCE\b/i, label: 'Sequence altered', name: named(AFTER.sequence) },
   { match: /^\s*DROP\s+SEQUENCE\b/i, label: 'Extra sequence', name: named(AFTER.sequence) },
 ]
+
+/** An identifier as written, unquoted: `"App Data"` → `App Data`. */
+const unquoted = (part: string) => part.replace(/^"|"$/g, '').replace(/""/g, '"')
+
+/**
+ * `public.orders.own (policy)` for `COMMENT ON POLICY "own" ON "public"."orders"`:
+ * the object, qualified as written, and its kind. A constraint, trigger or
+ * policy is named after the table (or domain) it is on.
+ */
+function commentLabel(sql: string): string {
+  const m = /^\s*COMMENT\s+ON\s+(MATERIALIZED\s+VIEW|FOREIGN\s+TABLE|[A-Z]+)\s+([\s\S]*?)\s+IS\s/i.exec(sql)
+  if (!m) return UNKNOWN_NAME
+  const kind = m[1].toLowerCase().replace(/\s+/g, ' ')
+  const on = /^("(?:[^"]|"")+"|\S+)\s+ON\s+(?:DOMAIN\s+)?([\s\S]+)$/i.exec(m[2].trim())
+  const object = on ? `${on[2].trim()}.${on[1]}` : m[2].trim()
+  const name = object.split(/\.(?=(?:[^"]*"[^"]*")*[^"]*$)/).map(unquoted).join('.')
+  return `${name} (${kind})`
+}
+
+/** `schema.extension` for CREATE EXTENSION ... WITH SCHEMA, or the bare name. */
+function extensionLabel(sql: string): string {
+  const name = /\bEXTENSION\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?("[^"]+"|[\w$-]+)/i.exec(sql)?.[1]
+  const schema = /\bSCHEMA\s+("[^"]+"|[\w$]+)/i.exec(sql)?.[1]
+  if (!name) return UNKNOWN_NAME
+  return schema ? `${unquoted(schema)}.${unquoted(name)}` : unquoted(name)
+}
+
+/** Titles for a schema made, dropped or commented on, which have no schema of their own. */
+function schemaTitle(sql: string): string | undefined {
+  const m = /^\s*(CREATE|DROP|COMMENT\s+ON)\s+SCHEMA\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?("[^"]+"|[\w$]+)/i.exec(sql)
+  if (!m) return undefined
+  const label = { CREATE: 'Schema missing', DROP: 'Extra schema' }[m[1].toUpperCase() as 'CREATE' | 'DROP'] ?? 'Comment changed'
+  return `${label}: ${label === 'Comment changed' ? 'schema ' : ''}${unquoted(m[2])}`
+}
 
 /** Titles for the row-level findings of the data check. */
 function summariseDataStatement(sql: string): string {
@@ -1394,6 +1434,9 @@ function summariseDataStatement(sql: string): string {
  */
 export function summariseStatement(sql: string, check: 'schema' | 'data', downSql?: string): string {
   if (check === 'data') return summariseDataStatement(sql)
+
+  const schema = schemaTitle(sql)
+  if (schema) return schema
 
   for (const rule of SCHEMA_RULES) {
     if (rule.match.test(sql)) {

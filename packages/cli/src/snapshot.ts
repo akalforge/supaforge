@@ -238,6 +238,16 @@ async function captureSchemaSql(
   }
 }
 
+/**
+ * A policy's comment, which pg_policies does not carry. Restored with the
+ * policy: the layer drops and recreates it, which took the comment the schema
+ * dump had set before it.
+ */
+const POLICY_COMMENT = `(SELECT obj_description(p.oid, 'pg_policy') FROM pg_policy p
+           JOIN pg_class c ON c.oid = p.polrelid JOIN pg_namespace n ON n.oid = c.relnamespace
+          WHERE n.nspname = pg_policies.schemaname AND c.relname = pg_policies.tablename
+            AND p.polname = pg_policies.policyname) AS comment`
+
 async function captureRlsPolicies(
   dir: string,
   dbUrl: string,
@@ -248,10 +258,10 @@ async function captureRlsPolicies(
   try {
     const placeholders = ignoreSchemas.map((_, i) => `$${i + 1}`).join(', ')
     const sql = ignoreSchemas.length > 0
-      ? `SELECT schemaname, tablename, policyname, permissive, roles, cmd, qual, with_check
+      ? `SELECT schemaname, tablename, policyname, permissive, roles, cmd, qual, with_check, ${POLICY_COMMENT}
          FROM pg_policies WHERE schemaname NOT IN (${placeholders})
          ORDER BY schemaname, tablename, policyname`
-      : `SELECT schemaname, tablename, policyname, permissive, roles, cmd, qual, with_check
+      : `SELECT schemaname, tablename, policyname, permissive, roles, cmd, qual, with_check, ${POLICY_COMMENT}
          FROM pg_policies ORDER BY schemaname, tablename, policyname`
 
     const rows = await queryFn(dbUrl, sql, ignoreSchemas.length > 0 ? ignoreSchemas : undefined) as unknown as RlsRow[]
@@ -814,6 +824,7 @@ interface RlsRow {
   cmd: string
   qual: string | null
   with_check: string | null
+  comment?: string | null
 }
 
 function generateCreatePolicySql(p: RlsRow): string {
@@ -833,6 +844,9 @@ function generateCreatePolicySql(p: RlsRow): string {
   if (p.qual) lines.push(`  USING (${p.qual})`)
   if (p.with_check) lines.push(`  WITH CHECK (${p.with_check})`)
   lines.push(';')
+  if (p.comment) {
+    lines.push(`COMMENT ON POLICY "${p.policyname}" ON "${p.schemaname}"."${p.tablename}" IS ${quoteLiteral(p.comment)};`)
+  }
   return lines.join('\n')
 }
 

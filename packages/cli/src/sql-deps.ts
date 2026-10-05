@@ -1,4 +1,5 @@
 import { splitSqlStatements } from './utils/sql-split.js'
+import { parseStatements, type Statement } from './sql-ast.js'
 import { escapeRegex } from './utils/strings.js'
 
 /**
@@ -621,6 +622,21 @@ export function policyOnlyKeys(sql: string | undefined): string[] | null {
   return [...new Set([...createdPolicies(sql), ...droppedPolicies(sql)])]
 }
 
+/** The roles one parsed statement grants to or scopes a policy to. */
+function rolesOf({ kind, node }: Statement): string[] {
+  const specs: Array<Record<string, any>> =
+    (kind === 'GrantStmt' && node.is_grant) ? node.grantees ?? []
+      : (kind === 'GrantRoleStmt' && node.is_grant) ? node.grantee_roles ?? []
+        : (kind === 'CreatePolicyStmt' || kind === 'AlterPolicyStmt') ? node.roles ?? []
+          : []
+  return specs
+    .map(spec => spec.RoleSpec)
+    // PUBLIC, CURRENT_USER and the like are not role names.
+    .filter(role => role?.roletype === 'ROLESPEC_CSTRING' && typeof role.rolename === 'string')
+    .map(role => role.rolename as string)
+    .filter(name => !name.startsWith('pg_'))
+}
+
 /** Role specifications that are keywords rather than roles, so never created. */
 const ROLE_KEYWORDS = new Set(['public', 'current_user', 'current_role', 'session_user'])
 
@@ -646,6 +662,13 @@ const ROLE_KEYWORDS = new Set(['public', 'current_user', 'current_role', 'sessio
  * `ALTER POLICY … RENAME TO` names a policy, not a role.
  */
 export function rolesNamedBy(sql: string): string[] {
+  // Read from the parse tree: the regex below took TO inside a quoted policy
+  // name for the role list — "Allow users to read items" named the roles
+  // read, items, on and for, and a restore went looking for them — and read
+  // only the first statement of a fix.
+  const statements = parseStatements(sql)
+  if (statements) return [...new Set(statements.flatMap(rolesOf))]
+
   const skeleton = sqlSkeleton(sql)
   const list =
     /^\s*GRANT\b[\s\S]*?\bTO\s+([\s\S]*?)(?=\s+WITH\b|\s+GRANTED\s+BY\b|\s*;|\s*$)/i.exec(skeleton)

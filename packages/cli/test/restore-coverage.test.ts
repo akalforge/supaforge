@@ -214,6 +214,17 @@ describe('rolesNamedBy', () => {
     )).toEqual(['We"ird'])
   })
 
+  // Read from the parse tree. Matched as text, the TO inside a quoted policy
+  // name was taken for the role list, and restore tried to create a role
+  // named after the rest of the policy's name.
+  it('is not misled by a policy name that says TO', () => {
+    expect(rolesNamedBy(
+      'CREATE POLICY "Allow read to everyone" ON public.t FOR SELECT TO anon USING (true);',
+    )).toEqual(['anon'])
+    expect(rolesNamedBy('CREATE POLICY "Grant to admins" ON public.t USING (true);')).toEqual([])
+    expect(rolesNamedBy('ALTER POLICY "up to you" ON public.t TO authenticated;')).toEqual(['authenticated'])
+  })
+
   it('does not take a policy being renamed for a role', () => {
     expect(rolesNamedBy('ALTER POLICY p ON t RENAME TO q;')).toEqual([])
   })

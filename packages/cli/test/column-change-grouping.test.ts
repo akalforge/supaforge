@@ -123,7 +123,7 @@ describe('the destructive gate across the fixes of one apply', () => {
       { only: ['column'] })
 
     expect(plan.sqlStatements).toEqual([])
-    expect(plan.skipped.find(s => s.issueId === 'column')?.reason).toMatch(/removes the policy orders\.own/)
+    expect(plan.skipped.find(s => s.issueId === 'column')?.reason).toMatch(/removes the policy public\.orders\.own/)
   })
 
   it('does not count a posture fix, which does not run by default, as putting it back', () => {
@@ -140,7 +140,7 @@ describe('the destructive gate across the fixes of one apply', () => {
 
   it('still gates a policy nothing puts back', () => {
     expect(destructiveReason('DROP POLICY IF EXISTS "own" ON "orders";')).toMatch(/removes the policy/)
-    expect(destructiveReason('DROP POLICY IF EXISTS "own" ON "orders";', new Set(['orders.own']))).toBeUndefined()
+    expect(destructiveReason('DROP POLICY IF EXISTS "own" ON "orders";', new Set(["public.orders.own"]))).toBeUndefined()
   })
 })
 

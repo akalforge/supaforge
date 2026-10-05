@@ -450,7 +450,7 @@ describe('captureSnapshot: a policy keeps its comment', () => {
   beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'supaforge-snap-')) })
   afterEach(async () => { await rm(dir, { recursive: true, force: true }) })
 
-  async function rlsSql(rows: unknown[]): Promise<string> {
+  async function rlsSql(rows: unknown[], file = 'rls.sql'): Promise<string> {
     const queryFn = (async (_url: string, sql: string) => sql.includes('pg_policies') ? rows : []) as unknown as QueryFn
     const result = await captureSnapshot({
       envName: 'prod',
@@ -460,7 +460,7 @@ describe('captureSnapshot: a policy keeps its comment', () => {
       queryFn,
       fetchFn: (async () => new Response('[]', { status: 200 })) as never,
     })
-    return readFile(join(result.dir, 'rls.sql'), 'utf8')
+    return readFile(join(result.dir, file), 'utf8')
   }
 
   const policy = { schemaname: 'public', tablename: 'orders', policyname: 'own', permissive: 'PERMISSIVE', roles: ['authenticated'], cmd: 'SELECT', qual: 'true', with_check: null }
@@ -473,5 +473,12 @@ describe('captureSnapshot: a policy keeps its comment', () => {
 
   it('writes no comment for a policy without one', async () => {
     expect(await rlsSql([{ ...policy, comment: null }])).not.toContain('COMMENT ON')
+  })
+
+  it('keeps a storage policy\'s comment too', async () => {
+    const sql = await rlsSql([{ ...policy, tablename: 'objects', comment: 'avatars' }], 'storage-policies.sql')
+    expect(sql).toContain('DROP POLICY IF EXISTS "own" ON "storage"."objects";')
+    expect(sql).toContain(`COMMENT ON POLICY "own" ON "storage"."objects" IS 'avatars';`)
+    expect(sql.indexOf('COMMENT ON POLICY')).toBeGreaterThan(sql.indexOf('CREATE POLICY'))
   })
 })

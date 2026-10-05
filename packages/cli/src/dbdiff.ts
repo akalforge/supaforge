@@ -873,7 +873,7 @@ interface MergedStatement {
  * same way — an enum whose values changed arrives as `DROP TYPE` + `CREATE
  * TYPE` — and needed the same treatment for the same two reasons (issue #81).
  */
-type ReplaceableKind = 'routine' | 'type' | 'sequence' | 'policy'
+type ReplaceableKind = 'routine' | 'type' | 'sequence' | 'policy' | 'trigger'
 
 /** How each kind's identifier is read out of a statement. */
 const REPLACEABLE_NAME: Record<ReplaceableKind, (sql: string) => string> = {
@@ -882,6 +882,8 @@ const REPLACEABLE_NAME: Record<ReplaceableKind, (sql: string) => string> = {
   sequence: (sql) => extractQualifiedName(sql, /\bSEQUENCE\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?/i),
   // `table.policy`: a policy name is unique only per table.
   policy: (sql) => policyLabel(sql),
+  // `schema.table.trigger`, for the same reason.
+  trigger: (sql) => triggerLabel(sql),
 }
 
 /** How a merged pair of each kind is reported. */
@@ -890,6 +892,7 @@ const REPLACEABLE_REPORT: Record<ReplaceableKind, { idPart: string; label: strin
   type:     { idPart: 'type',     label: 'Type modified',     what: 'Type definition' },
   sequence: { idPart: 'sequence', label: 'Sequence modified', what: 'Sequence definition' },
   policy:   { idPart: 'policy',   label: 'Policy modified',   what: 'Policy definition' },
+  trigger:  { idPart: 'trigger',  label: 'Trigger modified',  what: 'Trigger definition' },
 }
 
 /** Whether a statement drops or creates a replaceable object, and of which kind. */
@@ -900,6 +903,10 @@ function replaceablePart(sql: string): { kind: ReplaceableKind; drop: boolean } 
   // still there. Together they are a replacement, which the gate allows.
   if (/^\s*DROP\s+POLICY\b/i.test(sql)) return { kind: 'policy', drop: true }
   if (/^\s*CREATE\s+POLICY\b/i.test(sql)) return { kind: 'policy', drop: false }
+  // A changed trigger is dropped and recreated the same way, and read apart
+  // was a critical "Extra trigger" for a trigger that is still wanted.
+  if (/^\s*DROP\s+TRIGGER\b/i.test(sql)) return { kind: 'trigger', drop: true }
+  if (/^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b/i.test(sql)) return { kind: 'trigger', drop: false }
   switch (classifyStatement(sql)) {
     case CREATE_FUNCTION:   return { kind: 'routine',  drop: false }
     case DROP_FUNCTION:     return { kind: 'routine',  drop: true }
@@ -915,6 +922,8 @@ function replaceablePart(sql: string): { kind: ReplaceableKind; drop: boolean } 
 function replacementKey(kind: ReplaceableKind, sql: string): string {
   const name = REPLACEABLE_NAME[kind](sql)
   if (kind === 'policy') return `policy:${name.replace(/"/g, '').toLowerCase()}`
+  // Table and trigger, without the schema a DROP may leave out.
+  if (kind === 'trigger') return `trigger:${name.split('.').slice(-2).join('.').toLowerCase()}`
   return `${kind}:${name.slice(name.lastIndexOf('.') + 1).toLowerCase()}`
 }
 
@@ -1286,6 +1295,28 @@ function policyLabel(sql: string): string {
 }
 
 /**
+ * `schema.table.trigger` for a trigger statement.
+ *
+ * A trigger name is unique only per table, like a policy's, and one name is
+ * commonly reused on every table (`set_updated_at`): titled by the name alone,
+ * three findings about three tables read as the same one three times. dbdiff
+ * leaves the table of a DROP unqualified, so its schema is read off the
+ * counterpart CREATE when that is on the same table.
+ */
+function triggerLabel(sql: string, downSql?: string): string {
+  const trigger = extractQualifiedName(sql, AFTER.trigger)
+  let table = extractQualifiedName(sql, AFTER.on)
+  if (trigger === UNKNOWN_NAME) return UNKNOWN_NAME
+  if (table === UNKNOWN_NAME) return trigger
+
+  if (!table.includes('.') && downSql) {
+    const counterpart = extractQualifiedName(downSql, AFTER.on)
+    if (counterpart.includes('.') && unqualify(counterpart) === table.toLowerCase()) table = counterpart
+  }
+  return `${qualifySchemaName(table)}.${trigger}`
+}
+
+/**
  * The schema @dbdiff/cli compares.
  *
  * Its Postgres adapter is scoped to `public` throughout — every catalogue query
@@ -1344,9 +1375,9 @@ const SCHEMA_RULES: SummaryRule[] = [
   { match: /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?PROCEDURE\b/i, label: 'Procedure missing', name: routineLabel },
   { match: /^\s*DROP\s+PROCEDURE\b/i, label: 'Extra procedure', name: routineLabel },
 
-  { match: /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b/i, label: 'Trigger missing', name: named(AFTER.trigger) },
-  { match: /^\s*ALTER\s+TRIGGER\b/i, label: 'Trigger altered', name: named(AFTER.trigger) },
-  { match: /^\s*DROP\s+TRIGGER\b/i, label: 'Extra trigger', name: named(AFTER.trigger) },
+  { match: /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b/i, label: 'Trigger missing', name: triggerLabel },
+  { match: /^\s*ALTER\s+TRIGGER\b/i, label: 'Trigger altered', name: triggerLabel },
+  { match: /^\s*DROP\s+TRIGGER\b/i, label: 'Extra trigger', name: triggerLabel },
 
   { match: /^\s*CREATE\s+TYPE\b/i, label: 'Type missing', name: named(AFTER.type) },
   { match: /^\s*ALTER\s+TYPE\b/i, label: 'Type altered', name: named(AFTER.type) },
@@ -1409,11 +1440,25 @@ function extensionLabel(sql: string): string {
 }
 
 /** Titles for a schema made, dropped or commented on, which have no schema of their own. */
-function schemaTitle(sql: string): string | undefined {
+function schemaTitle(sql: string, downSql?: string): string | undefined {
   const m = /^\s*(CREATE|DROP|COMMENT\s+ON)\s+SCHEMA\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?("[^"]+"|[\w$]+)/i.exec(sql)
   if (!m) return undefined
-  const label = { CREATE: 'Schema missing', DROP: 'Extra schema' }[m[1].toUpperCase() as 'CREATE' | 'DROP'] ?? 'Comment changed'
-  return `${label}: ${label === 'Comment changed' ? 'schema ' : ''}${unquoted(m[2])}`
+  const label = { CREATE: 'Schema missing', DROP: 'Extra schema' }[m[1].toUpperCase() as 'CREATE' | 'DROP']
+  return label ? `${label}: ${unquoted(m[2])}` : `${commentChange(sql, downSql)}: schema ${unquoted(m[2])}`
+}
+
+const CLEARS_COMMENT = /\bIS\s+NULL\s*;?\s*$/i
+
+/**
+ * What a comment finding does. "Comment changed" was the title for all three,
+ * including a comment on an object the target does not have yet, where there
+ * is nothing to change: the DOWN of a comment only the source has clears it,
+ * and the UP of one only the target has does.
+ */
+function commentChange(sql: string, downSql?: string): string {
+  if (CLEARS_COMMENT.test(sql)) return 'Extra comment'
+  if (downSql && CLEARS_COMMENT.test(downSql)) return 'Comment missing'
+  return 'Comment changed'
 }
 
 /** Titles for the row-level findings of the data check. */
@@ -1435,12 +1480,13 @@ function summariseDataStatement(sql: string): string {
 export function summariseStatement(sql: string, check: 'schema' | 'data', downSql?: string): string {
   if (check === 'data') return summariseDataStatement(sql)
 
-  const schema = schemaTitle(sql)
+  const schema = schemaTitle(sql, downSql)
   if (schema) return schema
 
   for (const rule of SCHEMA_RULES) {
     if (rule.match.test(sql)) {
-      return `${rule.label}: ${qualifySchemaName(rule.name(sql, downSql))}`
+      const label = rule.name === commentLabel ? commentChange(sql, downSql) : rule.label
+      return `${label}: ${qualifySchemaName(rule.name(sql, downSql))}`
     }
   }
 

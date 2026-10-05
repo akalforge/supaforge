@@ -97,6 +97,20 @@ describe('sqlToIssues with units', () => {
     expect(issues.map(i => i.title)).toEqual(['Policy modified: public.orders.own', 'Function modified: public.f(integer)'])
   })
 
+  // A changed trigger is a DROP and a CREATE too. Read by its DROP, it was a
+  // critical "Extra trigger" for a trigger both sides have.
+  it('names a replaced trigger as modified, by its table', () => {
+    const [issue] = sqlToIssues({
+      up: units(['AlterTrigger', 'orders.note_changed', [
+        'DROP TRIGGER IF EXISTS "note_changed" ON "orders";',
+        'CREATE TRIGGER note_changed BEFORE UPDATE OF note ON public.orders FOR EACH ROW EXECUTE FUNCTION touch();',
+      ].join('\n')]),
+      down: '',
+    }, 'schema')
+    expect(issue.title).toBe('Trigger modified: public.orders.note_changed')
+    expect(issue.severity).toBe('warning')
+  })
+
   it('drops a foreign key into an ignored schema, from either side', () => {
     const issues = sqlToIssues({
       up: units(

@@ -569,11 +569,14 @@ export function dropUnsupportedSetStatements(
  * pg_dump emits `CREATE SCHEMA public` for an explicitly selected schema, which
  * a database that already has one rejects.
  *
- * Then the target's extensions are installed, except any living in a proved
- * schema: those belong to the dump, which carries them and would collide.
- * Without this, a table whose column default calls an extension function — the
- * `extensions.uuid_generate_v4()` pattern all over Supabase — cannot be created,
- * because a default is resolved when the table is created, not when it is used.
+ * Then the target's extensions are installed, those living in a proved schema
+ * too: `pg_dump --schema` does not carry an extension, even one in the schema
+ * it dumps, so a table whose exclusion constraint needs btree_gist in `public`
+ * could not be replayed. Without this, a table whose column default calls an
+ * extension function — the `extensions.uuid_generate_v4()` pattern all over
+ * Supabase — cannot be created either, because a default is resolved when the
+ * table is created, not when it is used. The dump's own CREATE SCHEMA then
+ * finds the schema there, which tolerateExistingSchemas() allows.
  */
 export async function prepareClone(
   cloneUrl: string, targetUrl: string, schemas: string[], queryFn: QueryFn = pgQuery,
@@ -586,7 +589,6 @@ export async function prepareClone(
     Array<{ name: string; schema: string }>
 
   for (const ext of extensions) {
-    if (schemas.includes(ext.schema)) continue
     // Tolerated for the same reason the CREATE EXTENSION below it is: a schema
     // this clone will not accept is not a reason to abandon the proof. If the
     // structure genuinely needed it, the replay fails next and says so — which

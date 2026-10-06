@@ -9,6 +9,7 @@ import { normalizeRoles } from './utils/strings'
 import type { EnvironmentConfig, SupaForgeConfig, SnapshotManifest, SnapshotLayerInfo } from './types/config'
 import { DEFAULT_IGNORE_SCHEMAS, RELATION_NOT_FOUND } from './defaults'
 import { introspectSchema } from './schema-introspect'
+import { createPolicySql, dropPolicySql, schemaPolicySql, type SchemaPolicy } from './utils/schema-policies'
 import { PUBLICATION_SQL } from './checks/realtime'
 import type { SchemaSnapshot } from './schema-introspect'
 import { getServerMajorVersion, resolvePgDumpPath } from './pg-tools'
@@ -74,7 +75,7 @@ export async function captureSnapshot(options: SnapshotOptions): Promise<Snapsho
   const layers: Record<string, SnapshotLayerInfo> = {}
 
   // Layer 1: Schema (SQL introspection → JSON)
-  layers.schema = await captureSchema(dir, options.env.dbUrl, ignoreSchemas)
+  layers.schema = await captureSchema(dir, options.env.dbUrl, ignoreSchemas, queryFn)
 
   // Layer 2: RLS Policies
   layers.rls = await captureRlsPolicies(dir, options.env.dbUrl, ignoreSchemas, queryFn)
@@ -157,6 +158,7 @@ async function captureSchema(
   dir: string,
   dbUrl: string,
   ignoreSchemas: string[],
+  queryFn: QueryFn,
 ): Promise<SnapshotLayerInfo> {
   const file = 'schema.json'
   try {
@@ -167,11 +169,31 @@ async function captureSchema(
       captured: true,
       file,
       itemCount: schema.tables.length,
-      ...await captureSchemaSql(dir, dbUrl, schema),
+      ...await captureSchemaSql(dir, dbUrl, [
+        ...new Set([...schemasIn(schema), ...await projectSchemas(dbUrl, ignoreSchemas, queryFn)]),
+      ].sort()),
     }
   } catch (err) {
     return { captured: false, file, itemCount: 0, error: errMsg(err) }
   }
+}
+
+/**
+ * Every schema the project made, whatever it holds.
+ *
+ * `schemasIn` sees only the kinds introspection reports, so a schema holding
+ * nothing but domains or composite types — or nothing yet — was left out of
+ * the dump, and a table typed by one of those domains failed the whole
+ * restore with `schema "billing" does not exist`. Schemas an extension owns
+ * are its to create, and the platform's are excluded as everywhere else.
+ */
+async function projectSchemas(dbUrl: string, ignoreSchemas: string[], queryFn: QueryFn): Promise<string[]> {
+  const rows = await queryFn(dbUrl, `SELECT n.nspname AS name FROM pg_namespace n
+     WHERE n.nspname NOT LIKE 'pg\\_%' AND n.nspname <> 'information_schema'
+       AND n.nspname <> ALL($1::text[])
+       AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_namespace'::regclass
+                         AND d.objid = n.oid AND d.deptype = 'e')`, [ignoreSchemas]) as Array<{ name: string }>
+  return rows.map(r => r.name)
 }
 
 /** The schemas this snapshot describes, across every object kind it holds. */
@@ -207,7 +229,7 @@ function schemasIn(schema: SchemaSnapshot): string[] {
 async function captureSchemaSql(
   dir: string,
   dbUrl: string,
-  schema: SchemaSnapshot,
+  schemas: string[],
 ): Promise<Pick<SnapshotLayerInfo, 'sqlFile' | 'sqlSkipReason'>> {
   const sqlFile = 'schema.sql'
   try {
@@ -224,7 +246,7 @@ async function captureSchemaSql(
     const { stdout } = await execFile(resolved.path, [
       dbUrl, '--schema-only', '--no-owner', '--no-privileges',
       // Quoted: pg_dump reads --schema as a pattern, folding `App Data` to lower case.
-      ...schemasIn(schema).map(s => `--schema=${quoteName(s)}`),
+      ...schemas.map(s => `--schema=${quoteName(s)}`),
     ], { maxBuffer: 256 * 1024 * 1024, timeout: 300_000 })
 
     if (stdout.trim().length === 0) {
@@ -326,12 +348,12 @@ async function captureStorage(
   // Storage policies via DB
   const policiesFile = 'storage-policies.sql'
   try {
-    const rows = await queryFn(env.dbUrl, `
-      SELECT tablename, policyname, permissive, roles, cmd, qual, with_check
-      FROM pg_policies WHERE schemaname = 'storage'
-      ORDER BY tablename, policyname
-    `)
-    const statements = (rows as unknown as StoragePolicyRow[]).map(p => generateStorageCreatePolicySql(p))
+    // The storage check's own query and SQL, so a snapshot keeps what the
+    // check compares — each policy's comment included.
+    const rows = await queryFn(env.dbUrl, schemaPolicySql('storage'))
+    const statements = (rows as unknown as SchemaPolicy[]).map(p =>
+      // Dropped first so a snapshot can be restored twice, as below.
+      `${dropPolicySql('storage', p)}\n${createPolicySql('storage', p)}`)
     const output = statements.length > 0
       ? `-- SupaForge Storage Policy Snapshot\n-- ${rows.length} policies\n\n${statements.join('\n\n')}\n`
       : '-- No storage policies found\n'
@@ -847,33 +869,6 @@ function generateCreatePolicySql(p: RlsRow): string {
   if (p.comment) {
     lines.push(`COMMENT ON POLICY "${p.policyname}" ON "${p.schemaname}"."${p.tablename}" IS ${quoteLiteral(p.comment)};`)
   }
-  return lines.join('\n')
-}
-
-interface StoragePolicyRow {
-  tablename: string
-  policyname: string
-  permissive: string
-  roles: string[] | string
-  cmd: string
-  qual: string | null
-  with_check: string | null
-}
-
-function generateStorageCreatePolicySql(p: StoragePolicyRow): string {
-  const roles = normalizeRoles(p.roles).join(', ')
-  const lines = [
-    // Re-runnable, as above.
-    `DROP POLICY IF EXISTS "${p.policyname}" ON "storage"."${p.tablename}";`,
-    `CREATE POLICY "${p.policyname}"`,
-    `  ON "storage"."${p.tablename}"`,
-    `  AS ${p.permissive}`,
-    `  FOR ${p.cmd}`,
-    `  TO ${roles}`,
-  ]
-  if (p.qual) lines.push(`  USING (${p.qual})`)
-  if (p.with_check) lines.push(`  WITH CHECK (${p.with_check})`)
-  lines.push(';')
   return lines.join('\n')
 }
 

@@ -85,10 +85,11 @@ export function pairUnits(
 }
 
 /** The kinds dbdiff renders as dropping and recreating one object. */
-export const REPLACING_KINDS: Record<string, 'routine' | 'type' | 'sequence' | 'policy' | undefined> = {
+export const REPLACING_KINDS: Record<string, 'routine' | 'type' | 'sequence' | 'policy' | 'trigger' | undefined> = {
   AlterRoutine: 'routine',
   AlterEnum: 'type',
   AlterCompositeType: 'type',
   AlterDomain: 'type',
   AlterPolicy: 'policy',
+  AlterTrigger: 'trigger',
 }

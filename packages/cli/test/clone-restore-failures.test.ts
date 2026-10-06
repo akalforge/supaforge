@@ -145,3 +145,17 @@ describe('formatRestoreFailures', () => {
     expect(lines.at(-1)).toContain('…and 3 more')
   })
 })
+
+describe('restoreFailures: a newer pg_dump', () => {
+  // pg_dump 17+ writes SET transaction_timeout = 0; a 15 server rejects it,
+  // and every clone into one read as incomplete for it.
+  it('does not count a newer pg_dump\'s session setting as something missing', () => {
+    const stderr = [
+      'pg_restore: error: could not execute query: ERROR:  unrecognized configuration parameter "transaction_timeout"',
+      'Command was: SET transaction_timeout = 0;',
+      '',
+    ].join('\n')
+    expect(restoreFailures(stderr)).toEqual({ failures: [], unavailable: [] })
+  })
+})
+

@@ -680,7 +680,8 @@ export interface RestoreFailure {
  *   of them fails on its own account and is listed under `failures`.
  *
  * Left out entirely: `… already exists` (the object is there, as with `public`
- * on PostgreSQL 15+), and the comment on an extension that is not available.
+ * on PostgreSQL 15+), the comment on an extension that is not available, and
+ * a session setting a newer pg_dump writes that this server does not know.
  */
 export function restoreFailures(
   stderr: string,
@@ -702,6 +703,10 @@ export function restoreFailures(
   const unavailable: RestoreFailure[] = []
   for (const { error, command } of entries) {
     if (/ already exists$/.test(error)) continue
+    // A newer pg_dump's session setting (`SET transaction_timeout = 0`, from
+    // 17) that an older server has no such parameter for: nothing of the
+    // project's is missing because of it.
+    if (/^SET\s+/i.test(command) && /^unrecognized configuration parameter/.test(error)) continue
     if (/^CREATE\s+EXTENSION\b/i.test(command)) {
       const entry = { object: `extension ${extensionName(command)}`, error }
       ;(notShipped.has(extensionName(command)) ? unavailable : failures).push(entry)

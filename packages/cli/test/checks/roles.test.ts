@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { RolesCheck, diffRoles, diffGrants } from '../../src/checks/roles.js'
+import { RolesCheck, diffRoles, diffGrants, comparablePrivileges } from '../../src/checks/roles.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { QueryFn } from '../../src/db.js'
 
@@ -136,7 +136,7 @@ describe('RolesCheck', () => {
     expect(grantIssue!.sql?.up).toContain('REVOKE INSERT')
   })
 
-  it('runs all 6 queries (roles, table grants and column grants, per side)', async () => {
+  it('runs all 8 queries (roles, table grants, column grants and server version, per side)', async () => {
     const calls: string[] = []
     const queryFn: QueryFn = async (_dbUrl, sql) => {
       calls.push(sql)
@@ -144,7 +144,8 @@ describe('RolesCheck', () => {
     }
     const check = new RolesCheck(queryFn)
     await check.scan(mockContext())
-    expect(calls).toHaveLength(6)
+    expect(calls).toHaveLength(8)
+    expect(calls.filter(s => s.includes('server_version_num'))).toHaveLength(2)
     const roleQueries  = calls.filter(s => s.includes('pg_roles'))
     const grantQueries = calls.filter(s => s.includes('c.relacl'))
     expect(roleQueries).toHaveLength(2)
@@ -319,3 +320,40 @@ describe('RolesCheck: the queries it runs', () => {
     }
   })
 })
+
+describe('grants across server versions and in groups', () => {
+  const g = (privilege_type: string, extra: Record<string, unknown> = {}) => ({
+    grantee: 'anon', table_schema: 'public', table_name: 'items', column_name: null,
+    privilege_type, is_grantable: false, ...extra,
+  }) as never
+
+  // PostgreSQL 17's MAINTAIN, offered to a 15 target, failed every grant with it.
+  it('leaves MAINTAIN out unless both servers are PostgreSQL 17 or later', () => {
+    expect(comparablePrivileges(170000, 150008)(g('MAINTAIN'))).toBe(false)
+    expect(comparablePrivileges(150008, 170000)(g('MAINTAIN'))).toBe(false)
+    expect(comparablePrivileges(170000, 180000)(g('MAINTAIN'))).toBe(true)
+    expect(comparablePrivileges(170000, 150008)(g('SELECT'))).toBe(true)
+  })
+
+  it('reports the privileges one role lacks on one table as one finding', () => {
+    const issues = diffGrants([g('SELECT'), g('INSERT'), g('UPDATE')], [g('SELECT')])
+    expect(issues).toHaveLength(1)
+    expect(issues[0].title).toBe('Missing grants: INSERT, UPDATE ON public.items TO anon')
+    expect(issues[0].sql?.up).toBe('GRANT INSERT, UPDATE ON "public"."items" TO "anon";')
+    expect(issues[0].sql?.down).toBe('REVOKE INSERT, UPDATE ON "public"."items" FROM "anon";')
+  })
+
+  it('keeps a grant held with the grant option apart from one without', () => {
+    const issues = diffGrants([g('SELECT', { is_grantable: true }), g('INSERT')], [])
+    expect(issues.map(i => i.sql?.up).sort()).toEqual([
+      'GRANT INSERT ON "public"."items" TO "anon";',
+      'GRANT SELECT ON "public"."items" TO "anon" WITH GRANT OPTION;',
+    ])
+  })
+
+  it('groups a column\'s privileges with the column on each', () => {
+    const issues = diffGrants([g('SELECT', { column_name: 'name' }), g('UPDATE', { column_name: 'name' })], [])
+    expect(issues[0].sql?.up).toBe('GRANT SELECT ("name"), UPDATE ("name") ON "public"."items" TO "anon";')
+  })
+})
+

@@ -428,6 +428,43 @@ describe('StorageCheck', () => {
     expect(issues).toHaveLength(0)
   })
 
+  // A policy's comment is not in pg_policies, so it was neither compared nor
+  // carried by the fix that recreates the policy.
+  it('reports a comment that differs on its own, fixed without recreating the policy', async () => {
+    const check = new StorageCheck(makePolicyQueryFn(
+      [makePolicy({ comment: "owners read their own files" })],
+      [makePolicy({ comment: 'stale' })],
+    ))
+    const issues = await check.scan(mockContext())
+
+    expect(issues.map(i => i.id)).toEqual(['storage-policy-comment-objects.allow_read'])
+    expect(issues[0].title).toBe('Storage policy comment changed: allow_read on objects')
+    expect(issues[0].sql!.up).toBe(`COMMENT ON POLICY "allow_read" ON "storage"."objects" IS 'owners read their own files';`)
+    expect(issues[0].sql!.down).toBe(`COMMENT ON POLICY "allow_read" ON "storage"."objects" IS 'stale';`)
+  })
+
+  it('clears a comment the source does not have', async () => {
+    const check = new StorageCheck(makePolicyQueryFn([makePolicy()], [makePolicy({ comment: 'stale' })]))
+    const [issue] = await check.scan(mockContext())
+    expect(issue.sql!.up).toBe('COMMENT ON POLICY "allow_read" ON "storage"."objects" IS NULL;')
+  })
+
+  it('creates a missing policy with its comment', async () => {
+    const check = new StorageCheck(makePolicyQueryFn([makePolicy({ comment: "it's theirs" })], []))
+    const [issue] = await check.scan(mockContext())
+    expect(issue.sql!.up).toMatch(/;\nCOMMENT ON POLICY "allow_read" ON "storage"\."objects" IS 'it''s theirs';$/)
+  })
+
+  it('recreates a changed policy with its comment', async () => {
+    const check = new StorageCheck(makePolicyQueryFn(
+      [makePolicy({ qual: '(true)', comment: 'anyone' })],
+      [makePolicy({ comment: 'anyone' })],
+    ))
+    const issues = await check.scan(mockContext())
+    expect(issues.map(i => i.id)).toEqual(['storage-policy-changed-objects.allow_read'])
+    expect(issues[0].sql!.up).toContain(`IS 'anyone';`)
+  })
+
   it('combines bucket and policy issues', async () => {
     const check = new StorageCheck(
       makeQueryFn([makeBucket()], [], [makePolicy()], []),

@@ -9,7 +9,7 @@
  * each policy after the schema dump had set its comment.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
-import { readdir } from 'node:fs/promises'
+import { cp, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fingerprintSql } from '@akalforge/pg-conformance'
 import { PgHarness } from '../harness/PgHarness.js'
@@ -38,6 +38,14 @@ const SOURCE = `
   COMMENT ON VIEW open_orders IS 'not yet paid';
   COMMENT ON CONSTRAINT orders_total_nonneg ON orders IS 'no negative totals';
   INSERT INTO orders (owner, total) VALUES ('a', 10), ('b', 20);
+
+  -- A schema holding only a domain and a composite type, which introspection
+  -- does not list, and one holding nothing yet: both are the project's.
+  CREATE SCHEMA billing;
+  CREATE DOMAIN billing.amount AS numeric(12,2) CHECK (VALUE >= 0);
+  CREATE TYPE billing.address AS (line1 text, postcode text);
+  CREATE SCHEMA staging;
+  CREATE TABLE invoices (id int PRIMARY KEY, total billing.amount, ship_to billing.address);
 `
 
 describeE2E('e2e: snapshot restored into an empty database', () => {
@@ -55,6 +63,7 @@ describeE2E('e2e: snapshot restored into an empty database', () => {
         source: { dbUrl: h.connectionString('source') },
         target: { dbUrl: h.connectionString('target') },
         restored: { dbUrl: h.urlFor('target', restored) },
+        partial: { dbUrl: h.urlFor('target', 'sf_partial') },
       },
     })
   }, 300_000)
@@ -69,16 +78,63 @@ describeE2E('e2e: snapshot restored into an empty database', () => {
     const restore = await h.cli(['restore', '-e', 'restored', '--from-snapshot', snapshot, '--apply'], { cwd: ws })
     expect(restore.code, restore.stdout + restore.stderr).toBe(0)
 
-    const fingerprint = fingerprintSql(['public']).replace(/;\s*$/, '')
+    const fingerprint = fingerprintSql(['public', 'billing']).replace(/;\s*$/, '')
     const source = await h.sql('source', fingerprint)
     const copy = await h.sqlIn('target', restored, fingerprint)
     expect(copy.split('\n')).toEqual(source.split('\n'))
     expect(copy).toContain('cmt policy own_orders on public.orders buyers see their own orders')
+
+    const schemas = `SELECT string_agg(nspname, ',' ORDER BY nspname) FROM pg_namespace WHERE nspname IN ('billing', 'staging')`
+    expect(await h.sqlIn('target', restored, schemas)).toBe('billing,staging')
   }, 600_000)
 
   it('then finds no drift between the two', async () => {
     const r = await h.cli(['diff', '--target', 'restored', '--check', 'schema', '--json'], { cwd: ws })
     const scan = JSON.parse(r.stdout) as { checks: Array<{ check: string; issues: unknown[] }> }
     expect(scan.checks.flatMap(c => c.issues), r.stdout).toEqual([])
+  }, 300_000)
+
+  // --json is for scripts: stdout must parse whatever the outcome, and the exit
+  // code must say what the text report would have.
+  it('prints only JSON for a dry run', async () => {
+    const r = await h.cli(['restore', '-e', 'restored', '--from-snapshot', 'latest', '--json'], { cwd: ws })
+    expect(r.code, r.stderr).toBe(0)
+    const preview = JSON.parse(r.stdout) as { dryRun: boolean; layers: Array<{ layer: string }> }
+    expect(preview.dryRun).toBe(true)
+    expect(preview.layers.map(l => l.layer)).toContain('schema')
+  }, 120_000)
+
+  it('refuses a non-empty target in JSON, and exits 1', async () => {
+    const r = await h.cli(['restore', '-e', 'restored', '--from-snapshot', 'latest', '--apply', '--json'], { cwd: ws })
+    expect(r.code).toBe(1)
+    const refusal = JSON.parse(r.stdout) as { error: string; tables: string[] }
+    expect(refusal.tables).toContain('orders')
+  }, 120_000)
+
+  // A snapshot needing an extension this server does not ship. Everything
+  // that needs it used to roll the whole restore back with it.
+  it('restores what it can without a missing extension, says what it left out, and exits 1', async () => {
+    const snapshots = join(ws, '.supaforge', 'snapshots')
+    const [taken] = await readdir(snapshots)
+    const copy = '20990101T000000Z'
+    await cp(join(snapshots, taken), join(snapshots, copy), { recursive: true })
+    const manifestFile = join(snapshots, copy, 'manifest.json')
+    const manifest = JSON.parse(await readFile(manifestFile, 'utf8')) as { timestamp: string }
+    await writeFile(manifestFile, JSON.stringify({ ...manifest, timestamp: copy }))
+    const schemaFile = join(snapshots, copy, 'schema.sql')
+    await writeFile(schemaFile, (await readFile(schemaFile, 'utf8')) + `
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+CREATE TABLE public.docs (id int PRIMARY KEY, embedding public.vector(3));
+CREATE INDEX docs_embedding ON public.docs (embedding);
+`)
+    await h.createDatabase('target', 'sf_partial')
+    const r = await h.cli(['restore', '-e', 'partial', '--from-snapshot', copy, '--apply', '--json'], { cwd: ws })
+    expect(r.code, r.stdout + r.stderr).toBe(1)
+    const result = JSON.parse(r.stdout) as { incomplete: boolean; errors: unknown[]; skipped: Array<{ label: string; reason: string }> }
+    expect(result.errors).toEqual([])
+    expect(result.incomplete).toBe(true)
+    expect(result.skipped.map(s => s.reason).join('\n')).toMatch(/lacks the vector extension/)
+    expect(await h.sqlIn('target', 'sf_partial', `SELECT to_regclass('public.orders') IS NOT NULL`)).toBe('t')
+    expect(await h.sqlIn('target', 'sf_partial', `SELECT to_regclass('public.docs') IS NULL`)).toBe('t')
   }, 300_000)
 })

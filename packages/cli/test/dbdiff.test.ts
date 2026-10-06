@@ -490,7 +490,7 @@ describe('summariseStatement', () => {
     // Comments (rc.21), extensions (rc.22) and schemas: once "Schema change: unknown".
     [`COMMENT ON POLICY "own_orders" ON "public"."orders" IS 'x';`, 'schema', 'Comment changed: public.orders.own_orders (policy)'],
     [`COMMENT ON COLUMN "App Data"."T".n IS 'x';`, 'schema', 'Comment changed: App Data.T.n (column)'],
-    [`COMMENT ON FUNCTION public.f(integer) IS NULL;`, 'schema', 'Comment changed: public.f(integer) (function)'],
+    [`COMMENT ON FUNCTION public.f(integer) IS NULL;`, 'schema', 'Extra comment: public.f(integer) (function)'],
     [`COMMENT ON CONSTRAINT "d_pos" ON DOMAIN public.d IS 'x';`, 'schema', 'Comment changed: public.d.d_pos (constraint)'],
     [`COMMENT ON SCHEMA app IS 'x';`, 'schema', 'Comment changed: schema app'],
     ['CREATE EXTENSION IF NOT EXISTS "btree_gist" WITH SCHEMA "public";', 'schema', 'Extension missing: public.btree_gist'],
@@ -503,9 +503,11 @@ describe('summariseStatement', () => {
     ['CREATE FUNCTION calculate_total() RETURNS int AS $$ SELECT 1; $$ LANGUAGE sql;', 'schema', 'Function missing: public.calculate_total()'],
     ['DROP FUNCTION calculate_total();', 'schema', 'Extra function: public.calculate_total()'],
     ['ALTER FUNCTION calculate_total() OWNER TO admin;', 'schema', 'Function altered: public.calculate_total()'],
-    ['CREATE TRIGGER trg_audit AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION fn();', 'schema', 'Trigger missing: public.trg_audit'],
-    ['DROP TRIGGER trg_audit ON users;', 'schema', 'Extra trigger: public.trg_audit'],
-    ['ALTER TRIGGER trg_audit ON users RENAME TO trg_v2;', 'schema', 'Trigger altered: public.trg_audit'],
+    // A trigger by its table too: a name is unique only per table.
+    ['CREATE TRIGGER trg_audit AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION fn();', 'schema', 'Trigger missing: public.users.trg_audit'],
+    ['DROP TRIGGER trg_audit ON users;', 'schema', 'Extra trigger: public.users.trg_audit'],
+    ['ALTER TRIGGER trg_audit ON users RENAME TO trg_v2;', 'schema', 'Trigger altered: public.users.trg_audit'],
+    ['CREATE TRIGGER on_signup AFTER INSERT OR UPDATE OF email ON "App"."Users" FOR EACH ROW EXECUTE FUNCTION fn();', 'schema', 'Trigger missing: App.Users.on_signup'],
     ['CREATE TYPE mood AS ENUM (\'happy\', \'sad\');', 'schema', 'Type missing: public.mood'],
     ['ALTER TYPE mood ADD VALUE \'neutral\';', 'schema', 'Type altered: public.mood'],
     ['DROP TYPE mood;', 'schema', 'Extra type: public.mood'],
@@ -587,6 +589,40 @@ describe('sqlToIssues — programmable objects', () => {
     }, 'schema')
     expect(issues[0].severity).toBe('critical')
     expect(issues[0].id).toBe('schema-drop-trigger-1')
+  })
+
+  it('merges a trigger dropped and recreated into one modified trigger', () => {
+    const issues = sqlToIssues({
+      up: [
+        'DROP TRIGGER IF EXISTS "note_changed" ON "orders";',
+        'CREATE TRIGGER note_changed BEFORE UPDATE OF note ON public.orders FOR EACH ROW EXECUTE FUNCTION touch();',
+      ].join('\n'),
+      down: '',
+    }, 'schema')
+    expect(issues.map(i => [i.title, i.severity])).toEqual([['Trigger modified: public.orders.note_changed', 'warning']])
+  })
+
+  it('does not merge one trigger name on two tables', () => {
+    // `set_updated_at` dropped from one table and created on another is two
+    // findings, each naming its table.
+    const issues = sqlToIssues({
+      up: [
+        'DROP TRIGGER IF EXISTS "set_updated_at" ON "legacy";',
+        'CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.items FOR EACH ROW EXECUTE FUNCTION touch();',
+        'CREATE TRIGGER set_updated_at BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION touch();',
+      ].join('\n'),
+      down: [
+        'CREATE TRIGGER set_updated_at BEFORE UPDATE ON app.legacy FOR EACH ROW EXECUTE FUNCTION touch();',
+        'DROP TRIGGER IF EXISTS "set_updated_at" ON "items";',
+        'DROP TRIGGER IF EXISTS "set_updated_at" ON "orders";',
+      ].join('\n'),
+    }, 'schema')
+    // The DROP leaves its table's schema out; the CREATE that undoes it has it.
+    expect(issues.map(i => i.title)).toEqual([
+      'Extra trigger: app.legacy.set_updated_at',
+      'Trigger missing: public.items.set_updated_at',
+      'Trigger missing: public.orders.set_updated_at',
+    ])
   })
 
   it('classifies DROP TYPE as critical', () => {
@@ -1189,7 +1225,7 @@ describe('schema titles are one schema-qualified format (issue #47)', () => {
 
   it('reads a trigger as a trigger even though it executes a function', () => {
     const sql = 'CREATE TRIGGER trg_orders_touch BEFORE UPDATE ON public.orders FOR EACH ROW EXECUTE FUNCTION touch_updated();'
-    expect(summariseStatement(sql, 'schema')).toBe('Trigger missing: public.trg_orders_touch')
+    expect(summariseStatement(sql, 'schema')).toBe('Trigger missing: public.orders.trg_orders_touch')
   })
 
   it('carries the recovered schema through sqlToIssues', () => {
@@ -1237,9 +1273,10 @@ describe('every schema finding uses one title format (issue #70)', () => {
 
   it.each(titles)('%s is <finding>: <schema>.<name>', (title) => {
     const name = title.slice(title.indexOf(': ') + 2)
-    // The part before any argument list must carry exactly one dot.
+    // The part before any argument list must carry exactly one dot — two for
+    // a trigger, named `<schema>.<table>.<trigger>` like a policy.
     const head = name.includes('(') ? name.slice(0, name.indexOf('(')) : name
-    expect(head.split('.')).toHaveLength(2)
+    expect(head.split('.')).toHaveLength(/trigger/i.test(title) ? 3 : 2)
   })
 
   it('qualifies both directions of every object type identically', () => {
@@ -1393,5 +1430,25 @@ describe('mergeReplacements: types, domains and sequences', () => {
 
     expect(merged[0].down).toContain('refunded')
     expect(merged[0].down).toContain('DROP TYPE')
+  })
+})
+
+// "Comment changed" was the title for every comment finding, including one on
+// an object the target does not have yet. The DOWN says which it is: clearing
+// the comment undoes one only the source has.
+describe('comment findings say what they do', () => {
+  it.each([
+    [`COMMENT ON TABLE public.orders IS 'paid';`, `COMMENT ON TABLE public.orders IS NULL;`, 'Comment missing: public.orders (table)'],
+    [`COMMENT ON TABLE public.orders IS 'paid';`, `COMMENT ON TABLE public.orders IS 'old';`, 'Comment changed: public.orders (table)'],
+    [`COMMENT ON TABLE public.orders IS NULL;`, `COMMENT ON TABLE public.orders IS 'old';`, 'Extra comment: public.orders (table)'],
+    [`COMMENT ON SCHEMA app IS 'x';`, `COMMENT ON SCHEMA app IS NULL;`, 'Comment missing: schema app'],
+    [`COMMENT ON SCHEMA app IS 'x';`, undefined, 'Comment changed: schema app'],
+  ])('%s → %s', (up, down, title) => {
+    expect(summariseStatement(up, 'schema', down)).toBe(title)
+  })
+
+  it('reads a comment saying IS NULL as text, not as clearing it', () => {
+    expect(summariseStatement(`COMMENT ON TABLE public.t IS 'it IS NULL';`, 'schema', `COMMENT ON TABLE public.t IS NULL;`))
+      .toBe('Comment missing: public.t (table)')
   })
 })

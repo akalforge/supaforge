@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import {
   parseDbDiffOutput,
   sqlToIssues,
+  foldCommentsIntoCreates,
   resolveDbDiffBin,
   resolveDbDiffTimeoutMs,
   stripDbDiffNoise,
@@ -1450,5 +1451,51 @@ describe('comment findings say what they do', () => {
   it('reads a comment saying IS NULL as text, not as clearing it', () => {
     expect(summariseStatement(`COMMENT ON TABLE public.t IS 'it IS NULL';`, 'schema', `COMMENT ON TABLE public.t IS NULL;`))
       .toBe('Comment missing: public.t (table)')
+  })
+})
+
+// A comment on an object the target lacks arrived as a finding of its own,
+// titled "Comment changed" on an object that was not there to change.
+describe('a comment on an object the target lacks goes with its creation', () => {
+  const units = (...parts: Array<[string, string, string]>) =>
+    parts.map(([kind, object, sql]) => `-- dbdiff:unit ${kind} ${object}\n${sql}\n-- dbdiff:end`).join('\n')
+
+  const issues = sqlToIssues({
+    up: units(
+      ['CreateSchema', 'app', 'CREATE SCHEMA IF NOT EXISTS "app";'],
+      ['CreateTable', 'codes', 'CREATE TABLE public.codes (id int, name text);'],
+      ['CreateView', 'v', 'CREATE VIEW "v" AS SELECT 1;'],
+      ['AlterComment', 'app', `COMMENT ON SCHEMA app IS 'more';`],
+      ['AlterComment', 'codes', `COMMENT ON TABLE public.codes IS 'codes';`],
+      ['AlterComment', 'codes.name', `COMMENT ON COLUMN public.codes.name IS 'shown';`],
+      ['AlterComment', 'v', `COMMENT ON VIEW public.v IS 'v';`],
+      ['AlterComment', 'kept', `COMMENT ON TABLE public.kept IS 'existing table';`],
+    ),
+    down: '',
+  }, 'schema')
+
+  it('leaves one finding per object created', () => {
+    expect(issues.map(i => i.title)).toEqual([
+      'Schema missing: app', 'Table missing: public.codes', 'View missing: public.v', 'Comment changed: public.kept (table)',
+    ])
+  })
+
+  it('runs each comment after what it is on, in the same fix', () => {
+    expect(issues[0].sql?.up).toBe(`CREATE SCHEMA IF NOT EXISTS "app";\nCOMMENT ON SCHEMA app IS 'more';`)
+    expect(issues[1].sql?.up).toBe([
+      'CREATE TABLE public.codes (id int, name text);',
+      `COMMENT ON TABLE public.codes IS 'codes';`,
+      `COMMENT ON COLUMN public.codes.name IS 'shown';`,
+    ].join('\n'))
+    expect(issues[2].sql?.up).toBe(`CREATE VIEW "v" AS SELECT 1;\nCOMMENT ON VIEW public.v IS 'v';`)
+  })
+
+  it('folds a policy comment into the policy, not the table', () => {
+    const [, policy] = foldCommentsIntoCreates([
+      { id: 't', check: 'schema', severity: 'warning', title: 'Table missing: public.t', description: '', sql: { up: 'CREATE TABLE t ();', down: '' } },
+      { id: 'p', check: 'schema', severity: 'warning', title: 'Policy missing: public.t.own', description: '', sql: { up: 'CREATE POLICY own ON t;', down: '' } },
+      { id: 'c', check: 'schema', severity: 'warning', title: 'Comment changed: public.t.own (policy)', description: '', sql: { up: `COMMENT ON POLICY own ON public.t IS 'x';`, down: '' } },
+    ])
+    expect(policy.sql?.up).toBe(`CREATE POLICY own ON t;\nCOMMENT ON POLICY own ON public.t IS 'x';`)
   })
 })

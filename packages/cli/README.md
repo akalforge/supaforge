@@ -2,9 +2,22 @@
 
 > Diff and sync your Supabase environments.
 
-SupaForge compares two Supabase databases (dev and prod, say), reports what
-differs, and can fix the target. With a single project, it snapshots,
-clones and restores it.
+SupaForge compares two Supabase projects (dev and prod, say) across
+everything that makes up a project, not just the schema. It reports every
+difference and makes the target match the source. Fixes run in dependency
+order, in one transaction, and can be proved on a throwaway copy before
+anything changes. With a single project, it snapshots, restores and clones it.
+
+- **The whole project.** It covers schema, RLS, storage, auth, Edge Functions,
+  cron, webhooks, Realtime, Vault, extensions, grants, reference data and
+  migration history.
+- **Safe by default.** Every write needs `--apply`, and anything that loses
+  data or opens up access also needs `--allow-destructive`. A failed apply
+  leaves the target exactly as it was.
+- **Provable.** `--prove` rehearses the migration and refuses to apply one
+  that wouldn't reproduce the source.
+- **Anywhere.** It works with Supabase Cloud, self-hosted stacks, plain
+  PostgreSQL targets, CI pipelines and AI agents (MCP).
 
 Built by [Akal](https://github.com/akalforge).
 
@@ -40,11 +53,11 @@ Everything that writes previews first. Add `--apply` to make it happen.
 | Migration history | Local migration files against `supabase_migrations` (target only) | SQL, opt-in |
 | Roles and grants | Custom roles, and grants including `anon`, `authenticated`, `service_role` | SQL |
 
-The schema check covers tables, columns, keys, indexes, views, materialized
-views, functions, triggers, sequences, types, domains, policies, extensions
-and comments, in every schema except Supabase's own (`auth`, `storage`, and
-so on) and those in `ignoreSchemas`. Objects owned by an extension aren't
-compared.
+The schema check covers tables, columns, keys, indexes, partitions, views,
+materialized views, functions, triggers, sequences, enums, composite types,
+domains, policies, extensions and comments. It runs in every schema except
+Supabase's own (`auth`, `storage`, and so on) and those in `ignoreSchemas`.
+Objects owned by an extension belong to it and aren't compared.
 
 A check that can't run, for example without API credentials, says so and why.
 It's never reported as a clean pass.
@@ -56,7 +69,7 @@ supaforge init                    Create a config interactively
 supaforge diff                    Report drift (alias: hukam)
 supaforge sync                    Alias for diff --apply
 
-supaforge snapshot --apply        Capture an environment (12 layers)
+supaforge snapshot --apply        Capture an environment's structure and configuration
 supaforge restore --apply         Rebuild a database from a snapshot or migrations
 supaforge clone --apply           Copy a remote database to a local one
 
@@ -128,9 +141,9 @@ supaforge restore --env=local --from-snapshot=latest --apply
 supaforge clone --env=prod --apply                        # local copy, data included
 ```
 
-A snapshot is a record of structure and configuration across 12 layers:
-schema, RLS policies, cron, webhooks, extensions, storage, auth, Edge
-Functions, reference data, Realtime, Vault names and grants. **It is not a
+A snapshot records a project's structure and configuration: schema, RLS
+policies, cron, webhooks, extensions, storage, auth, Edge Functions,
+reference data, Realtime, Vault names and grants. **It is not a
 backup.** It holds no rows beyond `checks.data.tables`, and no stored files.
 
 `restore --from-snapshot` puts back:

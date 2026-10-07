@@ -1,7 +1,7 @@
 import type { CheckContext } from '../checks/base.js'
 import { inRolledBackTransaction, pgQuery, type QueryFn } from '../db.js'
 import type { DriftIssue } from '../types/drift.js'
-import { quoteIdent } from './sql.js'
+import { quoteName } from './sql.js'
 
 /**
  * The parts of a policy that decide whether two are the same. The RLS, storage
@@ -43,7 +43,7 @@ export const canonicalPolicyExpressions: PolicyCanonicalizer = async (dbUrl, pol
   try {
     return await inRolledBackTransaction(dbUrl, async client => {
       await client.query(
-        `CREATE TEMP TABLE sf_canon (LIKE ${quoteIdent(policy.schemaname)}.${quoteIdent(policy.tablename)})`,
+        `CREATE TEMP TABLE sf_canon (LIKE ${quoteName(policy.schemaname)}.${quoteName(policy.tablename)})`,
       )
       const command = (policy.cmd ?? 'ALL').toUpperCase()
       await client.query(

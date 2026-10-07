@@ -1,5 +1,6 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
+import { quoteName } from '../utils/sql'
 import type { DriftIssue } from '../types/drift'
 import { Check, type CheckContext } from './base'
 
@@ -25,6 +26,8 @@ import { Check, type CheckContext } from './base'
 interface WebhookEntry {
   /** `schema.table`, so two webhooks of the same name stay distinct. */
   table_name: string
+  /** The table as SQL names it, quoted where it needs to be. */
+  table_ref?: string
   /** The trigger name, which is what the Dashboard calls the webhook. */
   name: string
   /** `CREATE TRIGGER ...`, exactly as the server renders it. */
@@ -103,6 +106,7 @@ export class WebhooksCheck extends Check {
  */
 const HOOKS_SQL = `
   SELECT n.nspname || '.' || c.relname AS table_name,
+         format('%I.%I', n.nspname, c.relname) AS table_ref,
          t.tgname                      AS name,
          pg_get_triggerdef(t.oid)      AS definition
   FROM pg_trigger t
@@ -122,7 +126,7 @@ const PG_NET_CHECK_SQL = `
 
 /** `DROP TRIGGER IF EXISTS "name" ON schema.table;` */
 function dropStatement(entry: WebhookEntry): string {
-  return `DROP TRIGGER IF EXISTS "${entry.name}" ON ${entry.table_name};`
+  return `DROP TRIGGER IF EXISTS ${quoteName(entry.name)} ON ${entry.table_ref ?? entry.table_name};`
 }
 
 /**

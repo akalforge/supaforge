@@ -15,13 +15,13 @@
  */
 import type { CheckName, DriftIssue } from '../types/drift'
 import { normalizeRoles } from './strings'
-import { quoteLiteral } from './sql'
+import { quoteLiteral, quoteName } from './sql'
 
 export interface SchemaPolicy {
   tablename: string
   policyname: string
   permissive: string
-  roles: string[]
+  roles: string[] | string
   cmd: string
   qual: string | null
   with_check: string | null
@@ -47,11 +47,26 @@ export function policyKey(p: SchemaPolicy): string {
   return `${p.tablename}.${p.policyname}`
 }
 
+/** `"schema"."table"`, each part quoted with its own quotes doubled. */
+const policyTable = (schema: string, p: Pick<SchemaPolicy, 'tablename'>) => `${quoteName(schema)}.${quoteName(p.tablename)}`
+
+/**
+ * A role in a policy's TO list. pg_policies spells the PUBLIC pseudo-role
+ * `public`, which quoted would name a role that does not exist.
+ */
+const roleSql = (role: string) => role === 'public' ? 'PUBLIC' : quoteName(role)
+
+/**
+ * The SQL for a policy, used by every check and snapshot layer that writes one,
+ * so a name is quoted the same way everywhere. A policy named `say "hi"
+ * there`, written between plain quotes, was a syntax error that rolled back a
+ * whole restore or apply.
+ */
 export function createPolicySql(schema: string, p: SchemaPolicy): string {
-  const roles = normalizeRoles(p.roles).join(', ')
+  const roles = normalizeRoles(p.roles).map(roleSql).join(', ')
   const lines = [
-    `CREATE POLICY "${p.policyname}"`,
-    `  ON "${schema}"."${p.tablename}"`,
+    `CREATE POLICY ${quoteName(p.policyname)}`,
+    `  ON ${policyTable(schema, p)}`,
     `  AS ${p.permissive}`,
     `  FOR ${p.cmd}`,
     `  TO ${roles}`,
@@ -65,11 +80,11 @@ export function createPolicySql(schema: string, p: SchemaPolicy): string {
 }
 
 export function commentPolicySql(schema: string, p: SchemaPolicy): string {
-  return `COMMENT ON POLICY "${p.policyname}" ON "${schema}"."${p.tablename}" IS ${p.comment ? quoteLiteral(p.comment) : 'NULL'};`
+  return `COMMENT ON POLICY ${quoteName(p.policyname)} ON ${policyTable(schema, p)} IS ${p.comment ? quoteLiteral(p.comment) : 'NULL'};`
 }
 
 export function dropPolicySql(schema: string, p: SchemaPolicy): string {
-  return `DROP POLICY IF EXISTS "${p.policyname}" ON "${schema}"."${p.tablename}";`
+  return `DROP POLICY IF EXISTS ${quoteName(p.policyname)} ON ${policyTable(schema, p)};`
 }
 
 export function policiesEqual(a: SchemaPolicy, b: SchemaPolicy): boolean {

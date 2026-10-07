@@ -241,7 +241,7 @@ export async function proveConvergence(opts: {
   let roundTripName: string | undefined
   try {
     try {
-      await pgQuery(adminUrl, `CREATE DATABASE "${cloneName}"`)
+      await pgQuery(adminUrl, `CREATE DATABASE ${quoteName(cloneName)}`)
       created = true
     } catch (err) {
       // Typically insufficient privilege. Not being able to prove is not the
@@ -442,7 +442,7 @@ async function copyOfSource(
   adminUrl: string, sourceUrl: string, intoUrl: string, name: string, schemas: string[], tools: PgTools,
 ): Promise<{ ok: boolean } | null> {
   try {
-    await pgQuery(adminUrl, `CREATE DATABASE "${name}"`)
+    await pgQuery(adminUrl, `CREATE DATABASE ${quoteName(name)}`)
   } catch {
     return null
   }
@@ -459,7 +459,7 @@ async function dropDatabase(adminUrl: string, name: string): Promise<void> {
   await pgQuery(adminUrl,
     `SELECT pg_terminate_backend(pid) FROM pg_stat_activity
       WHERE datname = '${name}' AND pid <> pg_backend_pid()`).catch(() => undefined)
-  await pgQuery(adminUrl, `DROP DATABASE IF EXISTS "${name}"`).catch(() => undefined)
+  await pgQuery(adminUrl, `DROP DATABASE IF EXISTS ${quoteName(name)}`).catch(() => undefined)
 }
 
 /**
@@ -582,7 +582,7 @@ export async function prepareClone(
   cloneUrl: string, targetUrl: string, schemas: string[], queryFn: QueryFn = pgQuery,
 ): Promise<void> {
   for (const schema of schemas) {
-    await queryFn(cloneUrl, `DROP SCHEMA IF EXISTS "${schema}" CASCADE`)
+    await queryFn(cloneUrl, `DROP SCHEMA IF EXISTS ${quoteName(schema)} CASCADE`)
   }
 
   const extensions = await queryFn(targetUrl, TARGET_EXTENSIONS_SQL) as unknown as
@@ -593,13 +593,13 @@ export async function prepareClone(
     // this clone will not accept is not a reason to abandon the proof. If the
     // structure genuinely needed it, the replay fails next and says so — which
     // is a better error than this one (issue #94).
-    await queryFn(cloneUrl, `CREATE SCHEMA IF NOT EXISTS "${ext.schema}"`)
+    await queryFn(cloneUrl, `CREATE SCHEMA IF NOT EXISTS ${quoteName(ext.schema)}`)
       .catch(() => undefined)
     // Best-effort: an extension the server cannot offer this database is not a
     // reason to abandon the proof. If the schema genuinely needed it, the replay
     // fails next and says so.
     await queryFn(cloneUrl,
-      `CREATE EXTENSION IF NOT EXISTS "${ext.name}" WITH SCHEMA "${ext.schema}"`,
+      `CREATE EXTENSION IF NOT EXISTS ${quoteName(ext.name)} WITH SCHEMA ${quoteName(ext.schema)}`,
     ).catch(() => undefined)
   }
 }

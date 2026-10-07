@@ -8,7 +8,7 @@ import type { EnvironmentConfig, SupaForgeConfig } from './types/config'
 import { checkPgDumpCompat } from './pg-tools'
 import { BRANCHES_FILE, PG_PIPELINE_TIMEOUT_MS, CLONE_PROGRESS_INTERVAL_MS } from './constants'
 import { CLONE_STUBS_SQL } from './stubs'
-import { quoteIdent } from './utils/sql'
+import { quoteIdent, quoteName } from './utils/sql'
 import { SUPABASE_PLATFORM_SCHEMAS } from './defaults'
 
 /** Prefix for branch database names created by SupaForge. */
@@ -188,7 +188,7 @@ async function tryTemplateCopy(sourceUrl: string, newDb: string): Promise<boolea
   const client = new pg.Client(pgClientConfig(maintenanceUrl))
   try {
     await client.connect()
-    await client.query(`CREATE DATABASE "${newDb}" TEMPLATE "${database}"`)
+    await client.query(`CREATE DATABASE ${quoteName(newDb)} TEMPLATE ${quoteName(database)}`)
     return true
   } catch {
     return false
@@ -211,7 +211,7 @@ async function tryDumpRestore(
   const client = new pg.Client(pgClientConfig(maintenanceUrl))
   try {
     await client.connect()
-    await client.query(`CREATE DATABASE "${newDb}"`)
+    await client.query(`CREATE DATABASE ${quoteName(newDb)}`)
   } catch {
     return false
   } finally {
@@ -268,7 +268,7 @@ async function tryDumpRestore(
     const cleanup = new pg.Client(pgClientConfig(maintenanceUrl))
     try {
       await cleanup.connect()
-      await cleanup.query(`DROP DATABASE IF EXISTS "${newDb}"`)
+      await cleanup.query(`DROP DATABASE IF EXISTS ${quoteName(newDb)}`)
     } finally {
       await cleanup.end()
     }
@@ -409,7 +409,7 @@ export async function deleteBranch(
       `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
       [branch.dbName],
     )
-    await client.query(`DROP DATABASE IF EXISTS "${branch.dbName}"`)
+    await client.query(`DROP DATABASE IF EXISTS ${quoteName(branch.dbName)}`)
   } finally {
     await client.end()
   }
@@ -474,10 +474,10 @@ export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<Clon
         `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
         [opts.localDbName],
       )
-      await client.query(`DROP DATABASE IF EXISTS "${opts.localDbName}"`)
+      await client.query(`DROP DATABASE IF EXISTS ${quoteName(opts.localDbName)}`)
     }
 
-    await client.query(`CREATE DATABASE "${opts.localDbName}"`)
+    await client.query(`CREATE DATABASE ${quoteName(opts.localDbName)}`)
   } catch (err) {
     const msg = (err as Error).message ?? ''
     if (msg.includes('already exists')) {
@@ -619,7 +619,7 @@ export async function cloneRemoteToLocal(opts: CloneRemoteOptions): Promise<Clon
     const cleanup = new pg.Client(pgClientConfig(localMaintenanceUrl))
     try {
       await cleanup.connect()
-      await cleanup.query(`DROP DATABASE IF EXISTS "${opts.localDbName}"`)
+      await cleanup.query(`DROP DATABASE IF EXISTS ${quoteName(opts.localDbName)}`)
     } catch { /* best effort */ } finally {
       await cleanup.end()
     }
@@ -787,8 +787,8 @@ async function installRemoteExtensions(
     for (const { extname, schema } of wanted) {
       if (!available.has(extname)) continue
       try {
-        await local.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(schema)}`)
-        await local.query(`CREATE EXTENSION IF NOT EXISTS ${quoteIdent(extname)} WITH SCHEMA ${quoteIdent(schema)} CASCADE`)
+        await local.query(`CREATE SCHEMA IF NOT EXISTS ${quoteName(schema)}`)
+        await local.query(`CREATE EXTENSION IF NOT EXISTS ${quoteName(extname)} WITH SCHEMA ${quoteName(schema)} CASCADE`)
         installed.push(extname)
       } catch { /* reported by the restore, with what needed it */ }
     }

@@ -158,3 +158,19 @@ describe('escapeRegex', () => {
     expect(rx.test('axbbc')).toBe(false)
   })
 })
+
+describe('normalizeRoles: quoted elements of an array literal', () => {
+  it('reads a quoted role, with its escaped quotes, as the role itself', () => {
+    expect(normalizeRoles('{"Admins \\"A\\"",authenticated}')).toEqual(['Admins "A"', 'authenticated'])
+  })
+
+  it('keeps a comma or backslash inside a quoted role', () => {
+    expect(normalizeRoles('{"a,b","c\\\\d"}')).toEqual(['a,b', 'c\\d'])
+  })
+
+  it('reads plain literals and JS arrays as before', () => {
+    expect(normalizeRoles('{public}')).toEqual(['public'])
+    expect(normalizeRoles(['anon', 'authenticated'])).toEqual(['anon', 'authenticated'])
+    expect(normalizeRoles(['{anon,authenticated}'])).toEqual(['anon', 'authenticated'])
+  })
+})

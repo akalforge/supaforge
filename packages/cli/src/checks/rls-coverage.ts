@@ -2,6 +2,7 @@ import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
 import { Check, type CheckContext } from './base'
+import { quoteName } from '../utils/sql'
 
 interface TableInfo {
   schemaname: string
@@ -59,7 +60,7 @@ export class RlsCoverageCheck extends Check {
 }
 
 function buildIssue(t: TableInfo): DriftIssue {
-  const tableRef = `"${t.schemaname}"."${t.tablename}"`
+  const tableRef = `${quoteName(t.schemaname)}.${quoteName(t.tablename)}`
   return {
     id: `rls-coverage-${t.schemaname}.${t.tablename}`,
     check: 'rls-coverage',

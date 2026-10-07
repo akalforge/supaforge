@@ -1499,3 +1499,15 @@ describe('a comment on an object the target lacks goes with its creation', () =>
     expect(policy.sql?.up).toBe(`CREATE POLICY own ON t;\nCOMMENT ON POLICY own ON public.t IS 'x';`)
   })
 })
+
+// A name holding a double quote is written with it doubled. Read as two
+// names, the title was "Policy missing: public.Odd .say".
+describe('titles read names with doubled quotes', () => {
+  it.each([
+    ['CREATE POLICY "say ""hi"" there" ON "Odd ""t""" FOR SELECT USING (true);', 'Policy missing: public.Odd "t".say "hi" there'],
+    ['CREATE TABLE "Odd ""t""" (id int);', 'Table missing: public.Odd "t"'],
+    ['DROP VIEW IF EXISTS "v ""w""";', 'Extra view: public.v "w"'],
+  ])('%s', (sql, title) => {
+    expect(summariseStatement(sql, 'schema')).toBe(title)
+  })
+})

@@ -1625,9 +1625,10 @@ export function extractQualifiedName(sql: string, head: RegExp): string {
   const parts: string[] = []
 
   for (let depth = 0; depth < 2; depth++) {
-    const ident = /^(?:"([^"]*)"|([\w$]+))/.exec(rest)
+    // A quoted name doubles any quote inside it: "say ""hi"" there".
+    const ident = /^(?:"((?:[^"]|"")*)"|([\w$]+))/.exec(rest)
     if (!ident) break
-    parts.push(ident[1] ?? ident[2])
+    parts.push(ident[1] !== undefined ? ident[1].replace(/""/g, '"') : ident[2])
     rest = rest.slice(ident[0].length)
 
     const dot = /^\s*\.\s*/.exec(rest)

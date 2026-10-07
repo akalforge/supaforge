@@ -5,7 +5,6 @@ import { promisify } from 'node:util'
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
 import { quoteIdent, quoteLiteral, quoteName } from './utils/sql'
-import { normalizeRoles } from './utils/strings'
 import type { EnvironmentConfig, SupaForgeConfig, SnapshotManifest, SnapshotLayerInfo } from './types/config'
 import { DEFAULT_IGNORE_SCHEMAS, RELATION_NOT_FOUND } from './defaults'
 import { introspectSchema } from './schema-introspect'
@@ -539,7 +538,7 @@ async function captureRealtime(
     for (const row of rows) {
       const tables = byPublication.get(row.pubname) ?? []
       if (row.schemaname && row.tablename) {
-        tables.push(`${quoteIdent(row.schemaname)}.${quoteIdent(row.tablename)}`)
+        tables.push(`${quoteName(row.schemaname)}.${quoteName(row.tablename)}`)
       }
       byPublication.set(row.pubname, tables)
     }
@@ -549,11 +548,11 @@ async function captureRealtime(
       statements.push(`-- Publication: ${pubname}`)
       statements.push(`DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = ${quoteLiteral(pubname)}) THEN
-    EXECUTE ${quoteLiteral(`CREATE PUBLICATION ${quoteIdent(pubname)}`)};
+    EXECUTE ${quoteLiteral(`CREATE PUBLICATION ${quoteName(pubname)}`)};
   END IF;
 END $$;`)
       for (const table of tables) {
-        statements.push(`ALTER PUBLICATION ${quoteIdent(pubname)} ADD TABLE ${table};`)
+        statements.push(`ALTER PUBLICATION ${quoteName(pubname)} ADD TABLE ${table};`)
       }
     }
 
@@ -671,10 +670,10 @@ async function captureRoleGrants(
 
     const statements = rows.map(row =>
       `GRANT ${row.privilege_type}`
-      + (row.column_name ? ` (${quoteIdent(row.column_name)})` : '')
-      + ` ON ${quoteIdent(row.table_schema)}.${quoteIdent(row.table_name)}`
+      + (row.column_name ? ` (${quoteName(row.column_name)})` : '')
+      + ` ON ${quoteName(row.table_schema)}.${quoteName(row.table_name)}`
       // PUBLIC is a keyword; quoted, it names a role that does not exist.
-      + ` TO ${row.grantee === 'PUBLIC' ? 'PUBLIC' : quoteIdent(row.grantee)}`
+      + ` TO ${row.grantee === 'PUBLIC' ? 'PUBLIC' : quoteName(row.grantee)}`
       + (row.is_grantable ? ' WITH GRANT OPTION' : '')
       + ';')
 
@@ -702,7 +701,7 @@ async function captureExtensions(
       ORDER BY extname
     `)
     const statements = (rows as unknown as { extname: string; extversion: string; schema: string }[]).map(ext => {
-      return `CREATE EXTENSION IF NOT EXISTS "${ext.extname}" WITH SCHEMA "${ext.schema}";`
+      return `CREATE EXTENSION IF NOT EXISTS ${quoteName(ext.extname)} WITH SCHEMA ${quoteName(ext.schema)};`
     })
     const output = statements.length > 0
       ? `-- SupaForge Extensions Snapshot\n-- ${rows.length} extensions\n\n${statements.join('\n')}\n`
@@ -853,27 +852,14 @@ interface RlsRow {
   comment?: string | null
 }
 
+/**
+ * Dropped first so a snapshot can be restored twice: without it a second
+ * restore fails with `policy "…" already exists` and the layers after it
+ * never run (issue #80). Written by the shared builders, which set the
+ * comment after the policy.
+ */
 function generateCreatePolicySql(p: RlsRow): string {
-  const roles = normalizeRoles(p.roles).join(', ')
-  const lines = [
-    // Dropped first so a snapshot can be restored twice. Without it a second
-    // restore fails with `policy "…" already exists` and the layers after it
-    // never run (issue #80). The RLS check's own fix SQL already pairs the two
-    // this way.
-    `DROP POLICY IF EXISTS "${p.policyname}" ON "${p.schemaname}"."${p.tablename}";`,
-    `CREATE POLICY "${p.policyname}"`,
-    `  ON "${p.schemaname}"."${p.tablename}"`,
-    `  AS ${p.permissive}`,
-    `  FOR ${p.cmd}`,
-    `  TO ${roles}`,
-  ]
-  if (p.qual) lines.push(`  USING (${p.qual})`)
-  if (p.with_check) lines.push(`  WITH CHECK (${p.with_check})`)
-  lines.push(';')
-  if (p.comment) {
-    lines.push(`COMMENT ON POLICY "${p.policyname}" ON "${p.schemaname}"."${p.tablename}" IS ${quoteLiteral(p.comment)};`)
-  }
-  return lines.join('\n')
+  return `${dropPolicySql(p.schemaname, p)}\n${createPolicySql(p.schemaname, p)}`
 }
 
 interface CronRow {

@@ -148,7 +148,7 @@ describe('RlsCheck', () => {
     expect(sql).toContain('ON "public"."users"')
     expect(sql).toContain('AS PERMISSIVE')
     expect(sql).toContain('FOR SELECT')
-    expect(sql).toContain('TO authenticated')
+    expect(sql).toContain('TO "authenticated"')
     expect(sql).toContain('USING (')
   })
 
@@ -163,7 +163,7 @@ describe('RlsCheck', () => {
     const issues = await check.scan(mockContext())
 
     const sql = issues[0].sql!.up
-    expect(sql).toContain('TO authenticated')
+    expect(sql).toContain('TO "authenticated"')
     expect(sql).not.toContain('{')
   })
 })

@@ -14,7 +14,7 @@ import { errMsg } from './utils/error'
 import { DEFAULT_IGNORE_SCHEMAS, SUPABASE_PLATFORM_SCHEMAS } from './defaults'
 import { dropUnsupportedSetStatements, knownParameters } from './prove'
 import { splitSqlStatements, isCommentOnly, isPsqlMetaCommand, stripPsqlMetaCommands } from './utils/sql-split'
-import { quoteIdent, quoteLiteral } from './utils/sql.js'
+import { quoteIdent, quoteLiteral, quoteName } from './utils/sql.js'
 import { sqlSkeleton, statementSubject, rolesNamedBy } from './sql-deps.js'
 import { ABSENT_ON_TARGET, EXTENSION_UNAVAILABLE } from './pg-errors.js'
 import { dataTablesInOrder, restoreBuckets, restoreTableRows } from './restore-data.js'
@@ -843,7 +843,7 @@ async function applyStatement(
     // `CREATE EXTENSION ... WITH SCHEMA "extensions"` needs that schema to
     // exist, and on plain PostgreSQL it does not (issue #95).
     const needed = extensionTargetSchema(sql)
-    if (needed) await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(needed)}`)
+    if (needed) await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteName(needed)}`)
 
     // `GRANT … TO anon` and `CREATE POLICY … TO service_role` need the role to
     // exist, and on plain PostgreSQL none of Supabase's Data API roles do.
@@ -934,7 +934,7 @@ export function extensionTargetSchema(sql: string): string | undefined {
 export function createRoleIfMissing(role: string): string {
   return `DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${quoteLiteral(role)}) THEN
-    CREATE ROLE ${quoteIdent(role)} NOLOGIN;
+    CREATE ROLE ${quoteName(role)} NOLOGIN;
   END IF;
 END $$;`
 }
@@ -967,7 +967,7 @@ export function conditionalPublicationMembership(sql: string): string {
       AND schemaname = ${quoteLiteral(schema)}
       AND tablename = ${quoteLiteral(name)}
   ) THEN
-    EXECUTE ${quoteLiteral(`ALTER PUBLICATION ${quoteIdent(publication.replace(/"/g, ''))} ADD TABLE ${quoteIdent(schema)}.${quoteIdent(name)}`)};
+    EXECUTE ${quoteLiteral(`ALTER PUBLICATION ${quoteIdent(publication.replace(/"/g, ''))} ADD TABLE ${quoteName(schema)}.${quoteName(name)}`)};
   END IF;
 END $$;`
 }

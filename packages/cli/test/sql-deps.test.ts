@@ -9,6 +9,8 @@ import {
   orderStatements,
   createdTriggers,
   createsOnlyTriggers,
+  createdPolicies,
+  droppedPolicies,
 } from '../src/sql-deps.js'
 
 /**
@@ -476,3 +478,21 @@ describe('statementPhase: comments', () => {
   })
 })
 
+
+// A name with a double quote in it is written with it doubled, and read as
+// two names the schema check's policy and the RLS check's never matched: both
+// were applied, and the second failed with `policy ... already exists`.
+describe('created and dropped objects, by names with doubled quotes', () => {
+  it('keys a policy the same however it is written', () => {
+    const dbdiff = 'CREATE POLICY "say ""hi"" there" ON "q1" FOR SELECT USING (true);'
+    const rls = 'CREATE POLICY "say ""hi"" there"\n  ON "public"."q1"\n  AS PERMISSIVE\n  FOR SELECT\n  TO PUBLIC\n  USING (true)\n;'
+    expect(createdPolicies(dbdiff)).toEqual(['public.q1.say "hi" there'])
+    expect(createdPolicies(rls)).toEqual(createdPolicies(dbdiff))
+    expect(droppedPolicies('DROP POLICY IF EXISTS "say ""hi"" there" ON "public"."q1";')).toEqual(['public.q1.say "hi" there'])
+  })
+
+  it('keys a trigger by its table, with doubled quotes read as one', () => {
+    expect(createdTriggers('CREATE TRIGGER "t ""x""" AFTER INSERT ON "Odd ""t""" FOR EACH ROW EXECUTE FUNCTION f();'))
+      .toEqual(['odd "t".t "x"'])
+  })
+})

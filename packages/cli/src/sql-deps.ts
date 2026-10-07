@@ -170,14 +170,26 @@ export function sqlSkeleton(sql: string): string {
 
 // ─── Identifiers ─────────────────────────────────────────────────────────────
 
+/** One name, quoted (its own quotes doubled) or not. */
+const NAME_PART = String.raw`"(?:[^"]|"")+"|[\w$]+`
+
 /** An optionally schema-qualified, optionally quoted identifier. */
-const IDENT = String.raw`(?:"[^"]+"|[\w$]+)(?:\s*\.\s*(?:"[^"]+"|[\w$]+))?`
+const IDENT = String.raw`(?:${NAME_PART})(?:\s*\.\s*(?:${NAME_PART}))?`
 
 /** Strip quoting and any schema qualifier, leaving a comparable bare name. */
 export function bareName(identifier: string): string {
-  const last = identifier.split('.').pop() ?? identifier
-  return last.trim().replace(/^"|"$/g, '').toLowerCase()
+  const parts = identifier.match(new RegExp(NAME_PART, 'g')) ?? [identifier]
+  return unquote(parts[parts.length - 1]).toLowerCase()
 }
+/** A quoted identifier as the name it is, its doubled quotes made single. */
+const unquote = (part: string) => {
+  const p = part.trim()
+  return p.startsWith('"') ? p.slice(1, -1).replace(/""/g, '"') : p
+}
+
+/** `schema.table.object`, lowercased, `public` where no schema is named: how policies are keyed. */
+const objectKey = (schema: string | undefined, table: string | undefined, name: string | undefined) =>
+  `${(schema || 'public').toLowerCase()}.${(table ?? '').toLowerCase()}.${(name ?? '').toLowerCase()}`
 
 /**
  * A relation's name with its schema, `public` where it names none:
@@ -185,8 +197,8 @@ export function bareName(identifier: string): string {
  * way bareName folds, so the same relation written either way agrees.
  */
 export function schemaQualified(identifier: string): string {
-  const parts = identifier.match(/"[^"]+"|[A-Za-z_][\w$]*/g) ?? [identifier]
-  const fold = (part: string) => part.trim().replace(/^"|"$/g, '').toLowerCase()
+  const parts = identifier.match(new RegExp(NAME_PART, 'g')) ?? [identifier]
+  const fold = (part: string) => unquote(part).toLowerCase()
   return `${parts.length > 1 ? fold(parts[0]) : 'public'}.${fold(parts[parts.length - 1])}`
 }
 
@@ -281,8 +293,13 @@ const NOT_A_TABLE = new Set([
  * qualifier is dropped for the same reason `referencedTables` drops it.
  */
 export function createdPolicies(sql: string): string[] {
+  const tree = parseStatements(sql)
+  if (tree) {
+    return tree.filter(s => s.kind === 'CreatePolicyStmt')
+      .map(({ node }) => objectKey(node.table?.schemaname, node.table?.relname, node.policy_name))
+  }
   const out: string[] = []
-  const re = /CREATE\s+POLICY\s+("[^"]+"|[A-Za-z_][\w$]*)\s+ON\s+((?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))?)/gi
+  const re = new RegExp(String.raw`CREATE\s+POLICY\s+(${NAME_PART})\s+ON\s+(${IDENT})`, 'gi')
   for (const m of sqlSkeleton(sql).matchAll(re)) {
     out.push(`${schemaQualified(m[2])}.${bareName(m[1])}`)
   }
@@ -306,8 +323,15 @@ export function createdPolicies(sql: string): string[] {
  * same name, and that is not a loss of access control (issue #88).
  */
 export function droppedPolicies(sql: string): string[] {
+  const tree = parseStatements(sql)
+  if (tree) {
+    return tree.filter(s => s.kind === 'DropStmt' && s.node.removeType === 'OBJECT_POLICY')
+      .flatMap(({ node }) => (node.objects as Array<Record<string, any>>)
+        .map(o => (o.List?.items ?? []).map((i: Record<string, any>) => i.String?.sval as string))
+        .map((parts: string[]) => objectKey(parts.at(-3), parts.at(-2), parts.at(-1))))
+  }
   const out: string[] = []
-  const re = /DROP\s+POLICY\s+(?:IF\s+EXISTS\s+)?("[^"]+"|[A-Za-z_][\w$]*)\s+ON\s+((?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))?)/gi
+  const re = new RegExp(String.raw`DROP\s+POLICY\s+(?:IF\s+EXISTS\s+)?(${NAME_PART})\s+ON\s+(${IDENT})`, 'gi')
   for (const m of sqlSkeleton(sql).matchAll(re)) {
     out.push(`${schemaQualified(m[2])}.${bareName(m[1])}`)
   }
@@ -351,8 +375,13 @@ export function createsOnlyPolicies(sql: string): boolean {
  * drops it: the two layers spell the same table differently.
  */
 export function createdTriggers(sql: string): string[] {
+  const tree = parseStatements(sql)
+  if (tree) {
+    return tree.filter(s => s.kind === 'CreateTrigStmt')
+      .map(({ node }) => `${(node.relation?.relname ?? '').toLowerCase()}.${String(node.trigname).toLowerCase()}`)
+  }
   const out: string[] = []
-  const re = /CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\s+("[^"]+"|[A-Za-z_][\w$]*)[\s\S]*?\sON\s+((?:"[^"]+"|[A-Za-z_][\w$]*)(?:\s*\.\s*(?:"[^"]+"|[A-Za-z_][\w$]*))?)/gi
+  const re = new RegExp(String.raw`CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\s+(${NAME_PART})[\s\S]*?\sON\s+(${IDENT})`, 'gi')
   for (const m of sqlSkeleton(sql).matchAll(re)) {
     out.push(`${bareName(m[2])}.${bareName(m[1])}`)
   }

@@ -3,6 +3,7 @@ import { pgQuery } from '../db.js'
 import type { DriftIssue } from '../types/drift.js'
 import { Check, type CheckContext } from './base.js'
 import { SUPABASE_PLATFORM_SCHEMAS } from '../defaults.js'
+import { quoteName } from '../utils/sql.js'
 
 interface PgRole {
   rolname: string
@@ -147,11 +148,12 @@ const columnGrantsSql = (ignoreSchemas: string[]) => `
   ORDER BY 1, 2, 3, 4, 5
 `
 
-/** The target's relations, to tell a grant on a table it lacks yet. */
-const RELATIONS_SQL = `
+/** Each side's relations, to tell a table the target lacks yet. */
+const relationsSql = (ignoreSchemas: string[]) => `
   SELECT n.nspname AS table_schema, c.relname AS table_name
   FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
   WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+    AND n.nspname ${grantSchemaFilter(ignoreSchemas)}
 `
 
 /**
@@ -166,7 +168,11 @@ const DEFAULT_TABLE_GRANTS_SQL = `
   LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
   CROSS JOIN LATERAL aclexplode(d.defaclacl) a
   WHERE d.defaclobjtype = 'r' AND d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+    AND a.grantee <> d.defaclrole
 `
+
+type Relation = { table_schema: string; table_name: string }
+type DefaultGrant = { table_schema: string | null; grantee: string; privilege_type: string; is_grantable: boolean }
 
 /**
  * Leave out a missing grant the target will make by itself: one on a table it
@@ -175,14 +181,75 @@ const DEFAULT_TABLE_GRANTS_SQL = `
  * most of a report, and gone again after the first apply.
  */
 export function grantedByDefault(
-  relations: Array<{ table_schema: string; table_name: string }>,
-  defaults: Array<{ table_schema: string | null; grantee: string; privilege_type: string; is_grantable: boolean }>,
+  relations: Relation[],
+  defaults: DefaultGrant[],
 ): (g: RoleGrant) => boolean {
   const present = new Set(relations.map(r => `${r.table_schema}.${r.table_name}`))
   const granted = new Set(defaults.map(d => `${d.table_schema ?? '*'}|${d.grantee}|${d.privilege_type}|${Boolean(d.is_grantable)}`))
   return g => !g.column_name
     && !present.has(`${g.table_schema}.${g.table_name}`)
     && [g.table_schema, '*'].some(schema => granted.has(`${schema}|${g.grantee}|${g.privilege_type}|${Boolean(g.is_grantable)}`))
+}
+
+/**
+ * What the target's default privileges will grant on a table the schema fix
+ * creates, and the source does not: the other half of `grantedByDefault`.
+ *
+ * A table kept away from the Data API (`REVOKE ALL ... FROM anon,
+ * authenticated`) and created on a Supabase target got everything the
+ * defaults give, and nothing took it back until a second sync, so one sync
+ * left it open to the anon key. The REVOKE runs with the grants, after the
+ * table is created.
+ */
+export function defaultGrantsToRevoke(
+  sourceRelations: Relation[],
+  targetRelations: Relation[],
+  defaults: DefaultGrant[],
+  sourceGrants: RoleGrant[],
+): DriftIssue[] {
+  const present = new Set(targetRelations.map(r => `${r.table_schema}.${r.table_name}`))
+  const held = new Set(sourceGrants.filter(g => !g.column_name)
+    .map(g => `${g.table_schema}.${g.table_name}|${g.grantee}|${g.privilege_type}`))
+  const issues: DriftIssue[] = []
+  for (const rel of sourceRelations) {
+    const name = `${rel.table_schema}.${rel.table_name}`
+    if (present.has(name)) continue
+    const extra = new Map<string, Set<string>>()
+    for (const d of defaults) {
+      if (d.table_schema !== null && d.table_schema !== rel.table_schema) continue
+      if (held.has(`${name}|${d.grantee}|${d.privilege_type}`)) continue
+      extra.set(d.grantee, (extra.get(d.grantee) ?? new Set()).add(d.privilege_type))
+    }
+    for (const [grantee, privileges] of [...extra].sort(([a], [b]) => a.localeCompare(b))) {
+      const gs = [...privileges].sort().map(privilege_type =>
+        ({ grantee, table_schema: rel.table_schema, table_name: rel.table_name, privilege_type, is_grantable: false }))
+      issues.push({
+        id: `roles-grant-default-${grantee}.${name}`,
+        check: 'roles',
+        severity: extraGrantSeverity(grantee),
+        title: `Default grants to take back: ${describeGroup(gs)}`,
+        description: `Creating ${name} on the target gives ${grantee} what its default privileges grant. `
+          + `The source does not grant "${describeGroup(gs)}", so it is revoked once the table exists.`,
+        targetValue: gs,
+        sql: {
+          up: `REVOKE ${groupTarget(gs)} FROM ${granteeSql(grantee)};`,
+          down: `GRANT ${groupTarget(gs)} TO ${granteeSql(grantee)};`,
+        },
+      })
+    }
+  }
+  return issues
+}
+
+/**
+ * A grant the target has and the source does not widens access. To the roles
+ * the Data API serves (and PUBLIC) that is the anon key reaching a table, so
+ * critical; to any other role a warning. It was info, which a sync's summary
+ * does not lead with.
+ */
+const OPEN_GRANTEES = new Set(['anon', 'authenticated', 'PUBLIC'])
+function extraGrantSeverity(grantee: string): 'critical' | 'warning' {
+  return OPEN_GRANTEES.has(grantee) ? 'critical' : 'warning'
 }
 
 export class RolesCheck extends Check {
@@ -198,7 +265,7 @@ export class RolesCheck extends Check {
       Number((await this.queryFn(url, `SELECT current_setting('server_version_num') AS v`) as Array<{ v: string }>)[0]?.v ?? 0)
     const [
       sourceRoles, targetRoles, sourceGrants, targetGrants, sourceColumns, targetColumns,
-      sourceVersion, targetVersion, targetRelations, targetDefaults,
+      sourceVersion, targetVersion, sourceRelations, targetRelations, targetDefaults,
     ] = await Promise.all([
       this.queryFn(ctx.source.dbUrl, ROLES_SQL) as unknown as Promise<PgRole[]>,
       this.queryFn(ctx.target.dbUrl, ROLES_SQL) as unknown as Promise<PgRole[]>,
@@ -208,9 +275,9 @@ export class RolesCheck extends Check {
       this.queryFn(ctx.target.dbUrl, columnGrantsSql(ignore)) as unknown as Promise<RoleGrant[]>,
       version(ctx.source.dbUrl),
       version(ctx.target.dbUrl),
-      this.queryFn(ctx.target.dbUrl, RELATIONS_SQL) as unknown as Promise<Array<{ table_schema: string; table_name: string }>>,
-      this.queryFn(ctx.target.dbUrl, DEFAULT_TABLE_GRANTS_SQL) as unknown as
-        Promise<Array<{ table_schema: string | null; grantee: string; privilege_type: string; is_grantable: boolean }>>,
+      this.queryFn(ctx.source.dbUrl, relationsSql(ignore)) as unknown as Promise<Relation[]>,
+      this.queryFn(ctx.target.dbUrl, relationsSql(ignore)) as unknown as Promise<Relation[]>,
+      this.queryFn(ctx.target.dbUrl, DEFAULT_TABLE_GRANTS_SQL) as unknown as Promise<DefaultGrant[]>,
     ])
     const comparable = comparablePrivileges(sourceVersion, targetVersion)
     const byDefault = grantedByDefault(targetRelations ?? [], targetDefaults ?? [])
@@ -221,6 +288,9 @@ export class RolesCheck extends Check {
         [...(sourceGrants ?? []), ...(sourceColumns ?? [])].filter(g => comparable(g) && !byDefault(g)),
         [...(targetGrants ?? []), ...(targetColumns ?? [])].filter(comparable),
       ),
+      ...defaultGrantsToRevoke(
+        sourceRelations ?? [], targetRelations ?? [],
+        (targetDefaults ?? []).filter(d => comparable(d as RoleGrant)), sourceGrants ?? []),
     ]
   }
 }
@@ -268,8 +338,8 @@ export function diffRoles(source: PgRole[], target: PgRole[]): DriftIssue[] {
         description: `Role "${name}" exists in source but is missing from target. Any RLS policies or grants referencing this role will be silently ineffective.`,
         sourceValue: sr,
         sql: {
-          up: `CREATE ROLE "${name}" ${roleAttrs(sr)};`,
-          down: `DROP ROLE IF EXISTS "${name}";`,
+          up: `CREATE ROLE ${quoteName(name)} ${roleAttrs(sr)};`,
+          down: `DROP ROLE IF EXISTS ${quoteName(name)};`,
         },
       })
     }
@@ -285,8 +355,8 @@ export function diffRoles(source: PgRole[], target: PgRole[]): DriftIssue[] {
         description: `Role "${name}" exists in target but not in source.`,
         targetValue: tr,
         sql: {
-          up: `DROP ROLE IF EXISTS "${name}";`,
-          down: `CREATE ROLE "${name}" ${roleAttrs(tr)};`,
+          up: `DROP ROLE IF EXISTS ${quoteName(name)};`,
+          down: `CREATE ROLE ${quoteName(name)} ${roleAttrs(tr)};`,
         },
       })
     }
@@ -304,8 +374,8 @@ export function diffRoles(source: PgRole[], target: PgRole[]): DriftIssue[] {
         sourceValue: sr,
         targetValue: tr,
         sql: {
-          up: `ALTER ROLE "${name}" ${roleAttrs(sr)};`,
-          down: `ALTER ROLE "${name}" ${roleAttrs(tr)};`,
+          up: `ALTER ROLE ${quoteName(name)} ${roleAttrs(sr)};`,
+          down: `ALTER ROLE ${quoteName(name)} ${roleAttrs(tr)};`,
         },
       })
     }
@@ -330,7 +400,7 @@ function granteeSql(grantee: string): string {
 /** `SELECT ON "s"."t"`, or `UPDATE ("col") ON "s"."t"` for a column grant. */
 function grantTarget(g: RoleGrant): string {
   const column = g.column_name ? ` ("${g.column_name.replace(/"/g, '""')}")` : ''
-  return `${g.privilege_type}${column} ON "${g.table_schema}"."${g.table_name}"`
+  return `${g.privilege_type}${column} ON ${quoteName(g.table_schema)}.${quoteName(g.table_name)}`
 }
 
 function describeGrant(g: RoleGrant): string {
@@ -365,7 +435,7 @@ function grouped(grants: RoleGrant[]): RoleGrant[][] {
 /** `SELECT, INSERT ON "s"."t"` for a group of grants on one object. */
 function groupTarget(gs: RoleGrant[]): string {
   const column = gs[0].column_name ? ` ("${gs[0].column_name.replace(/"/g, '""')}")` : ''
-  return `${gs.map(g => `${g.privilege_type}${column}`).join(', ')} ON "${gs[0].table_schema}"."${gs[0].table_name}"`
+  return `${gs.map(g => `${g.privilege_type}${column}`).join(', ')} ON ${quoteName(gs[0].table_schema)}.${quoteName(gs[0].table_name)}`
 }
 
 function describeGroup(gs: RoleGrant[]): string {
@@ -435,7 +505,7 @@ export function diffGrants(source: RoleGrant[], target: RoleGrant[]): DriftIssue
     issues.push({
       id: `roles-grant-extra-${groupKey(gs)}`,
       check: 'roles',
-      severity: 'info',
+      severity: extraGrantSeverity(gs[0].grantee),
       title: `Extra grant${plural}: ${describeGroup(gs)}`,
       description: `Grant${plural} "${describeGroup(gs)}" exist${gs.length > 1 ? '' : 's'} in target but not in source.`,
       targetValue: gs.length > 1 ? gs : gs[0],

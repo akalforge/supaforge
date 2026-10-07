@@ -132,11 +132,11 @@ describe('RolesCheck', () => {
     const issues = await check.scan(mockContext())
     const grantIssue = issues.find(i => i.id.startsWith('roles-grant-extra'))
     expect(grantIssue).toBeTruthy()
-    expect(grantIssue!.severity).toBe('info')
+    expect(grantIssue!.severity).toBe('warning')
     expect(grantIssue!.sql?.up).toContain('REVOKE INSERT')
   })
 
-  it('runs all 10 queries (roles, grants, column grants and version per side; the target\'s tables and default grants)', async () => {
+  it('runs all 11 queries (roles, grants, column grants, version and tables per side; the target\'s default grants)', async () => {
     const calls: string[] = []
     const queryFn: QueryFn = async (_dbUrl, sql) => {
       calls.push(sql)
@@ -144,7 +144,7 @@ describe('RolesCheck', () => {
     }
     const check = new RolesCheck(queryFn)
     await check.scan(mockContext())
-    expect(calls).toHaveLength(10)
+    expect(calls).toHaveLength(11)
     expect(calls.filter(s => s.includes('server_version_num'))).toHaveLength(2)
     const roleQueries  = calls.filter(s => s.includes('rolsuper'))
     const grantQueries = calls.filter(s => s.includes('c.relacl'))
@@ -218,7 +218,7 @@ describe('diffGrants', () => {
     const issues = diffGrants([], [grant])
     expect(issues[0].sql?.up).toBe('REVOKE DELETE ON "public"."users" FROM "app_readonly";')
     expect(issues[0].sql?.down).toBe('GRANT DELETE ON "public"."users" TO "app_readonly";')
-    expect(issues[0].severity).toBe('info')
+    expect(issues[0].severity).toBe('warning')
   })
 
   it('returns empty when grants match', () => {
@@ -237,12 +237,12 @@ describe('diffGrants', () => {
     expect(issues[0].sql?.up).toContain('posts')
   })
 
-  it('uses correct severity: warning for missing, info for extra', () => {
+  it('uses correct severity: warning for missing, and for extra to a role the Data API does not serve', () => {
     const grant = makeGrant()
     const missingIssues = diffGrants([grant], [])
     const extraIssues   = diffGrants([], [grant])
     expect(missingIssues[0].severity).toBe('warning')
-    expect(extraIssues[0].severity).toBe('info')
+    expect(extraIssues[0].severity).toBe('warning')
   })
 })
 
@@ -388,3 +388,69 @@ describe('grants across server versions and in groups', () => {
   })
 })
 
+
+// A table the source keeps away from the Data API, created on a Supabase
+// target by the schema fix, got everything the target's default privileges
+// grant: one sync left it readable and writable with the anon key.
+describe('a new table keeps the source\'s grants, not the target\'s defaults', () => {
+  const ALL = ['DELETE', 'INSERT', 'REFERENCES', 'SELECT', 'TRIGGER', 'TRUNCATE', 'UPDATE']
+  const grant = (grantee: string, table: string, privilege_type: string) =>
+    ({ grantee, table_schema: 'public', table_name: table, privilege_type, is_grantable: false })
+
+  function target(sql: string, dbUrl: string): unknown[] {
+    const source = dbUrl.includes('source')
+    if (sql.includes('pg_default_acl')) {
+      return source ? [] : ['anon', 'authenticated'].flatMap(grantee =>
+        ALL.map(privilege_type => ({ table_schema: 'public', grantee, privilege_type, is_grantable: false })))
+    }
+    if (sql.includes('attacl') || sql.includes('rolsuper')) return []
+    if (sql.includes('server_version_num')) return [{ v: '150008' }]
+    if (sql.includes('relacl')) {
+      return source ? [
+        ...['SELECT', 'REFERENCES', 'TRIGGER'].map(p => grant('anon', 'ro_items', p)),
+        ...ALL.map(p => grant('authenticated', 'ro_items', p)),
+        ...ALL.map(p => grant('service_role', 'private_notes', p)),
+      ] : []
+    }
+    // The relations each side has.
+    return source
+      ? ['private_notes', 'ro_items', 'shared'].map(table_name => ({ table_schema: 'public', table_name }))
+      : [{ table_schema: 'public', table_name: 'shared' }]
+  }
+
+  async function issues() {
+    const check = new RolesCheck((async (dbUrl: string, sql: string) => target(sql, dbUrl)) as unknown as QueryFn)
+    return (await check.scan(mockContext())).filter(i => i.id.startsWith('roles-grant-default-'))
+  }
+
+  it('revokes what the defaults would give a server-only table', async () => {
+    const found = await issues()
+    const notes = found.filter(i => i.id.endsWith('public.private_notes'))
+    expect(notes.map(i => i.sql?.up).sort()).toEqual([
+      'REVOKE DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE ON "public"."private_notes" FROM "anon";',
+      'REVOKE DELETE, INSERT, REFERENCES, SELECT, TRIGGER, TRUNCATE, UPDATE ON "public"."private_notes" FROM "authenticated";',
+    ])
+    expect(notes.every(i => i.severity === 'critical')).toBe(true)
+  })
+
+  it('revokes only what the source took away from a read-only table', async () => {
+    const ro = (await issues()).filter(i => i.id.endsWith('public.ro_items'))
+    expect(ro.map(i => i.sql?.up)).toEqual(['REVOKE DELETE, INSERT, TRUNCATE, UPDATE ON "public"."ro_items" FROM "anon";'])
+    expect(ro[0].title).toBe('Default grants to take back: DELETE, INSERT, TRUNCATE, UPDATE ON public.ro_items TO anon')
+  })
+
+  it('says nothing about a table the target already has', async () => {
+    expect((await issues()).some(i => i.id.endsWith('public.shared'))).toBe(false)
+  })
+})
+
+describe('an extra grant to a Data API role is not a footnote', () => {
+  const g = (grantee: string) => ({ grantee, table_schema: 'public', table_name: 'notes', privilege_type: 'SELECT', is_grantable: false })
+
+  it('is critical for anon, authenticated and PUBLIC, a warning for any other role', () => {
+    for (const grantee of ['anon', 'authenticated', 'PUBLIC']) {
+      expect(diffGrants([], [g(grantee)])[0].severity, grantee).toBe('critical')
+    }
+    expect(diffGrants([], [g('app_readonly')])[0].severity).toBe('warning')
+  })
+})

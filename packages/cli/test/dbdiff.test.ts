@@ -592,6 +592,14 @@ describe('sqlToIssues — programmable objects', () => {
     expect(issues[0].id).toBe('schema-drop-trigger-1')
   })
 
+  it('merges a view dropped and recreated into one modified view', () => {
+    const issues = sqlToIssues({
+      up: 'DROP VIEW IF EXISTS "vt_v";\nCREATE VIEW "vt_v" AS SELECT vt.id FROM vt;',
+      down: '',
+    }, 'schema')
+    expect(issues.map(i => [i.title, i.severity])).toEqual([['View modified: public.vt_v', 'warning']])
+  })
+
   it('merges a trigger dropped and recreated into one modified trigger', () => {
     const issues = sqlToIssues({
       up: [

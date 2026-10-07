@@ -924,7 +924,7 @@ interface MergedStatement {
  * same way — an enum whose values changed arrives as `DROP TYPE` + `CREATE
  * TYPE` — and needed the same treatment for the same two reasons (issue #81).
  */
-type ReplaceableKind = 'routine' | 'type' | 'sequence' | 'policy' | 'trigger'
+type ReplaceableKind = 'routine' | 'type' | 'sequence' | 'policy' | 'trigger' | 'view'
 
 /** How each kind's identifier is read out of a statement. */
 const REPLACEABLE_NAME: Record<ReplaceableKind, (sql: string) => string> = {
@@ -935,6 +935,7 @@ const REPLACEABLE_NAME: Record<ReplaceableKind, (sql: string) => string> = {
   policy: (sql) => policyLabel(sql),
   // `schema.table.trigger`, for the same reason.
   trigger: (sql) => triggerLabel(sql),
+  view: (sql) => extractQualifiedName(sql, AFTER.view),
 }
 
 /** How a merged pair of each kind is reported. */
@@ -944,6 +945,7 @@ const REPLACEABLE_REPORT: Record<ReplaceableKind, { idPart: string; label: strin
   sequence: { idPart: 'sequence', label: 'Sequence modified', what: 'Sequence definition' },
   policy:   { idPart: 'policy',   label: 'Policy modified',   what: 'Policy definition' },
   trigger:  { idPart: 'trigger',  label: 'Trigger modified',  what: 'Trigger definition' },
+  view:     { idPart: 'view',     label: 'View modified',     what: 'View definition' },
 }
 
 /** Whether a statement drops or creates a replaceable object, and of which kind. */
@@ -957,6 +959,10 @@ function replaceablePart(sql: string): { kind: ReplaceableKind; drop: boolean } 
   // A changed trigger is dropped and recreated the same way, and read apart
   // was a critical "Extra trigger" for a trigger that is still wanted.
   if (/^\s*DROP\s+TRIGGER\b/i.test(sql)) return { kind: 'trigger', drop: true }
+  // A changed view too: dbdiff can only replace one, and a PostgreSQL 15
+  // and 16+ pair printed every view differently.
+  if (/^\s*DROP\s+(?:MATERIALIZED\s+)?VIEW\b/i.test(sql)) return { kind: 'view', drop: true }
+  if (/^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\b/i.test(sql)) return { kind: 'view', drop: false }
   if (/^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b/i.test(sql)) return { kind: 'trigger', drop: false }
   switch (classifyStatement(sql)) {
     case CREATE_FUNCTION:   return { kind: 'routine',  drop: false }

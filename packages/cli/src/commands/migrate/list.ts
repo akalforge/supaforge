@@ -45,7 +45,7 @@ export default class MigrateList extends BaseCommand {
     if (flags.offline || !config.source) {
       // Offline: list files only
       if (flags.json) {
-        this.log(JSON.stringify(migrations, null, 2))
+        this.json(migrations)
         return
       }
       if (migrations.length === 0) {
@@ -67,22 +67,26 @@ export default class MigrateList extends BaseCommand {
       .addDatabase('Target', envName, env.dbUrl)
     await this.runPreflight(pre, 'Migrate list')
 
-    // Read only: a listing creates nothing. A history it cannot read is said
-    // so, rather than listing every migration as pending.
-    let applied: Set<string>
+    // Read only: a listing creates nothing. A history it cannot read leaves
+    // every status unknown: listing them as pending read as "nothing has been
+    // applied", and exited 0.
+    let applied: Set<string> | undefined
     try {
       applied = await getAppliedVersions(env.dbUrl, pgQuery)
     } catch (err) {
       this.warn(`Could not read which migrations are applied: ${errMsg(err)}`)
-      applied = new Set()
+      process.exitCode = 1
     }
 
     if (flags.json) {
-      const result = migrations.map(m => ({
-        ...m,
-        applied: applied.has(m.version),
-      }))
-      this.log(JSON.stringify(result, null, 2))
+      this.json(migrations.map(m => ({ ...m, applied: applied ? applied.has(m.version) : null })))
+      return
+    }
+
+    if (!applied) {
+      this.log(`\n  ${bold(`${migrations.length} migration(s)`)} ${dim(`→ ${envName}`)} · ${warn('status unknown')}\n`)
+      for (const m of migrations) this.log(`  ${warn('?')} ${m.filename}`)
+      this.log('')
       return
     }
 

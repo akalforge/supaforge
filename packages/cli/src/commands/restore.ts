@@ -85,7 +85,7 @@ export default class Restore extends BaseCommand {
       const tables = await getPublicTables(env.dbUrl)
       if (tables.length > 0 && !flags.force) {
         if (flags.json) {
-          this.log(JSON.stringify({ error: 'Target database is not empty', tables }, null, 2))
+          this.json({ error: 'Target database is not empty', tables })
           this.exit(1)
         }
         this.log(`\n${warn('Target database is not empty.')} Found ${tables.length} table(s) in public schema:`)
@@ -140,7 +140,7 @@ export default class Restore extends BaseCommand {
     if (!flags.apply) {
       const preview = await previewSnapshotRestore(snapshotDir)
       if (flags.json) {
-        this.log(JSON.stringify({ dryRun: true, snapshot: snapshotDir, layers: preview }, null, 2))
+        this.json({ dryRun: true, snapshot: snapshotDir, layers: preview })
         return
       }
       this.log('\nRestore preview (dry-run) -- from snapshot\n')
@@ -195,7 +195,7 @@ export default class Restore extends BaseCommand {
     if (!flags.apply) {
       const migrations = await previewMigrationRestore(process.cwd(), toVersion, fromVersion)
       if (flags.json) {
-        this.log(JSON.stringify({
+        this.json({
           dryRun: true,
           migrations: migrations.map(m => ({
             version: m.version,
@@ -204,7 +204,7 @@ export default class Restore extends BaseCommand {
             sqlStatements: m.up.sql.length,
             apiActions: m.up.api.length,
           })),
-        }, null, 2))
+        })
         return
       }
       this.log('\nRestore preview (dry-run) -- from migrations\n')
@@ -248,7 +248,7 @@ export default class Restore extends BaseCommand {
       // Only the JSON on stdout, so it parses, and the same exit code as the
       // text report: a restore that failed or left things out is not one a
       // script should read as success.
-      this.log(JSON.stringify(result, null, 2))
+      this.json(result)
       if (result.errors.length > 0 || result.incomplete) this.exit(1)
       return
     }

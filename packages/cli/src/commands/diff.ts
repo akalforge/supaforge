@@ -350,7 +350,7 @@ export default class Diff extends BaseCommand {
         // of an apply failed on the one run where there was nothing to do.
         if (flags.json) {
           const empty: PromoteResult = { applied: [], skipped: [], errors: [] }
-          this.log(JSON.stringify(empty, null, 2))
+          this.json(empty)
           return
         }
         this.log(`${ok('No drift detected.')} Nothing to apply. ✓`)
@@ -445,7 +445,7 @@ export default class Diff extends BaseCommand {
       })
 
       if (flags.json) {
-        this.log(JSON.stringify(result, null, 2))
+        this.json(result)
         return
       }
 
@@ -517,7 +517,7 @@ export default class Diff extends BaseCommand {
     }
 
     if (flags.json) {
-      this.log(JSON.stringify(result, null, 2))
+      this.json(result)
     } else if (flags.detail) {
       this.log(renderDetailed(result))
       this.log(renderTip({

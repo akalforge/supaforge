@@ -1,3 +1,4 @@
+import { formatWithOptions } from 'node:util'
 import { Command } from '@oclif/core'
 import { loadConfig, validateConfig, validateSingleEnvConfig } from './config.js'
 import { Preflight } from './preflight.js'
@@ -15,6 +16,24 @@ export abstract class BaseCommand extends Command {
   private _startTime = 0
   private _logWritten = false
   private _checkSummaries?: RunLogCheckSummary[]
+
+  /**
+   * Under --json, stdout carries the JSON and nothing else: every other line a
+   * command prints — preflight checks, progress — goes to stderr. Before, the
+   * text came first and the output did not parse.
+   */
+  override log(message = '', ...args: unknown[]): void {
+    if (this.argv.includes('--json')) {
+      process.stderr.write(formatWithOptions({ colors: false }, message, ...args) + '\n')
+      return
+    }
+    super.log(message, ...args)
+  }
+
+  /** The command's result as JSON, on stdout. */
+  protected json(value: unknown): void {
+    process.stdout.write(JSON.stringify(value, null, 2) + '\n')
+  }
 
   /** Call after scan() to attach per-check metadata to the run log entry. */
   protected setCheckSummaries(summaries: RunLogCheckSummary[]): void {

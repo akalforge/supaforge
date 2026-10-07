@@ -444,12 +444,7 @@ async function captureData(
 
   for (const table of tables) {
     try {
-      // Rendered by the server, not by the driver: a bigint or numeric past
-      // 2^53 kept its digits, a timestamp its zone, a bytea its bytes — each
-      // as the text restore hands back to json_populate_recordset.
-      const [{ rows }] = await queryFn(dbUrl, `SELECT jsonb_pretty(coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb)) AS rows
-        FROM (SELECT * FROM ${quoteIdent(table)} ORDER BY 1) t`) as unknown as Array<{ rows: string }>
-      await writeFile(join(dataDir, `${table}.json`), rows + '\n')
+      await writeFile(join(dataDir, `${table}.json`), await capturedRows(dbUrl, table, queryFn) + '\n')
       captured++
     } catch (err) {
       errors.push(`${table}: ${errMsg(err)}`)
@@ -464,6 +459,26 @@ async function captureData(
   }
 }
 
+
+/**
+ * A table's rows, each column as PostgreSQL's own text for it — the text its
+ * input function reads back exactly, as pg_dump relies on. A bigint past 2^53,
+ * a long numeric, a timestamp's zone, bytea and arrays come back as they were;
+ * so does a json value's text, spacing and duplicate keys included, and a JSON
+ * null stays distinct from an SQL NULL. Captured as JSON values instead, json
+ * was re-rendered and a JSON null read back as NULL.
+ */
+async function capturedRows(dbUrl: string, table: string, queryFn: QueryFn): Promise<string> {
+  const columns = (await queryFn(dbUrl, `SELECT attname AS name FROM pg_attribute
+    WHERE attrelid = ${quoteLiteral(quoteIdent(table))}::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum`) as unknown as Array<{ name: string }>)
+    .map(c => c.name)
+  const keys = columns.map(quoteLiteral).join(', ')
+  const values = columns.map(c => `t.${quoteName(c)}::text`).join(', ')
+  const [{ rows }] = await queryFn(dbUrl, `SELECT jsonb_pretty(jsonb_build_object('format', 'text', 'rows',
+      coalesce(jsonb_agg(json_object(ARRAY[${keys}]::text[], ARRAY[${values}]::text[])::jsonb), '[]'::jsonb))) AS rows
+    FROM (SELECT * FROM ${quoteIdent(table)} ORDER BY 1) t`) as unknown as Array<{ rows: string }>
+  return rows
+}
 
 async function captureWebhooks(
   dir: string,

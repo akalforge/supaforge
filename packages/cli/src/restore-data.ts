@@ -10,7 +10,7 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type pg from 'pg'
-import { quoteIdent, quoteName } from './utils/sql'
+import { quoteIdent, quoteLiteral, quoteName } from './utils/sql'
 
 /** The tables a snapshot holds rows for, by file name. */
 export async function dataTablesIn(dataDir: string): Promise<string[]> {
@@ -58,11 +58,15 @@ export async function restoreBuckets(client: pg.Client, file: string): Promise<n
  * came back rounded.
  */
 async function insertRows(client: pg.Client, table: string, rows: string): Promise<number> {
+  // Each column's text, which the column's type reads back exactly (see
+  // capturedRows) — or, from a snapshot taken before that, JSON values.
+  const asText = rows.trimStart().startsWith('{')
+  const elements = asText ? `json_array_elements($1::json -> 'rows')` : `json_array_elements($1::json)`
   const { rows: keys } = await client.query<{ key: string }>(
-    `SELECT DISTINCT jsonb_object_keys(e) AS key FROM jsonb_array_elements($1::jsonb) e`, [rows])
+    `SELECT DISTINCT json_object_keys(e) AS key FROM ${elements} e`, [rows])
   if (keys.length === 0) return 0
-  const { rows: columns } = await client.query<{ name: string; identity: string; generated: string }>(
-    `SELECT attname AS name, attidentity AS identity, attgenerated AS generated
+  const { rows: columns } = await client.query<{ name: string; identity: string; generated: string; type: string }>(
+    `SELECT attname AS name, attidentity AS identity, attgenerated AS generated, format_type(atttypid, atttypmod) AS type
        FROM pg_attribute WHERE attrelid = $1::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum`,
     [table])
   // The columns both the rows and the table have: a column added since the
@@ -71,10 +75,11 @@ async function insertRows(client: pg.Client, table: string, rows: string): Promi
   const usable = columns.filter(c => c.generated === '' && captured.has(c.name))
   const list = usable.map(c => quoteName(c.name)).join(', ')
   const overriding = usable.some(c => c.identity === 'a') ? ' OVERRIDING SYSTEM VALUE' : ''
+  const select = asText
+    ? `SELECT ${usable.map(c => `(e ->> ${quoteLiteral(c.name)})::${c.type}`).join(', ')} FROM ${elements} e`
+    : `SELECT ${list} FROM json_populate_recordset(NULL::${table}, $1::json)`
   const { rowCount } = await client.query(
-    `INSERT INTO ${table} (${list})${overriding}
-     SELECT ${list} FROM json_populate_recordset(NULL::${table}, $1::json) ON CONFLICT DO NOTHING`,
-    [rows])
+    `INSERT INTO ${table} (${list})${overriding} ${select} ON CONFLICT DO NOTHING`, [rows])
   return rowCount ?? 0
 }
 

@@ -1519,3 +1519,40 @@ describe('titles read names with doubled quotes', () => {
     expect(summariseStatement(sql, 'schema')).toBe(title)
   })
 })
+
+describe('folding into the finding that creates an object', () => {
+  const issue = (id: string, title: string, up: string) =>
+    ({ id, check: 'schema' as const, severity: 'warning' as const, title, description: '', sql: { up, down: '' } })
+
+  // dbdiff names a function by its argument types in a comment and by its
+  // full parameter list in the create, so the two never matched.
+  it('folds a comment on a new function whose signature is written differently', () => {
+    const issues = foldCommentsIntoCreates([
+      issue('f', "Function missing: public.f2(p_x integer, p_y text DEFAULT 'a')", 'CREATE FUNCTION public.f2(p_x integer, p_y text DEFAULT \'a\') RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;'),
+      issue('c', 'Comment changed: public.f2(integer,pg_catalog.text) (function)', "COMMENT ON FUNCTION public.f2(integer,pg_catalog.text) IS 'f2';"),
+    ])
+    expect(issues.map(i => i.id)).toEqual(['f'])
+    expect(issues[0].sql?.up).toMatch(/\nCOMMENT ON FUNCTION public\.f2\(integer,pg_catalog\.text\) IS 'f2';$/)
+  })
+
+  it('does not guess between overloads of one name', () => {
+    const issues = foldCommentsIntoCreates([
+      issue('a', 'Function missing: public.f(a integer)', 'CREATE FUNCTION public.f(a integer) RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;'),
+      issue('b', 'Function missing: public.f(a text)', 'CREATE FUNCTION public.f(a text) RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;'),
+      issue('c', 'Comment changed: public.f(integer) (function)', "COMMENT ON FUNCTION public.f(integer) IS 'f';"),
+    ])
+    expect(issues.map(i => i.id)).toEqual(['a', 'b', 'c'])
+  })
+
+  // A table that does not exist yet had its RLS flags as a separate
+  // "Table altered" finding.
+  it('folds a new table\'s row level security into its creation', () => {
+    const issues = foldCommentsIntoCreates([
+      issue('t', 'Table missing: public.notes', 'CREATE TABLE public.notes (id int);'),
+      issue('r', 'Table altered: public.notes', 'ALTER TABLE "notes" ENABLE ROW LEVEL SECURITY;\nALTER TABLE "notes" NO FORCE ROW LEVEL SECURITY;'),
+      issue('k', 'Table altered: public.kept', 'ALTER TABLE "kept" ENABLE ROW LEVEL SECURITY;'),
+    ])
+    expect(issues.map(i => i.id)).toEqual(['t', 'k'])
+    expect(issues[0].sql?.up).toBe('CREATE TABLE public.notes (id int);\nALTER TABLE "notes" ENABLE ROW LEVEL SECURITY;\nALTER TABLE "notes" NO FORCE ROW LEVEL SECURITY;')
+  })
+})

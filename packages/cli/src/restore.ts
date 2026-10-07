@@ -288,6 +288,8 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
         // would be the most misleading thing this command could say.
         result.rolledBack = result.applied
         result.applied = []
+        // Nothing was restored, so nothing was left out of a restore either.
+        delete result.incomplete
       } else {
         await client.query('COMMIT')
       }
@@ -297,6 +299,7 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
       await client.query('ROLLBACK').catch(() => undefined)
       result.rolledBack = result.applied
       result.applied = []
+      delete result.incomplete
     }
     // A RestoreAborted carries no message of its own: the statement that failed
     // has already been recorded, and adding a second entry for the same
@@ -812,7 +815,14 @@ export function tolerableFailure(
   // indexes, keys and rows. Each is left out and named, and the rest is
   // restored — one missing extension rolled back everything before.
   if (missing.size > 0) {
-    return `${errMsg(err)}, as this target lacks ${[...missing].join(', ')}`
+    // The ones the error is about, when it names any: every missing extension
+    // listed against every failure said nothing about which one was needed.
+    const message = errMsg(err)
+    const named = [...missing].filter(what => {
+      const name = /^the (.+) (?:extension|schema)$/.exec(what)?.[1]
+      return name !== undefined && new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(message)
+    })
+    return `${message}, as this target lacks ${(named.length > 0 ? named : [...missing]).join(', ')}`
   }
   return undefined
 }

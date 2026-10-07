@@ -88,6 +88,7 @@ describeE2E('e2e: snapshot restored into an empty database', () => {
         restored: { dbUrl: h.urlFor('target', restored) },
         partial: { dbUrl: h.urlFor('target', 'sf_partial') },
         old: { dbUrl: h.urlFor('target', 'sf_old_format') },
+        rolledback: { dbUrl: h.urlFor('target', 'sf_rolled_back') },
       },
       checks: { data: { tables: ['public.features', 'public.plans'] } },
     })
@@ -165,6 +166,30 @@ describeE2E('e2e: snapshot restored into an empty database', () => {
     const r = await h.cli(['restore', '-e', 'old', '--from-snapshot', copy, '--apply'], { cwd: ws })
     expect(r.stdout + r.stderr).not.toMatch(/Rolled back/)
     expect(await h.sqlIn('target', 'sf_old_format', `SELECT string_agg(name, ',' ORDER BY id) FROM public.features`)).toBe('one,two')
+  }, 300_000)
+
+  // A restore that rolled back restored nothing, so it is not "incomplete":
+  // it said both at once.
+  it('reports a rolled-back restore as rolled back, not as incomplete', async () => {
+    const snapshots = join(ws, '.supaforge', 'snapshots')
+    const [taken] = (await readdir(snapshots)).sort()
+    const copy = '20970101T000000Z'
+    await cp(join(snapshots, taken), join(snapshots, copy), { recursive: true })
+    const manifestFile = join(snapshots, copy, 'manifest.json')
+    await writeFile(manifestFile, JSON.stringify({ ...JSON.parse(await readFile(manifestFile, 'utf8')), timestamp: copy }))
+    const schemaFile = join(snapshots, copy, 'schema.sql')
+    await writeFile(schemaFile, (await readFile(schemaFile, 'utf8')) + `
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+CREATE TABLE public.docs (id int PRIMARY KEY, embedding public.vector(3));
+CREATE TABLE public.orders (id int);
+`)
+    await h.createDatabase('target', 'sf_rolled_back')
+    const r = await h.cli(['restore', '-e', 'rolledback', '--from-snapshot', copy, '--apply', '--json'], { cwd: ws })
+    expect(r.code).toBe(1)
+    const result = JSON.parse(r.stdout) as { rolledBack?: unknown[]; incomplete?: boolean; errors: unknown[] }
+    expect(result.errors.length).toBeGreaterThan(0)
+    expect(result.rolledBack?.length).toBeGreaterThan(0)
+    expect(result.incomplete).toBeUndefined()
   }, 300_000)
 
   // A snapshot needing an extension this server does not ship. Everything

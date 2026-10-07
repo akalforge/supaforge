@@ -683,9 +683,16 @@ async function captureRoleGrants(
       column_name: string | null; privilege_type: string; is_grantable: boolean
     }>
 
-    const statements = rows.map(row =>
-      `GRANT ${row.privilege_type}`
-      + (row.column_name ? ` (${quoteName(row.column_name)})` : '')
+    // One statement per role, object and grant option, listing the
+    // privileges: one per privilege made a restore that skipped a relation
+    // list it once for every privilege of every role.
+    const grouped = new Map<string, typeof rows>()
+    for (const row of rows) {
+      const key = JSON.stringify([row.grantee, row.table_schema, row.table_name, row.column_name, Boolean(row.is_grantable)])
+      grouped.set(key, [...(grouped.get(key) ?? []), row])
+    }
+    const statements = [...grouped.values()].map(([row, ...rest]) =>
+      `GRANT ${[row, ...rest].map(r => r.privilege_type + (r.column_name ? ` (${quoteName(r.column_name)})` : '')).join(', ')}`
       + ` ON ${quoteName(row.table_schema)}.${quoteName(row.table_name)}`
       // PUBLIC is a keyword; quoted, it names a role that does not exist.
       + ` TO ${row.grantee === 'PUBLIC' ? 'PUBLIC' : quoteName(row.grantee)}`

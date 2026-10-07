@@ -577,26 +577,64 @@ const ON_A_TABLE = new Set(['column', 'constraint', 'trigger', 'policy', 'rule']
  */
 export function foldCommentsIntoCreates(issues: DriftIssue[]): DriftIssue[] {
   const creates = new Map<string, DriftIssue>()
+  /** New routines by name alone, for a comment whose signature is spelled differently. */
+  const routines = new Map<string, DriftIssue[]>()
   for (const issue of issues) {
     const m = CREATE_TITLE.exec(issue.title)
-    if (m) creates.set(`${m[1] === 'Schema' ? 'schema' : 'object'}:${m[2]}`, issue)
+    if (!m) continue
+    creates.set(`${m[1] === 'Schema' ? 'schema' : 'object'}:${m[2]}`, issue)
+    if (m[1] === 'Function' || m[1] === 'Procedure') {
+      const base = routineBaseName(m[2])
+      routines.set(base, [...(routines.get(base) ?? []), issue])
+    }
   }
 
   return issues.filter(issue => {
-    const m = COMMENT_TITLE.exec(issue.title)
     const up = issue.sql?.up
-    if (!m || !up || splitStatements(up).length !== 1) return true
-
-    const [, schema, name, kind] = m
-    const candidates = schema !== undefined
-      ? [`schema:${schema}`]
-      : [`object:${name}`, ...(ON_A_TABLE.has(kind) ? [`object:${name.slice(0, name.lastIndexOf('.'))}`] : [])]
-    const owner = candidates.map(c => creates.get(c)).find(Boolean)
+    if (!up) return true
+    const owner = commentOwner(issue, up, creates, routines) ?? rlsFlagsOwner(issue, up, creates)
     if (!owner?.sql) return true
 
     owner.sql = { ...owner.sql, up: `${owner.sql.up.trimEnd()}\n${up.trim()}` }
     return false
   })
+}
+
+/**
+ * The finding creating the object a comment is on. dbdiff names a routine by
+ * its argument types in a comment (`f2(integer,pg_catalog.text)`) and by its
+ * parameter list in the create (`f2(p_x integer, p_y text DEFAULT 'a')`), so a
+ * routine is matched by name when only one new routine has it.
+ */
+function commentOwner(
+  issue: DriftIssue, up: string, creates: Map<string, DriftIssue>, routines: Map<string, DriftIssue[]>,
+): DriftIssue | undefined {
+  const m = COMMENT_TITLE.exec(issue.title)
+  if (!m || splitStatements(up).length !== 1) return undefined
+  const [, schema, name, kind] = m
+  const candidates = schema !== undefined
+    ? [`schema:${schema}`]
+    : [`object:${name}`, ...(ON_A_TABLE.has(kind) ? [`object:${name.slice(0, name.lastIndexOf('.'))}`] : [])]
+  const exact = candidates.map(c => creates.get(c)).find(Boolean)
+  if (exact || (kind !== 'function' && kind !== 'procedure')) return exact
+  const sameName = routines.get(routineBaseName(name)) ?? []
+  return sameName.length === 1 ? sameName[0] : undefined
+}
+
+/** A routine's name without its argument list. */
+const routineBaseName = (name: string) => name.includes('(') ? name.slice(0, name.indexOf('(')) : name
+
+/** `ALTER TABLE t ENABLE ROW LEVEL SECURITY` and the like, the whole of a finding. */
+const RLS_FLAG = /^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?\S+\s+(?:ENABLE|DISABLE|(?:NO\s+)?FORCE)\s+ROW\s+LEVEL\s+SECURITY\s*;?\s*$/i
+
+/**
+ * The finding creating a table whose RLS flags a finding sets: a table that
+ * does not exist yet had them as a separate "Table altered".
+ */
+function rlsFlagsOwner(issue: DriftIssue, up: string, creates: Map<string, DriftIssue>): DriftIssue | undefined {
+  const m = /^Table altered: (.+)$/.exec(issue.title)
+  if (!m || !splitStatements(up).every(sql => RLS_FLAG.test(sql))) return undefined
+  return creates.get(`object:${m[1]}`)
 }
 
 function unfoldedIssues(

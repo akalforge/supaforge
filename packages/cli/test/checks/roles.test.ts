@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { RolesCheck, diffRoles, diffGrants, comparablePrivileges } from '../../src/checks/roles.js'
+import { RolesCheck, diffRoles, diffGrants, comparablePrivileges, grantedByDefault } from '../../src/checks/roles.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { QueryFn } from '../../src/db.js'
 
@@ -136,7 +136,7 @@ describe('RolesCheck', () => {
     expect(grantIssue!.sql?.up).toContain('REVOKE INSERT')
   })
 
-  it('runs all 8 queries (roles, table grants, column grants and server version, per side)', async () => {
+  it('runs all 10 queries (roles, grants, column grants and version per side; the target\'s tables and default grants)', async () => {
     const calls: string[] = []
     const queryFn: QueryFn = async (_dbUrl, sql) => {
       calls.push(sql)
@@ -144,12 +144,13 @@ describe('RolesCheck', () => {
     }
     const check = new RolesCheck(queryFn)
     await check.scan(mockContext())
-    expect(calls).toHaveLength(8)
+    expect(calls).toHaveLength(10)
     expect(calls.filter(s => s.includes('server_version_num'))).toHaveLength(2)
-    const roleQueries  = calls.filter(s => s.includes('pg_roles'))
+    const roleQueries  = calls.filter(s => s.includes('rolsuper'))
     const grantQueries = calls.filter(s => s.includes('c.relacl'))
     expect(roleQueries).toHaveLength(2)
     expect(grantQueries).toHaveLength(2)
+    expect(calls.filter(s => s.includes('pg_default_acl'))).toHaveLength(1)
   })
 })
 
@@ -318,6 +319,36 @@ describe('RolesCheck: the queries it runs', () => {
       expect(roles, `${role} should still be excluded from the attributes query`)
         .toContain(`'${role}'`)
     }
+  })
+})
+
+// A Supabase target grants the Data API roles every table its owner creates,
+// so the grants on a table the schema fix creates need no fix of their own.
+describe('grantedByDefault', () => {
+  const grant = (over: Record<string, unknown> = {}) => ({
+    grantee: 'anon', table_schema: 'public', table_name: 'items', privilege_type: 'SELECT', is_grantable: false, ...over,
+  })
+  const defaults = [{ table_schema: 'public', grantee: 'anon', privilege_type: 'SELECT', is_grantable: false }]
+
+  it('covers a grant on a table the target lacks, that its defaults make', () => {
+    expect(grantedByDefault([], defaults)(grant())).toBe(true)
+  })
+
+  it('covers it from defaults for every schema too', () => {
+    expect(grantedByDefault([], [{ ...defaults[0], table_schema: null }])(grant({ table_schema: 'app' }))).toBe(true)
+  })
+
+  it('does not cover a table the target has: its grants are what they are', () => {
+    expect(grantedByDefault([{ table_schema: 'public', table_name: 'items' }], defaults)(grant())).toBe(false)
+  })
+
+  it('does not cover what the defaults do not grant', () => {
+    const covers = grantedByDefault([], defaults)
+    expect(covers(grant({ privilege_type: 'INSERT' }))).toBe(false)
+    expect(covers(grant({ grantee: 'authenticated' }))).toBe(false)
+    expect(covers(grant({ table_schema: 'app' }))).toBe(false)
+    expect(covers(grant({ is_grantable: true }))).toBe(false)
+    expect(covers(grant({ column_name: 'name' }))).toBe(false)
   })
 })
 

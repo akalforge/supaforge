@@ -17,6 +17,7 @@ import { splitSqlStatements, isCommentOnly, isPsqlMetaCommand, stripPsqlMetaComm
 import { quoteIdent, quoteLiteral } from './utils/sql.js'
 import { sqlSkeleton, statementSubject, rolesNamedBy } from './sql-deps.js'
 import { ABSENT_ON_TARGET, EXTENSION_UNAVAILABLE } from './pg-errors.js'
+import { dataTablesInOrder, restoreBuckets, restoreTableRows } from './restore-data.js'
 import {
   replaceableSchemas, findExternalDependents, dropSchemaContents, recreateExternalDependents,
   resetRelationGrants, type ExternalDependent,
@@ -266,36 +267,9 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
       await client.query(`SELECT set_config('search_path', $1, false)`, [sessionSearchPath])
     }
 
-    // Apply data if present
-    if (manifest.layers.data?.captured) {
-      try {
-        const dataDir = join(options.snapshotDir, 'data')
-        const { readdir } = await import('node:fs/promises')
-        const dataFiles = await readdir(dataDir)
-        for (const file of dataFiles.filter(f => f.endsWith('.sql')).sort()) {
-          const content = await readFile(join(dataDir, file), 'utf-8')
-          const statements = extractExecutableStatements(content)
-          for (const sql of statements) {
-            try {
-              await client.query(sql)
-              result.applied.push({ type: 'sql', label: `Data: ${file}` })
-            } catch (err) {
-              result.errors.push({
-                type: 'sql',
-                label: `Data: ${file}`,
-                error: errMsg(err),
-              })
-              // As for the SQL layers: in a transaction everything after the
-              // first failure only reports that the transaction is aborted.
-              if (transactional) throw new RestoreAborted()
-            }
-          }
-        }
-      } catch (err) {
-        if (err instanceof RestoreAborted) throw err
-        /* no data dir */
-      }
-    }
+    // Rows last, once the tables, their keys and the roles exist: reference
+    // data as captured, then the buckets the storage policies are about.
+    await restoreRows(client, options.snapshotDir, manifest, result, transactional)
 
     // What clearing the schemas took with it from outside them — the auth
     // trigger that calls a public function, a storage policy that does —
@@ -347,6 +321,50 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
   return result
 }
 
+/**
+ * The snapshot's rows: `data/*.json` per table and `storage-buckets.json`.
+ * Each table and the buckets apply on their own; a failure is an error like
+ * any other, and in one transaction ends the restore.
+ */
+async function restoreRows(
+  client: pg.Client,
+  snapshotDir: string,
+  manifest: SnapshotManifest,
+  result: RestoreResult,
+  transactional: boolean,
+): Promise<void> {
+  const attempt = async (label: string, run: () => Promise<string | undefined>) => {
+    if (transactional) await client.query('SAVEPOINT sf_restore_rows')
+    try {
+      const done = await run()
+      if (done) result.applied.push({ type: 'sql', label: `${label}: ${done}` })
+    } catch (err) {
+      if (transactional) await client.query('ROLLBACK TO SAVEPOINT sf_restore_rows')
+      result.errors.push({ type: 'sql', label, error: errMsg(err) })
+      if (transactional) throw new RestoreAborted()
+    }
+  }
+
+  if (manifest.layers.data?.captured) {
+    const dataDir = join(snapshotDir, 'data')
+    for (const table of await dataTablesInOrder(client, dataDir)) {
+      await attempt(`Data: ${table}`, async () => `${await restoreTableRows(client, dataDir, table)} row(s)`)
+    }
+  }
+
+  const buckets = join(snapshotDir, 'storage-buckets.json')
+  if (manifest.layers.storage?.captured && await isReadable(buckets)) {
+    await attempt('Storage buckets', async () => {
+      const created = await restoreBuckets(client, buckets)
+      if (created === undefined) {
+        result.skipped.push({ type: 'api', label: 'Storage buckets', reason: 'this target has no storage schema to hold them' })
+        return undefined
+      }
+      return `${created} created; objects are never transferred`
+    })
+  }
+}
+
 /** Captured layers a restore cannot replay, and what to do about each. */
 const MANUAL_LAYERS: ReadonlyArray<{
   layer: string
@@ -365,16 +383,6 @@ const MANUAL_LAYERS: ReadonlyArray<{
     type: 'api',
     label: 'Edge Functions',
     reason: 'Deploy via "supabase functions deploy" from your local functions directory',
-  },
-  {
-    // storage-policies.sql *is* replayed; the bucket rows are not. They are
-    // created over the Storage API, which needs credentials a restore into a
-    // plain PostgreSQL database does not have.
-    layer: 'storage',
-    type: 'api',
-    label: 'Storage buckets',
-    reason: 'Bucket rows are created via the Storage API. The policies on them are replayed from '
-      + 'storage-policies.sql where the target has a storage schema; objects are never transferred',
   },
   {
     layer: 'vault',

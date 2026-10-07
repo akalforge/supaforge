@@ -554,6 +554,57 @@ export function sqlToIssues(
   ignoreSchemas?: string[],
   ignoredSchemaTables?: Set<string>,
 ): DriftIssue[] {
+  const issues = unfoldedIssues(result, check, ignoreSchemas, ignoredSchemaTables)
+  return check === 'schema' ? foldCommentsIntoCreates(issues) : issues
+}
+
+/** What a comment title names: `public.orders.total (column)` → the name and kind. */
+const COMMENT_TITLE = /^(?:Comment changed|Comment missing): (?:schema (.+)|(.+) \(([a-z ]+)\))$/
+/** A finding that creates an object: `Table missing: public.orders`. */
+const CREATE_TITLE = /^(Schema|Table|View|Function|Procedure|Type|Domain|Sequence|Index|Policy|Trigger|Extension) missing: (.+)$/
+/** Kinds named after the table (or domain) they belong to. */
+const ON_A_TABLE = new Set(['column', 'constraint', 'trigger', 'policy', 'rule'])
+
+/**
+ * A comment on an object the target does not have yet goes with the finding
+ * that creates it.
+ *
+ * DBDiff emits each comment on its own, so a missing table with three
+ * commented columns was four findings, three of them titled "Comment changed"
+ * on an object that was not there to change. Folded, the comment runs right
+ * after its object is made; dropping the object takes the comment with it, so
+ * nothing is added to the DOWN.
+ */
+export function foldCommentsIntoCreates(issues: DriftIssue[]): DriftIssue[] {
+  const creates = new Map<string, DriftIssue>()
+  for (const issue of issues) {
+    const m = CREATE_TITLE.exec(issue.title)
+    if (m) creates.set(`${m[1] === 'Schema' ? 'schema' : 'object'}:${m[2]}`, issue)
+  }
+
+  return issues.filter(issue => {
+    const m = COMMENT_TITLE.exec(issue.title)
+    const up = issue.sql?.up
+    if (!m || !up || splitStatements(up).length !== 1) return true
+
+    const [, schema, name, kind] = m
+    const candidates = schema !== undefined
+      ? [`schema:${schema}`]
+      : [`object:${name}`, ...(ON_A_TABLE.has(kind) ? [`object:${name.slice(0, name.lastIndexOf('.'))}`] : [])]
+    const owner = candidates.map(c => creates.get(c)).find(Boolean)
+    if (!owner?.sql) return true
+
+    owner.sql = { ...owner.sql, up: `${owner.sql.up.trimEnd()}\n${up.trim()}` }
+    return false
+  })
+}
+
+function unfoldedIssues(
+  result: DbDiffResult,
+  check: 'schema' | 'data',
+  ignoreSchemas?: string[],
+  ignoredSchemaTables?: Set<string>,
+): DriftIssue[] {
   if (!result.up && !result.down) return []
 
   const upUnits = parseUnits(result.up)

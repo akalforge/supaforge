@@ -46,6 +46,25 @@ const SOURCE = `
   CREATE TYPE billing.address AS (line1 text, postcode text);
   CREATE SCHEMA staging;
   CREATE TABLE invoices (id int PRIMARY KEY, total billing.amount, ship_to billing.address);
+
+  -- Reference data, captured as rows: values JSON numbers or the driver would
+  -- lose, an identity and a generated column, and a child listed before its
+  -- parent in checks.data.tables.
+  CREATE TABLE plans (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    code text UNIQUE NOT NULL,
+    price numeric(30,10),
+    quota bigint,
+    since timestamptz,
+    badge bytea,
+    tags text[],
+    doubled numeric GENERATED ALWAYS AS (price * 2) STORED
+  );
+  CREATE TABLE features (id serial PRIMARY KEY, plan_id bigint NOT NULL REFERENCES plans (id), name text);
+  INSERT INTO plans (code, price, quota, since, badge, tags) VALUES
+    ('free', 0, 9007199254740993, '2026-01-01 00:00:00.123456+05:30', '\\x00ff10', '{a,"b c"}'),
+    ('pro', 12345678901234567890.0123456789, NULL, NULL, NULL, NULL);
+  INSERT INTO features (plan_id, name) VALUES (1, 'one'), (2, 'two'), (2, 'three');
 `
 
 describeE2E('e2e: snapshot restored into an empty database', () => {
@@ -65,6 +84,7 @@ describeE2E('e2e: snapshot restored into an empty database', () => {
         restored: { dbUrl: h.urlFor('target', restored) },
         partial: { dbUrl: h.urlFor('target', 'sf_partial') },
       },
+      checks: { data: { tables: ['public.features', 'public.plans'] } },
     })
   }, 300_000)
 
@@ -86,6 +106,14 @@ describeE2E('e2e: snapshot restored into an empty database', () => {
 
     const schemas = `SELECT string_agg(nspname, ',' ORDER BY nspname) FROM pg_namespace WHERE nspname IN ('billing', 'staging')`
     expect(await h.sqlIn('target', restored, schemas)).toBe('billing,staging')
+
+    // The rows, value for value, and sequences that carry on past them.
+    for (const table of ['plans', 'features']) {
+      const rows = `SELECT string_agg(t::text, ' | ' ORDER BY id) FROM public.${table} t`
+      expect(await h.sqlIn('target', restored, rows)).toBe(await h.sql('source', rows))
+    }
+    expect(await h.sqlIn('target', restored, `SELECT nextval(pg_get_serial_sequence('public.features', 'id'))`)).toBe('4')
+    expect(await h.sqlIn('target', restored, `SELECT nextval(pg_get_serial_sequence('public.plans', 'id'))`)).toBe('3')
   }, 600_000)
 
   it('then finds no drift between the two', async () => {

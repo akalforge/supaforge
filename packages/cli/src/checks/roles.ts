@@ -147,6 +147,44 @@ const columnGrantsSql = (ignoreSchemas: string[]) => `
   ORDER BY 1, 2, 3, 4, 5
 `
 
+/** The target's relations, to tell a grant on a table it lacks yet. */
+const RELATIONS_SQL = `
+  SELECT n.nspname AS table_schema, c.relname AS table_name
+  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE c.relkind IN ('r', 'p', 'v', 'm', 'f')
+`
+
+/**
+ * What a table the connecting role creates is granted by default, per schema
+ * (NULL for every schema): ALTER DEFAULT PRIVILEGES ... ON TABLES.
+ */
+const DEFAULT_TABLE_GRANTS_SQL = `
+  SELECT n.nspname AS table_schema,
+         CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
+         a.privilege_type, a.is_grantable
+  FROM pg_default_acl d
+  LEFT JOIN pg_namespace n ON n.oid = d.defaclnamespace
+  CROSS JOIN LATERAL aclexplode(d.defaclacl) a
+  WHERE d.defaclobjtype = 'r' AND d.defaclrole = (SELECT oid FROM pg_roles WHERE rolname = current_user)
+`
+
+/**
+ * Leave out a missing grant the target will make by itself: one on a table it
+ * does not have yet, which its default privileges grant when the schema fix
+ * creates it. On Supabase that is every Data API grant on every new table —
+ * most of a report, and gone again after the first apply.
+ */
+export function grantedByDefault(
+  relations: Array<{ table_schema: string; table_name: string }>,
+  defaults: Array<{ table_schema: string | null; grantee: string; privilege_type: string; is_grantable: boolean }>,
+): (g: RoleGrant) => boolean {
+  const present = new Set(relations.map(r => `${r.table_schema}.${r.table_name}`))
+  const granted = new Set(defaults.map(d => `${d.table_schema ?? '*'}|${d.grantee}|${d.privilege_type}|${Boolean(d.is_grantable)}`))
+  return g => !g.column_name
+    && !present.has(`${g.table_schema}.${g.table_name}`)
+    && [g.table_schema, '*'].some(schema => granted.has(`${schema}|${g.grantee}|${g.privilege_type}|${Boolean(g.is_grantable)}`))
+}
+
 export class RolesCheck extends Check {
   readonly name = 'roles' as const
 
@@ -158,7 +196,10 @@ export class RolesCheck extends Check {
     const ignore = ctx.config.ignoreSchemas ?? []
     const version = async (url: string) =>
       Number((await this.queryFn(url, `SELECT current_setting('server_version_num') AS v`) as Array<{ v: string }>)[0]?.v ?? 0)
-    const [sourceRoles, targetRoles, sourceGrants, targetGrants, sourceColumns, targetColumns, sourceVersion, targetVersion] = await Promise.all([
+    const [
+      sourceRoles, targetRoles, sourceGrants, targetGrants, sourceColumns, targetColumns,
+      sourceVersion, targetVersion, targetRelations, targetDefaults,
+    ] = await Promise.all([
       this.queryFn(ctx.source.dbUrl, ROLES_SQL) as unknown as Promise<PgRole[]>,
       this.queryFn(ctx.target.dbUrl, ROLES_SQL) as unknown as Promise<PgRole[]>,
       this.queryFn(ctx.source.dbUrl, grantsSql(ignore)) as unknown as Promise<RoleGrant[]>,
@@ -167,13 +208,17 @@ export class RolesCheck extends Check {
       this.queryFn(ctx.target.dbUrl, columnGrantsSql(ignore)) as unknown as Promise<RoleGrant[]>,
       version(ctx.source.dbUrl),
       version(ctx.target.dbUrl),
+      this.queryFn(ctx.target.dbUrl, RELATIONS_SQL) as unknown as Promise<Array<{ table_schema: string; table_name: string }>>,
+      this.queryFn(ctx.target.dbUrl, DEFAULT_TABLE_GRANTS_SQL) as unknown as
+        Promise<Array<{ table_schema: string | null; grantee: string; privilege_type: string; is_grantable: boolean }>>,
     ])
     const comparable = comparablePrivileges(sourceVersion, targetVersion)
+    const byDefault = grantedByDefault(targetRelations ?? [], targetDefaults ?? [])
 
     return [
       ...diffRoles(sourceRoles, targetRoles),
       ...diffGrants(
-        [...(sourceGrants ?? []), ...(sourceColumns ?? [])].filter(comparable),
+        [...(sourceGrants ?? []), ...(sourceColumns ?? [])].filter(g => comparable(g) && !byDefault(g)),
         [...(targetGrants ?? []), ...(targetColumns ?? [])].filter(comparable),
       ),
     ]

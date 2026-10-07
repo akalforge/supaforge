@@ -72,8 +72,9 @@ export default class MigrateRun extends BaseCommand {
 
     this.log(`${bold('migrate run')} → ${dim(envName)} (${dim(this.redactUrl(env.dbUrl))})\n`)
 
-    // Ensure tracking table exists
-    await ensureMigrationsTable(env.dbUrl)
+    // The history is created only when migrations are applied: a preview
+    // writes nothing, not even the table that records what ran.
+    if (flags.apply) await ensureMigrationsTable(env.dbUrl)
     const applied = await getAppliedVersions(env.dbUrl)
     let pending = await getPendingMigrations(dir, applied)
 

@@ -20,12 +20,53 @@ CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE} (
 );
 `.trim()
 
-/** Ensure the supabase_migrations schema and table exist. */
+/** Whether the history table exists, and what the connecting role may do with it. */
+interface HistoryAccess {
+  exists: boolean
+  owner: string | null
+  me: string
+  can_read: boolean
+  can_write: boolean
+}
+
+// Read from the catalogs, which need no privilege: naming the table in a
+// schema the role has no USAGE on fails rather than answering.
+const HISTORY_ACCESS_SQL = `
+  SELECT c.oid IS NOT NULL AS exists, pg_get_userbyid(c.relowner) AS owner, current_user AS me,
+         coalesce(has_schema_privilege(n.oid, 'USAGE') AND has_table_privilege(c.oid, 'SELECT'), false) AS can_read,
+         coalesce(has_schema_privilege(n.oid, 'USAGE') AND has_table_privilege(c.oid, 'INSERT'), false) AS can_write
+  FROM (SELECT 1) one
+  LEFT JOIN pg_namespace n ON n.nspname = '${MIGRATIONS_SCHEMA}'
+  LEFT JOIN pg_class c ON c.relnamespace = n.oid AND c.relname = '${MIGRATIONS_TABLE.split('.')[1]}'
+`
+
+/** Why the role cannot use a history table that exists, and the grant that fixes it. */
+function noAccess(access: HistoryAccess, need: 'read' | 'write'): Error {
+  return new Error(
+    `${MIGRATIONS_TABLE} is owned by ${access.owner}, and ${access.me} cannot ${need} it. `
+    + `As ${access.owner} or a superuser, run: GRANT USAGE ON SCHEMA ${MIGRATIONS_SCHEMA} TO ${access.me}; `
+    + `GRANT SELECT, INSERT ON ${MIGRATIONS_TABLE} TO ${access.me};`)
+}
+
+/**
+ * Ensure the supabase_migrations schema and table exist, and that this role
+ * can record a migration in them.
+ *
+ * Only created when missing: `CREATE ... IF NOT EXISTS` checks the CREATE
+ * privilege on the schema before it notices the table is there, and on a
+ * self-hosted stack, where the platform's admin role owns the schema, that
+ * failed every run with "permission denied for schema supabase_migrations".
+ */
 export async function ensureMigrationsTable(
   dbUrl: string,
   queryFn: QueryFn = pgQuery,
 ): Promise<void> {
-  await queryFn(dbUrl, BOOTSTRAP_SQL)
+  const [access] = await queryFn(dbUrl, HISTORY_ACCESS_SQL) as unknown as HistoryAccess[]
+  if (!access?.exists) {
+    await queryFn(dbUrl, BOOTSTRAP_SQL)
+    return
+  }
+  if (!access.can_write) throw noAccess(access, 'write')
 }
 
 // ─── Applied versions ────────────────────────────────────────────────────────
@@ -34,11 +75,17 @@ const APPLIED_SQL = `
   SELECT version FROM ${MIGRATIONS_TABLE} ORDER BY version
 `
 
-/** Fetch the set of already-applied migration versions from the target DB. */
+/**
+ * The migration versions already applied to the target. No table yet means
+ * none, so a preview reads the history without creating anything.
+ */
 export async function getAppliedVersions(
   dbUrl: string,
   queryFn: QueryFn = pgQuery,
 ): Promise<Set<string>> {
+  const [access] = await queryFn(dbUrl, HISTORY_ACCESS_SQL) as unknown as HistoryAccess[]
+  if (access && !access.exists) return new Set()
+  if (access && !access.can_read) throw noAccess(access, 'read')
   const rows = await queryFn(dbUrl, APPLIED_SQL) as { version: string }[]
   return new Set(rows.map(r => r.version))
 }

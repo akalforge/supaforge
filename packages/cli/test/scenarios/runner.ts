@@ -21,6 +21,7 @@
  * - **Nothing leaks.** No command touches the servers' roles or databases.
  */
 import { diffState } from '../../src/state-diff.js'
+import type { SchemaState } from '@akalforge/pg-conformance'
 import { DEFAULT_IGNORE_SCHEMAS } from '../../src/defaults.js'
 import type { PromoteResult } from '../../src/promote.js'
 import { isComparisonCheck, type ScanResult } from '../../src/types/drift.js'
@@ -74,6 +75,36 @@ async function userSchemas(h: PgHarness, src: string, tgt: string): Promise<stri
       AND nspname <> ALL (ARRAY[${DEFAULT_IGNORE_SCHEMAS.map(n => `'${n}'`).join(', ')}]::text[])`
   const list = async (role: 'source' | 'target', db: string) => (await h.sqlIn(role, db, sql)).split('\n').filter(Boolean)
   return [...new Set([...await list('source', src), ...await list('target', tgt)])].sort()
+}
+
+/** Whether the two servers run different major versions, asked once per harness. */
+const majors = new WeakMap<PgHarness, Promise<boolean>>()
+function differentMajors(h: PgHarness): Promise<boolean> {
+  if (!majors.has(h)) {
+    const major = async (role: 'source' | 'target') => Math.floor(Number(await h.sql(role, 'SHOW server_version_num')) / 10000)
+    majors.set(h, Promise.all([major('source'), major('target')]).then(([a, b]) => a !== b))
+  }
+  return majors.get(h)!
+}
+
+/**
+ * What the target should hold once migrated: the source's state — or, across
+ * major versions, the source's SQL built on the target's server. PostgreSQL
+ * prints the same objects differently from one major version to the next (15
+ * table-qualifies a view's columns, 16+ does not), so a migrated target never
+ * matched a source on another version however right it was. Built on the
+ * target's server, like is compared with like, as --prove does.
+ */
+async function expectedState(h: PgHarness, key: string, s: Scenario, src: string, schemas: string[]): Promise<SchemaState> {
+  if (!await differentMajors(h)) return h.stateIn('source', src, schemas)
+  const ref = `sc_${key}_r`
+  await h.createDatabase('target', ref)
+  try {
+    await h.applySqlIn('target', ref, s.source)
+    return await h.stateIn('target', ref, schemas)
+  } finally {
+    await h.dropDatabase('target', ref)
+  }
 }
 
 async function rows(h: PgHarness, role: 'source' | 'target', db: string, queries: string[]): Promise<string[]> {
@@ -152,7 +183,7 @@ export async function runScenario(h: PgHarness, key: string, s: Scenario): Promi
       violations.push(`--prove did not run:\n${short(all)}`)
     }
 
-    outcome.residual = diffState(await h.stateIn('source', src, schemas), await h.stateIn('target', tgt, schemas))
+    outcome.residual = diffState(await expectedState(h, key, s, src, schemas), await h.stateIn('target', tgt, schemas))
     if (outcome.residual.length > 0) {
       violations.push(`the target does not match the source:\n  ${outcome.residual.join('\n  ')}`)
     }

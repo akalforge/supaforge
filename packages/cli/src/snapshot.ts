@@ -445,8 +445,12 @@ async function captureData(
 
   for (const table of tables) {
     try {
-      const rows = await queryFn(dbUrl, `SELECT * FROM ${quoteIdent(table)} ORDER BY 1`)
-      await writeFile(join(dataDir, `${table}.json`), JSON.stringify(rows, null, 2) + '\n')
+      // Rendered by the server, not by the driver: a bigint or numeric past
+      // 2^53 kept its digits, a timestamp its zone, a bytea its bytes — each
+      // as the text restore hands back to json_populate_recordset.
+      const [{ rows }] = await queryFn(dbUrl, `SELECT jsonb_pretty(coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb)) AS rows
+        FROM (SELECT * FROM ${quoteIdent(table)} ORDER BY 1) t`) as unknown as Array<{ rows: string }>
+      await writeFile(join(dataDir, `${table}.json`), rows + '\n')
       captured++
     } catch (err) {
       errors.push(`${table}: ${errMsg(err)}`)

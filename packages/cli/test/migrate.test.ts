@@ -13,16 +13,42 @@ import type { ReadDirFn } from '../src/checks/migrations.js'
 
 // ─── ensureMigrationsTable ───────────────────────────────────────────────────
 
+/** A target whose history table is in the given state. */
+function history(access: Record<string, unknown> | 'none', versions: string[] = []) {
+  const calls: string[] = []
+  const queryFn: QueryFn = async (_url, sql) => {
+    calls.push(sql)
+    if (sql.includes('has_table_privilege')) {
+      return [access === 'none'
+        ? { exists: false, owner: null, me: 'postgres', can_read: false, can_write: false }
+        : { exists: true, owner: 'postgres', me: 'postgres', can_read: true, can_write: true, ...access }]
+    }
+    if (sql.includes('SELECT version')) return versions.map(version => ({ version }))
+    return []
+  }
+  return { calls, queryFn }
+}
+
 describe('ensureMigrationsTable', () => {
-  it('executes bootstrap SQL', async () => {
-    const calls: string[] = []
-    const queryFn: QueryFn = async (_url, sql) => { calls.push(sql); return [] }
-
+  it('creates the schema and table when there are none', async () => {
+    const { calls, queryFn } = history('none')
     await ensureMigrationsTable('postgres://test', queryFn)
+    expect(calls.at(-1)).toContain('CREATE SCHEMA IF NOT EXISTS supabase_migrations')
+    expect(calls.at(-1)).toContain('CREATE TABLE IF NOT EXISTS')
+  })
 
-    expect(calls).toHaveLength(1)
-    expect(calls[0]).toContain('CREATE SCHEMA IF NOT EXISTS supabase_migrations')
-    expect(calls[0]).toContain('CREATE TABLE IF NOT EXISTS')
+  // CREATE ... IF NOT EXISTS checks the schema's CREATE privilege first, and
+  // a self-hosted stack's admin role owns the schema.
+  it('runs no DDL when the table is there', async () => {
+    const { calls, queryFn } = history({})
+    await ensureMigrationsTable('postgres://test', queryFn)
+    expect(calls.some(c => c.includes('CREATE'))).toBe(false)
+  })
+
+  it('says which grant is missing when the role cannot record a migration', async () => {
+    const { queryFn } = history({ owner: 'supabase_admin', can_write: false })
+    await expect(ensureMigrationsTable('postgres://test', queryFn)).rejects.toThrow(
+      /owned by supabase_admin, and postgres cannot write it.*GRANT SELECT, INSERT ON supabase_migrations\.schema_migrations TO postgres/)
   })
 })
 
@@ -30,23 +56,23 @@ describe('ensureMigrationsTable', () => {
 
 describe('getAppliedVersions', () => {
   it('returns set of applied versions', async () => {
-    const queryFn: QueryFn = async () => [
-      { version: '001' },
-      { version: '002' },
-    ]
-
-    const result = await getAppliedVersions('postgres://test', queryFn)
-
-    expect(result).toBeInstanceOf(Set)
-    expect(result.size).toBe(2)
-    expect(result.has('001')).toBe(true)
-    expect(result.has('002')).toBe(true)
+    const result = await getAppliedVersions('postgres://test', history({}, ['001', '002']).queryFn)
+    expect([...result]).toEqual(['001', '002'])
   })
 
   it('returns empty set when no records', async () => {
-    const queryFn: QueryFn = async () => []
-    const result = await getAppliedVersions('postgres://test', queryFn)
-    expect(result.size).toBe(0)
+    expect((await getAppliedVersions('postgres://test', history({}).queryFn)).size).toBe(0)
+  })
+
+  it('reads no table, and creates none, when there is no history yet', async () => {
+    const { calls, queryFn } = history('none')
+    expect((await getAppliedVersions('postgres://test', queryFn)).size).toBe(0)
+    expect(calls).toHaveLength(1)
+  })
+
+  it('refuses rather than report nothing applied when it cannot read the history', async () => {
+    const { queryFn } = history({ owner: 'supabase_admin', can_read: false })
+    await expect(getAppliedVersions('postgres://test', queryFn)).rejects.toThrow(/cannot read it/)
   })
 })
 

@@ -1,7 +1,8 @@
 import { Flags } from '@oclif/core'
 import { BaseCommand } from '../../base-command.js'
 import { readLocalMigrations } from '../../checks/migrations.js'
-import { getAppliedVersions, ensureMigrationsTable } from '../../migrate.js'
+import { getAppliedVersions } from '../../migrate.js'
+import { errMsg } from '../../utils/error.js'
 import { ok, warn, dim, bold } from '../../ui.js'
 import { pgQuery } from '../../db.js'
 
@@ -66,11 +67,13 @@ export default class MigrateList extends BaseCommand {
       .addDatabase('Target', envName, env.dbUrl)
     await this.runPreflight(pre, 'Migrate list')
 
+    // Read only: a listing creates nothing. A history it cannot read is said
+    // so, rather than listing every migration as pending.
     let applied: Set<string>
     try {
-      await ensureMigrationsTable(env.dbUrl, pgQuery)
       applied = await getAppliedVersions(env.dbUrl, pgQuery)
-    } catch {
+    } catch (err) {
+      this.warn(`Could not read which migrations are applied: ${errMsg(err)}`)
       applied = new Set()
     }
 

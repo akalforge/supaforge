@@ -79,7 +79,8 @@ const VERSIONED_PG_DIRS: readonly string[] = [
  * Resolve a compatible pg_dump binary path for the given server major version.
  *
  * 1. Checks the default `pg_dump` on PATH.
- * 2. Falls back to well-known versioned directories.
+ * 2. Then the directory SUPAFORGE_PG_BIN names, if set.
+ * 3. Falls back to well-known versioned directories.
  *
  * Returns `{ path, major }` or `null` if no compatible binary is found.
  */
@@ -90,6 +91,14 @@ export async function resolvePgDumpPath(
   const defaultMajor = await getLocalPgDumpVersion()
   if (defaultMajor !== null && defaultMajor >= serverMajor) {
     return { path: 'pg_dump', major: defaultMajor }
+  }
+
+  // A directory of client tools named explicitly, for an install none of the
+  // well-known locations below covers.
+  const named = process.env.SUPAFORGE_PG_BIN?.trim()
+  if (named && existsSync(`${named}/pg_dump`)) {
+    const major = await getPgDumpVersionAt(`${named}/pg_dump`)
+    if (major !== null && major >= serverMajor) return { path: `${named}/pg_dump`, major }
   }
 
   // Search versioned directories (highest version first)

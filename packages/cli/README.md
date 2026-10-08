@@ -239,6 +239,7 @@ supaforge migrate run --env=prod --apply
 | `SUPAFORGE_DBDIFF_MEMORY` | `1G` | Memory limit for `@dbdiff/cli` (`2G`, `-1` for none) |
 | `SUPAFORGE_CONNECT_TIMEOUT` | `15` | Seconds to wait for a connection |
 | `SUPAFORGE_CHECK_CONCURRENCY` | `4` | Checks run at once. Lower it behind a tight pooler |
+| `SUPAFORGE_PG_BIN` | — | A directory of PostgreSQL client tools (`pg_dump`, `psql`) to use when the ones on `PATH` are too old for a server |
 
 ## Self-hosted Supabase
 

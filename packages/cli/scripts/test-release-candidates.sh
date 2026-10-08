@@ -138,17 +138,18 @@ export SUPAFORGE_E2E_CLI="$INSTALLED/bin/run.js"
 cd "$SF"
 
 # A proof across versions copies the source with pg_dump, which must be at
-# least as new as the source server. Use PostgreSQL 18's client tools from a
-# container when the host's are older.
+# least as new as the source server. PostgreSQL 18's client tools from a
+# container are offered through SUPAFORGE_PG_BIN, and PATH is left alone: most
+# machines, CI's included, have an older pg_dump first on PATH and a newer one
+# elsewhere, and SupaForge has to find the right one itself. Put first on PATH,
+# they hid a proof that picked one too old for the source.
 if wants scenarios || wants cross-version; then
-  if [ "$(pg_dump --version 2>/dev/null | grep -oE '[0-9]+' | head -1 || echo 0)" -lt 18 ]; then
-    mkdir -p "$WORK/pgbin"
-    for t in pg_dump pg_restore psql; do
-      printf '#!/bin/sh\nexec %s run --rm -i --network=host -v /tmp:/tmp docker.io/library/postgres:18 %s "$@"\n' "$RT" "$t" > "$WORK/pgbin/$t"
-      chmod +x "$WORK/pgbin/$t"
-    done
-    export PATH="$WORK/pgbin:$PATH"
-  fi
+  mkdir -p "$WORK/pgbin"
+  for t in pg_dump pg_restore psql; do
+    printf '#!/bin/sh\nexec %s run --rm -i --network=host -v /tmp:/tmp docker.io/library/postgres:18 %s "$@"\n' "$RT" "$t" > "$WORK/pgbin/$t"
+    chmod +x "$WORK/pgbin/$t"
+  done
+  export SUPAFORGE_PG_BIN="$WORK/pgbin"
 fi
 
 run_suite() {

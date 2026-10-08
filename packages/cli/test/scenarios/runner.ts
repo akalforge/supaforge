@@ -10,7 +10,7 @@
  * - **An apply never rolls back**, nor exits with an error. Every fix either
  *   applies or is held back with a reason; none fails.
  * - **With --allow-destructive it converges.** The target's state then equals
- *   the source's, judged by @akalforge/pg-conformance's state query — not by
+ *   the source's, judged by @akal/pg-conformance's state query — not by
  *   asking DBDiff, which could only ever agree with its own migration.
  * - **--prove agrees.** When the proof runs, it does not refuse a migration
  *   that converges.
@@ -21,7 +21,7 @@
  * - **Nothing leaks.** No command touches the servers' roles or databases.
  */
 import { diffState } from '../../src/state-diff.js'
-import type { SchemaState } from '@akalforge/pg-conformance'
+import type { SchemaState } from '@akal/pg-conformance'
 import { DEFAULT_IGNORE_SCHEMAS } from '../../src/defaults.js'
 import type { PromoteResult } from '../../src/promote.js'
 import { isComparisonCheck, type ScanResult } from '../../src/types/drift.js'

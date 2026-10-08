@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build and link @akalforge/supaforge globally for local testing.
+# Build and link @akal/supaforge globally for local testing.
 #
 # Usage:
 #   ./scripts/dev-install.sh          # Build + link (creates global `supaforge` command)
@@ -14,14 +14,14 @@ set -euo pipefail
 CLI_DIR="$(cd "$(dirname "$0")/../packages/cli" && pwd)"
 
 if [[ "${1:-}" == "--unlink" ]]; then
-  echo "Unlinking @akalforge/supaforge..."
+  echo "Unlinking @akal/supaforge..."
   cd "$CLI_DIR"
   npm unlink -g 2>/dev/null || true
   echo "✅ Global supaforge link removed."
   exit 0
 fi
 
-echo "Building @akalforge/supaforge..."
+echo "Building @akal/supaforge..."
 cd "$CLI_DIR"
 npm run build
 

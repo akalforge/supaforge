@@ -18,7 +18,7 @@
  * pair of schemas the fingerprint distinguishes, so this reports the same
  * differences — it does not find more of them, and it must not find fewer.
  */
-import type { SchemaState, StateTable, StateColumn } from '@akalforge/pg-conformance'
+import type { SchemaState, StateTable, StateColumn } from '@akal/pg-conformance'
 
 /** How a value reads when absent, so `null` never reaches the output raw. */
 const show = (v: unknown): string => {

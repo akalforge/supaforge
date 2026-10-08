@@ -1,1 +1,1 @@
-export { setLastScanResult, getLastScanResult, clearLastScanResult } from '@akalforge/supaforge'
+export { setLastScanResult, getLastScanResult, clearLastScanResult } from '@akal/supaforge'

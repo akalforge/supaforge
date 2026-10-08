@@ -35,7 +35,6 @@ on:
 permissions:
   contents: write
   id-token: write
-  packages: write
 
 # Serialize releases: never run two at once (a double-click or overlapping
 # dispatch would otherwise race to bump/tag/publish). Queue rather than cancel —

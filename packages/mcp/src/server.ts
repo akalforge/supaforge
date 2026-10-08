@@ -1,1 +1,1 @@
-export { createServer } from '@akalforge/supaforge'
+export { createServer } from '@akal/supaforge'

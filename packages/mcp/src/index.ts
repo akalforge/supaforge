@@ -1,5 +1,5 @@
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
-import { createServer } from '@akalforge/supaforge'
+import { createServer } from '@akal/supaforge'
 
 async function main(): Promise<void> {
   const server = createServer(process.cwd())

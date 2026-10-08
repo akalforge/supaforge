@@ -15,4 +15,4 @@ export function isUserCancelled(err: unknown): err is UserCancelledError {
 }
 
 /** GitHub Issues URL for filing bug reports. */
-export const ISSUES_URL = 'https://github.com/akalforge/supaforge/issues/new'
+export const ISSUES_URL = 'https://github.com/akalsoftware/supaforge/issues/new'

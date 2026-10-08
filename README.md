@@ -2,8 +2,8 @@
 
 > Diff and sync your Supabase environments.
 
-[![CI](https://github.com/akalforge/supaforge/actions/workflows/ci.yml/badge.svg)](https://github.com/akalforge/supaforge/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/@akalforge/supaforge.svg)](https://www.npmjs.com/package/@akalforge/supaforge)
+[![CI](https://github.com/akalsoftware/supaforge/actions/workflows/ci.yml/badge.svg)](https://github.com/akalsoftware/supaforge/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/@akal/supaforge.svg)](https://www.npmjs.com/package/@akal/supaforge)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Supabase projects running as dev, staging and production drift apart, and
@@ -18,7 +18,7 @@ prove the result before it touches anything.
 **CVE-2025-48757** found 170+ apps with exposed databases because RLS policies
 never reached production. SupaForge catches that on the first scan.
 
-Built by **[Akal](https://github.com/akalforge)**.
+Built by **[Akal](https://github.com/akalsoftware)**.
 
 ## Why SupaForge
 
@@ -47,7 +47,7 @@ Built by **[Akal](https://github.com/akalforge)**.
 ## Quick start
 
 ```bash
-npm install -g @akalforge/supaforge
+npm install -g @akal/supaforge
 
 supaforge init              # create supaforge.config.json
 supaforge diff              # what has drifted?
@@ -79,13 +79,13 @@ against an independent catalog oracle and against `--prove`.
 
 | Path | What |
 | --- | --- |
-| [`packages/cli`](packages/cli) | The `supaforge` CLI and library, published as [`@akalforge/supaforge`](https://www.npmjs.com/package/@akalforge/supaforge) |
+| [`packages/cli`](packages/cli) | The `supaforge` CLI and library, published as [`@akal/supaforge`](https://www.npmjs.com/package/@akal/supaforge) |
 | [`packages/mcp`](packages/mcp) | A standalone build of the MCP server, not published. Use `supaforge mcp` |
 
 ## Development
 
 ```bash
-git clone https://github.com/akalforge/supaforge.git
+git clone https://github.com/akalsoftware/supaforge.git
 cd supaforge/packages/cli
 npm install
 npm test && npm run lint
@@ -100,7 +100,7 @@ them on every pull request.
 
 Run the **Trigger Release** workflow (Actions → Trigger Release) with `patch`,
 `minor`, `major` or an exact version. It bumps the version, tags it, and
-publishes to npm and GitHub Packages.
+publishes to npm.
 
 `node scripts/release.js patch` does the same steps locally, as a dry run
 unless given `--apply`.

@@ -13,7 +13,7 @@ set -euo pipefail
 #      release workflow builds them (scripts/build-local.sh: Podman or Docker,
 #      no PHP needed; the first build takes 30-60 min, later ones minutes).
 #   2. The npm packages @dbdiff/cli and @dbdiff/cli-linux-x64, versioned
-#      together and packed, and @akalforge/pg-conformance packed.
+#      together and packed, and @akal/pg-conformance packed.
 #   3. SupaForge built and packed against them, then installed into a scratch
 #      prefix the way a user installs it.
 #   4. SupaForge's suites run against that installed package: unit and lint,
@@ -97,14 +97,14 @@ for pkg in cli cli-linux-x64; do
   (cd "$WORK/dbdiff/packages/@dbdiff/$pkg" && npm pack --silent --pack-destination "$WORK/tgz" >/dev/null)
 done
 if [ -n "$PGC_SRC" ]; then
-  say "Packing @akalforge/pg-conformance from $PGC_SRC ($(git -C "$PGC_SRC" rev-parse --short HEAD))"
+  say "Packing @akal/pg-conformance from $PGC_SRC ($(git -C "$PGC_SRC" rev-parse --short HEAD))"
   rm -rf "$WORK/pg-conformance"
   git clone -q --local "$PGC_SRC" "$WORK/pg-conformance"
   git -C "$WORK/pg-conformance" checkout -q "$(git -C "$PGC_SRC" rev-parse HEAD)"
   (cd "$WORK/pg-conformance" && npm pack --silent --pack-destination "$WORK/tgz" >/dev/null)
 fi
 DEPS=("$WORK"/tgz/dbdiff-cli-*.tgz)
-[ -n "$PGC_SRC" ] && DEPS+=("$WORK"/tgz/akalforge-pg-conformance-*.tgz)
+[ -n "$PGC_SRC" ] && DEPS+=("$WORK"/tgz/akal-pg-conformance-*.tgz)
 
 # ── 3. SupaForge built against them, packed and installed ───────────────────
 say "SupaForge $(git -C "$REPO_DIR" rev-parse --short HEAD) ($(git -C "$REPO_DIR" rev-parse --abbrev-ref HEAD)), built against those"
@@ -120,14 +120,14 @@ node -e '
   const fs = require("fs"), [file, dbdiff, pgc] = process.argv.slice(1)
   const j = JSON.parse(fs.readFileSync(file, "utf8"))
   j.dependencies["@dbdiff/cli"] = dbdiff
-  if (pgc) j.dependencies["@akalforge/pg-conformance"] = pgc
+  if (pgc) j.dependencies["@akal/pg-conformance"] = pgc
   fs.writeFileSync(file, JSON.stringify(j, null, 2) + "\n")
 ' "$SF/package.json" "$VERSION" "$PGC_VERSION"
 (cd "$SF" && npm install --silent --no-audit --no-fund --no-save "${DEPS[@]}" && npm run build --silent)
 (cd "$SF" && npm pack --silent --pack-destination "$WORK/tgz" >/dev/null)
 rm -rf "$WORK/prefix" && mkdir -p "$WORK/prefix"
-(cd "$WORK/prefix" && npm init -y >/dev/null && npm install --silent --no-audit --no-fund "$WORK"/tgz/akalforge-supaforge-*.tgz "${DEPS[@]}")
-INSTALLED="$WORK/prefix/node_modules/@akalforge/supaforge"
+(cd "$WORK/prefix" && npm init -y >/dev/null && npm install --silent --no-audit --no-fund "$WORK"/tgz/akal-supaforge-*.tgz "${DEPS[@]}")
+INSTALLED="$WORK/prefix/node_modules/@akal/supaforge"
 say "Installed: $(node "$INSTALLED/bin/run.js" --version) with $("$WORK/prefix/node_modules/.bin/dbdiff" --version)"
 for env in production development test; do
   if NODE_ENV=$env node "$INSTALLED/bin/run.js" --version 2>&1 >/dev/null | grep -q .; then

@@ -58,12 +58,16 @@ const SOURCE = `
     since timestamptz,
     badge bytea,
     tags text[],
+    raw json,
+    doc jsonb,
     doubled numeric GENERATED ALWAYS AS (price * 2) STORED
   );
   CREATE TABLE features (id serial PRIMARY KEY, plan_id bigint NOT NULL REFERENCES plans (id), name text);
-  INSERT INTO plans (code, price, quota, since, badge, tags) VALUES
-    ('free', 0, 9007199254740993, '2026-01-01 00:00:00.123456+05:30', '\\x00ff10', '{a,"b c"}'),
-    ('pro', 12345678901234567890.0123456789, NULL, NULL, NULL, NULL);
+  -- json keeps its text exactly — spacing, key order, a duplicate key — and a
+  -- JSON null is not an SQL NULL.
+  INSERT INTO plans (code, price, quota, since, badge, tags, raw, doc) VALUES
+    ('free', 0, 9007199254740993, '2026-01-01 00:00:00.123456+05:30', '\\x00ff10', '{a,"b c"}', '{"dup": 1,  "dup": 2, "b": []}', 'null'),
+    ('pro', 12345678901234567890.0123456789, NULL, NULL, NULL, NULL, '[]', NULL);
   INSERT INTO features (plan_id, name) VALUES (1, 'one'), (2, 'two'), (2, 'three');
 `
 
@@ -83,6 +87,8 @@ describeE2E('e2e: snapshot restored into an empty database', () => {
         target: { dbUrl: h.connectionString('target') },
         restored: { dbUrl: h.urlFor('target', restored) },
         partial: { dbUrl: h.urlFor('target', 'sf_partial') },
+        old: { dbUrl: h.urlFor('target', 'sf_old_format') },
+        rolledback: { dbUrl: h.urlFor('target', 'sf_rolled_back') },
       },
       checks: { data: { tables: ['public.features', 'public.plans'] } },
     })
@@ -108,6 +114,10 @@ describeE2E('e2e: snapshot restored into an empty database', () => {
     expect(await h.sqlIn('target', restored, schemas)).toBe('billing,staging')
 
     // The rows, value for value, and sequences that carry on past them.
+    // A JSON null and an SQL NULL print alike in a row's text, so the json
+    // columns are compared on their own as well.
+    const json = `SELECT string_agg(coalesce(raw::text, 'SQL NULL') || ' / ' || coalesce(doc::text, 'SQL NULL'), ' | ' ORDER BY id) FROM public.plans`
+    expect(await h.sqlIn('target', restored, json)).toBe(await h.sql('source', json))
     for (const table of ['plans', 'features']) {
       const rows = `SELECT string_agg(t::text, ' | ' ORDER BY id) FROM public.${table} t`
       expect(await h.sqlIn('target', restored, rows)).toBe(await h.sql('source', rows))
@@ -138,6 +148,49 @@ describeE2E('e2e: snapshot restored into an empty database', () => {
     const refusal = JSON.parse(r.stdout) as { error: string; tables: string[] }
     expect(refusal.tables).toContain('orders')
   }, 120_000)
+
+  // Snapshots taken before rows were captured as each column's text hold JSON
+  // values instead; those still restore.
+  it('restores rows a snapshot holds in the earlier format', async () => {
+    const snapshots = join(ws, '.supaforge', 'snapshots')
+    const [taken] = (await readdir(snapshots)).sort()
+    const copy = '20980101T000000Z'
+    await cp(join(snapshots, taken), join(snapshots, copy), { recursive: true })
+    const manifestFile = join(snapshots, copy, 'manifest.json')
+    await writeFile(manifestFile, JSON.stringify({ ...JSON.parse(await readFile(manifestFile, 'utf8')), timestamp: copy }))
+    await writeFile(join(snapshots, copy, 'data', 'public.features.json'),
+      JSON.stringify([{ id: 1, plan_id: 1, name: 'one' }, { id: 2, plan_id: 2, name: 'two' }]))
+    await writeFile(join(snapshots, copy, 'data', 'public.plans.json'),
+      JSON.stringify([{ id: 1, code: 'free', price: 0 }, { id: 2, code: 'pro', price: 1.5 }]))
+    await h.createDatabase('target', 'sf_old_format')
+    const r = await h.cli(['restore', '-e', 'old', '--from-snapshot', copy, '--apply'], { cwd: ws })
+    expect(r.stdout + r.stderr).not.toMatch(/Rolled back/)
+    expect(await h.sqlIn('target', 'sf_old_format', `SELECT string_agg(name, ',' ORDER BY id) FROM public.features`)).toBe('one,two')
+  }, 300_000)
+
+  // A restore that rolled back restored nothing, so it is not "incomplete":
+  // it said both at once.
+  it('reports a rolled-back restore as rolled back, not as incomplete', async () => {
+    const snapshots = join(ws, '.supaforge', 'snapshots')
+    const [taken] = (await readdir(snapshots)).sort()
+    const copy = '20970101T000000Z'
+    await cp(join(snapshots, taken), join(snapshots, copy), { recursive: true })
+    const manifestFile = join(snapshots, copy, 'manifest.json')
+    await writeFile(manifestFile, JSON.stringify({ ...JSON.parse(await readFile(manifestFile, 'utf8')), timestamp: copy }))
+    const schemaFile = join(snapshots, copy, 'schema.sql')
+    await writeFile(schemaFile, (await readFile(schemaFile, 'utf8')) + `
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
+CREATE TABLE public.docs (id int PRIMARY KEY, embedding public.vector(3));
+CREATE TABLE public.orders (id int);
+`)
+    await h.createDatabase('target', 'sf_rolled_back')
+    const r = await h.cli(['restore', '-e', 'rolledback', '--from-snapshot', copy, '--apply', '--json'], { cwd: ws })
+    expect(r.code).toBe(1)
+    const result = JSON.parse(r.stdout) as { rolledBack?: unknown[]; incomplete?: boolean; errors: unknown[] }
+    expect(result.errors.length).toBeGreaterThan(0)
+    expect(result.rolledBack?.length).toBeGreaterThan(0)
+    expect(result.incomplete).toBeUndefined()
+  }, 300_000)
 
   // A snapshot needing an extension this server does not ship. Everything
   // that needs it used to roll the whole restore back with it.

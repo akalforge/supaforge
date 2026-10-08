@@ -98,7 +98,10 @@ export class PgHarness {
     this.keep = opts.keep ?? false;
     this.readyTimeoutSec = opts.readyTimeoutSec ?? 60;
     this.verbose = opts.verbose ?? false;
-    this.cliEntryOverride = opts.cliEntry;
+    // SUPAFORGE_E2E_CLI points the e2e suites at an installed package's
+    // bin/run.js instead of this checkout's — how scripts/test-release-candidates.sh
+    // tests the packed artifact a release would publish.
+    this.cliEntryOverride = opts.cliEntry ?? (process.env.SUPAFORGE_E2E_CLI || undefined);
     this.runId = `sf-${process.pid}-${Math.random().toString(36).slice(2, 7)}`;
   }
 

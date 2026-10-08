@@ -124,7 +124,7 @@ export default class Clone extends BaseCommand {
       }
 
       if (flags.json) {
-        this.log(JSON.stringify(branches, null, 2))
+        this.json(branches)
         return
       }
 
@@ -247,6 +247,11 @@ export default class Clone extends BaseCommand {
     const report = await pre.run()
 
     if (!flags.apply) {
+      if (flags.json) {
+        this.json({ dryRun: true, passed: report.passed, localDb: localDbName })
+        if (!report.passed) this.exit(1)
+        return
+      }
       if (report.passed) {
         this.log(`    Steps that will be performed:`)
         this.log('      1. Create local database via pg_dump | pg_restore')
@@ -266,6 +271,8 @@ export default class Clone extends BaseCommand {
 
     // Execute clone
     this.log(`\n  ${bold(`Cloning "${envName}" to local database "${localDbName}"...`)}\n`)
+    // The transfer meter, like every other line here, stays off stdout under --json.
+    const progressOut = flags.json ? process.stderr : process.stdout
 
     this.log('    [1/4] Creating local database...')
     let cloned: CloneResult
@@ -280,10 +287,10 @@ export default class Clone extends BaseCommand {
         onProgress: (p) => {
           const mb = (p.bytesTransferred / 1024 / 1024).toFixed(1)
           const sec = Math.round(p.elapsedMs / 1000)
-          process.stdout.write(`\r      ${dim(`pg_dump → pg_restore: ${mb} MB transferred (${sec}s)`)}    `)
+          progressOut.write(`\r      ${dim(`pg_dump → pg_restore: ${mb} MB transferred (${sec}s)`)}    `)
         },
       })
-      process.stdout.write('\n')
+      progressOut.write('\n')
       this.log(`      ${ok('✓')} Database created: ${bold(localDbName)}`)
       if (cloned.extensionsInstalled.length > 0) {
         this.log(`      ${dim(`Installed first, in the schema the source keeps them in: ${cloned.extensionsInstalled.join(', ')}`)}`)
@@ -291,7 +298,7 @@ export default class Clone extends BaseCommand {
       for (const line of formatUnavailable(cloned.unavailable)) this.log(line)
       for (const line of formatRestoreFailures(cloned.failures)) this.log(line)
     } catch (err) {
-      process.stdout.write('\n')
+      progressOut.write('\n')
       const msg = errMsg(err)
       this.log(`      ${warn('✗')} Failed: ${msg}`)
       this.error('Clone aborted at step 1/4.', { exit: 1 })
@@ -354,10 +361,10 @@ export default class Clone extends BaseCommand {
 
     const missing = cloned.failures.length
     if (flags.json) {
-      this.log(JSON.stringify({
+      this.json({
         snapshot: snapshot.manifest, config: newConfig,
         restoreFailures: cloned.failures, unavailable: cloned.unavailable,
-      }, null, 2))
+      })
       if (missing > 0) this.exit(1)
       return
     }

@@ -46,7 +46,7 @@ export default class Report extends BaseCommand {
     const entries = all.slice(-flags.last)
 
     if (flags.json) {
-      this.log(JSON.stringify(entries, null, 2))
+      this.json(entries)
       return
     }
 

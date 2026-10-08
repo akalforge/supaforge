@@ -5,7 +5,6 @@ import { promisify } from 'node:util'
 import type { QueryFn } from './db'
 import { pgQuery } from './db'
 import { quoteIdent, quoteLiteral, quoteName } from './utils/sql'
-import { normalizeRoles } from './utils/strings'
 import type { EnvironmentConfig, SupaForgeConfig, SnapshotManifest, SnapshotLayerInfo } from './types/config'
 import { DEFAULT_IGNORE_SCHEMAS, RELATION_NOT_FOUND } from './defaults'
 import { introspectSchema } from './schema-introspect'
@@ -445,12 +444,7 @@ async function captureData(
 
   for (const table of tables) {
     try {
-      // Rendered by the server, not by the driver: a bigint or numeric past
-      // 2^53 kept its digits, a timestamp its zone, a bytea its bytes — each
-      // as the text restore hands back to json_populate_recordset.
-      const [{ rows }] = await queryFn(dbUrl, `SELECT jsonb_pretty(coalesce(jsonb_agg(to_jsonb(t)), '[]'::jsonb)) AS rows
-        FROM (SELECT * FROM ${quoteIdent(table)} ORDER BY 1) t`) as unknown as Array<{ rows: string }>
-      await writeFile(join(dataDir, `${table}.json`), rows + '\n')
+      await writeFile(join(dataDir, `${table}.json`), await capturedRows(dbUrl, table, queryFn) + '\n')
       captured++
     } catch (err) {
       errors.push(`${table}: ${errMsg(err)}`)
@@ -465,6 +459,26 @@ async function captureData(
   }
 }
 
+
+/**
+ * A table's rows, each column as PostgreSQL's own text for it — the text its
+ * input function reads back exactly, as pg_dump relies on. A bigint past 2^53,
+ * a long numeric, a timestamp's zone, bytea and arrays come back as they were;
+ * so does a json value's text, spacing and duplicate keys included, and a JSON
+ * null stays distinct from an SQL NULL. Captured as JSON values instead, json
+ * was re-rendered and a JSON null read back as NULL.
+ */
+async function capturedRows(dbUrl: string, table: string, queryFn: QueryFn): Promise<string> {
+  const columns = (await queryFn(dbUrl, `SELECT attname AS name FROM pg_attribute
+    WHERE attrelid = ${quoteLiteral(quoteIdent(table))}::regclass AND attnum > 0 AND NOT attisdropped ORDER BY attnum`) as unknown as Array<{ name: string }>)
+    .map(c => c.name)
+  const keys = columns.map(quoteLiteral).join(', ')
+  const values = columns.map(c => `t.${quoteName(c)}::text`).join(', ')
+  const [{ rows }] = await queryFn(dbUrl, `SELECT jsonb_pretty(jsonb_build_object('format', 'text', 'rows',
+      coalesce(jsonb_agg(json_object(ARRAY[${keys}]::text[], ARRAY[${values}]::text[])::jsonb), '[]'::jsonb))) AS rows
+    FROM (SELECT * FROM ${quoteIdent(table)} ORDER BY 1) t`) as unknown as Array<{ rows: string }>
+  return rows
+}
 
 async function captureWebhooks(
   dir: string,
@@ -539,7 +553,7 @@ async function captureRealtime(
     for (const row of rows) {
       const tables = byPublication.get(row.pubname) ?? []
       if (row.schemaname && row.tablename) {
-        tables.push(`${quoteIdent(row.schemaname)}.${quoteIdent(row.tablename)}`)
+        tables.push(`${quoteName(row.schemaname)}.${quoteName(row.tablename)}`)
       }
       byPublication.set(row.pubname, tables)
     }
@@ -549,11 +563,11 @@ async function captureRealtime(
       statements.push(`-- Publication: ${pubname}`)
       statements.push(`DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_publication WHERE pubname = ${quoteLiteral(pubname)}) THEN
-    EXECUTE ${quoteLiteral(`CREATE PUBLICATION ${quoteIdent(pubname)}`)};
+    EXECUTE ${quoteLiteral(`CREATE PUBLICATION ${quoteName(pubname)}`)};
   END IF;
 END $$;`)
       for (const table of tables) {
-        statements.push(`ALTER PUBLICATION ${quoteIdent(pubname)} ADD TABLE ${table};`)
+        statements.push(`ALTER PUBLICATION ${quoteName(pubname)} ADD TABLE ${table};`)
       }
     }
 
@@ -669,12 +683,22 @@ async function captureRoleGrants(
       column_name: string | null; privilege_type: string; is_grantable: boolean
     }>
 
-    const statements = rows.map(row =>
-      `GRANT ${row.privilege_type}`
-      + (row.column_name ? ` (${quoteIdent(row.column_name)})` : '')
-      + ` ON ${quoteIdent(row.table_schema)}.${quoteIdent(row.table_name)}`
+    // One statement per role, object and grant option, listing the
+    // privileges: one per privilege made a restore that skipped a relation
+    // list it once for every privilege of every role. MAINTAIN, a PostgreSQL
+    // 17 privilege, stays on its own, so an older server skips only it rather
+    // than rejecting every privilege granted alongside.
+    const grouped = new Map<string, typeof rows>()
+    for (const row of rows) {
+      const key = JSON.stringify([row.grantee, row.table_schema, row.table_name, row.column_name, Boolean(row.is_grantable),
+        row.privilege_type === 'MAINTAIN'])
+      grouped.set(key, [...(grouped.get(key) ?? []), row])
+    }
+    const statements = [...grouped.values()].map(([row, ...rest]) =>
+      `GRANT ${[row, ...rest].map(r => r.privilege_type + (r.column_name ? ` (${quoteName(r.column_name)})` : '')).join(', ')}`
+      + ` ON ${quoteName(row.table_schema)}.${quoteName(row.table_name)}`
       // PUBLIC is a keyword; quoted, it names a role that does not exist.
-      + ` TO ${row.grantee === 'PUBLIC' ? 'PUBLIC' : quoteIdent(row.grantee)}`
+      + ` TO ${row.grantee === 'PUBLIC' ? 'PUBLIC' : quoteName(row.grantee)}`
       + (row.is_grantable ? ' WITH GRANT OPTION' : '')
       + ';')
 
@@ -702,7 +726,7 @@ async function captureExtensions(
       ORDER BY extname
     `)
     const statements = (rows as unknown as { extname: string; extversion: string; schema: string }[]).map(ext => {
-      return `CREATE EXTENSION IF NOT EXISTS "${ext.extname}" WITH SCHEMA "${ext.schema}";`
+      return `CREATE EXTENSION IF NOT EXISTS ${quoteName(ext.extname)} WITH SCHEMA ${quoteName(ext.schema)};`
     })
     const output = statements.length > 0
       ? `-- SupaForge Extensions Snapshot\n-- ${rows.length} extensions\n\n${statements.join('\n')}\n`
@@ -853,27 +877,14 @@ interface RlsRow {
   comment?: string | null
 }
 
+/**
+ * Dropped first so a snapshot can be restored twice: without it a second
+ * restore fails with `policy "…" already exists` and the layers after it
+ * never run (issue #80). Written by the shared builders, which set the
+ * comment after the policy.
+ */
 function generateCreatePolicySql(p: RlsRow): string {
-  const roles = normalizeRoles(p.roles).join(', ')
-  const lines = [
-    // Dropped first so a snapshot can be restored twice. Without it a second
-    // restore fails with `policy "…" already exists` and the layers after it
-    // never run (issue #80). The RLS check's own fix SQL already pairs the two
-    // this way.
-    `DROP POLICY IF EXISTS "${p.policyname}" ON "${p.schemaname}"."${p.tablename}";`,
-    `CREATE POLICY "${p.policyname}"`,
-    `  ON "${p.schemaname}"."${p.tablename}"`,
-    `  AS ${p.permissive}`,
-    `  FOR ${p.cmd}`,
-    `  TO ${roles}`,
-  ]
-  if (p.qual) lines.push(`  USING (${p.qual})`)
-  if (p.with_check) lines.push(`  WITH CHECK (${p.with_check})`)
-  lines.push(';')
-  if (p.comment) {
-    lines.push(`COMMENT ON POLICY "${p.policyname}" ON "${p.schemaname}"."${p.tablename}" IS ${quoteLiteral(p.comment)};`)
-  }
-  return lines.join('\n')
+  return `${dropPolicySql(p.schemaname, p)}\n${createPolicySql(p.schemaname, p)}`
 }
 
 interface CronRow {

@@ -592,6 +592,14 @@ describe('sqlToIssues — programmable objects', () => {
     expect(issues[0].id).toBe('schema-drop-trigger-1')
   })
 
+  it('merges a view dropped and recreated into one modified view', () => {
+    const issues = sqlToIssues({
+      up: 'DROP VIEW IF EXISTS "vt_v";\nCREATE VIEW "vt_v" AS SELECT vt.id FROM vt;',
+      down: '',
+    }, 'schema')
+    expect(issues.map(i => [i.title, i.severity])).toEqual([['View modified: public.vt_v', 'warning']])
+  })
+
   it('merges a trigger dropped and recreated into one modified trigger', () => {
     const issues = sqlToIssues({
       up: [
@@ -1497,5 +1505,74 @@ describe('a comment on an object the target lacks goes with its creation', () =>
       { id: 'c', check: 'schema', severity: 'warning', title: 'Comment changed: public.t.own (policy)', description: '', sql: { up: `COMMENT ON POLICY own ON public.t IS 'x';`, down: '' } },
     ])
     expect(policy.sql?.up).toBe(`CREATE POLICY own ON t;\nCOMMENT ON POLICY own ON public.t IS 'x';`)
+  })
+})
+
+// A name holding a double quote is written with it doubled. Read as two
+// names, the title was "Policy missing: public.Odd .say".
+describe('titles read names with doubled quotes', () => {
+  it.each([
+    ['CREATE POLICY "say ""hi"" there" ON "Odd ""t""" FOR SELECT USING (true);', 'Policy missing: public.Odd "t".say "hi" there'],
+    ['CREATE TABLE "Odd ""t""" (id int);', 'Table missing: public.Odd "t"'],
+    ['DROP VIEW IF EXISTS "v ""w""";', 'Extra view: public.v "w"'],
+  ])('%s', (sql, title) => {
+    expect(summariseStatement(sql, 'schema')).toBe(title)
+  })
+})
+
+describe('folding into the finding that creates an object', () => {
+  const issue = (id: string, title: string, up: string) =>
+    ({ id, check: 'schema' as const, severity: 'warning' as const, title, description: '', sql: { up, down: '' } })
+
+  // dbdiff names a function by its argument types in a comment and by its
+  // full parameter list in the create, so the two never matched.
+  it('folds a comment on a new function whose signature is written differently', () => {
+    const issues = foldCommentsIntoCreates([
+      issue('f', "Function missing: public.f2(p_x integer, p_y text DEFAULT 'a')", 'CREATE FUNCTION public.f2(p_x integer, p_y text DEFAULT \'a\') RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;'),
+      issue('c', 'Comment changed: public.f2(integer,pg_catalog.text) (function)', "COMMENT ON FUNCTION public.f2(integer,pg_catalog.text) IS 'f2';"),
+    ])
+    expect(issues.map(i => i.id)).toEqual(['f'])
+    expect(issues[0].sql?.up).toMatch(/\nCOMMENT ON FUNCTION public\.f2\(integer,pg_catalog\.text\) IS 'f2';$/)
+  })
+
+  it('does not guess between overloads of one name', () => {
+    const issues = foldCommentsIntoCreates([
+      issue('a', 'Function missing: public.f(a integer)', 'CREATE FUNCTION public.f(a integer) RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;'),
+      issue('b', 'Function missing: public.f(a text)', 'CREATE FUNCTION public.f(a text) RETURNS int LANGUAGE sql AS $$ SELECT 1 $$;'),
+      issue('c', 'Comment changed: public.f(integer) (function)', "COMMENT ON FUNCTION public.f(integer) IS 'f';"),
+    ])
+    expect(issues.map(i => i.id)).toEqual(['a', 'b', 'c'])
+  })
+
+  // A table that does not exist yet had its RLS flags as a separate
+  // "Table altered" finding.
+  it('folds a new table\'s row level security into its creation', () => {
+    const issues = foldCommentsIntoCreates([
+      issue('t', 'Table missing: public.notes', 'CREATE TABLE public.notes (id int);'),
+      issue('r', 'Table altered: public.notes', 'ALTER TABLE "notes" ENABLE ROW LEVEL SECURITY;\nALTER TABLE "notes" NO FORCE ROW LEVEL SECURITY;'),
+      issue('k', 'Table altered: public.kept', 'ALTER TABLE "kept" ENABLE ROW LEVEL SECURITY;'),
+    ])
+    expect(issues.map(i => i.id)).toEqual(['t', 'k'])
+    expect(issues[0].sql?.up).toBe('CREATE TABLE public.notes (id int);\nALTER TABLE "notes" ENABLE ROW LEVEL SECURITY;\nALTER TABLE "notes" NO FORCE ROW LEVEL SECURITY;')
+  })
+})
+
+// A view, function, policy or trigger dbdiff recreates gets its comments set
+// again. Apart, those read as "Comment changed" on a comment that had not.
+describe('a recreated object\'s comments go with it', () => {
+  const units = (...parts: Array<[string, string, string]>) =>
+    parts.map(([kind, object, sql]) => `-- dbdiff:unit ${kind} ${object}\n${sql}\n-- dbdiff:end`).join('\n')
+
+  it('folds them into the modified finding', () => {
+    const issues = sqlToIssues({
+      up: units(
+        ['AlterView', 'vt_v', 'DROP VIEW IF EXISTS "vt_v";\nCREATE VIEW "vt_v" AS SELECT 1 AS id;'],
+        ['AlterComment', 'vt_v', `COMMENT ON VIEW public.vt_v IS 'v';`],
+        ['AlterComment', 'vt_v.id', `COMMENT ON COLUMN public.vt_v.id IS 'vn';`],
+      ),
+      down: '',
+    }, 'schema')
+    expect(issues.map(i => i.title)).toEqual(['View modified: public.vt_v'])
+    expect(issues[0].sql?.up).toMatch(/CREATE VIEW[\s\S]*COMMENT ON VIEW public\.vt_v IS 'v';\nCOMMENT ON COLUMN public\.vt_v\.id IS 'vn';$/)
   })
 })

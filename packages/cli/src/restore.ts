@@ -14,7 +14,7 @@ import { errMsg } from './utils/error'
 import { DEFAULT_IGNORE_SCHEMAS, SUPABASE_PLATFORM_SCHEMAS } from './defaults'
 import { dropUnsupportedSetStatements, knownParameters } from './prove'
 import { splitSqlStatements, isCommentOnly, isPsqlMetaCommand, stripPsqlMetaCommands } from './utils/sql-split'
-import { quoteIdent, quoteLiteral } from './utils/sql.js'
+import { quoteIdent, quoteLiteral, quoteName } from './utils/sql.js'
 import { sqlSkeleton, statementSubject, rolesNamedBy } from './sql-deps.js'
 import { ABSENT_ON_TARGET, EXTENSION_UNAVAILABLE } from './pg-errors.js'
 import { dataTablesInOrder, restoreBuckets, restoreTableRows } from './restore-data.js'
@@ -288,6 +288,8 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
         // would be the most misleading thing this command could say.
         result.rolledBack = result.applied
         result.applied = []
+        // Nothing was restored, so nothing was left out of a restore either.
+        delete result.incomplete
       } else {
         await client.query('COMMIT')
       }
@@ -297,6 +299,7 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
       await client.query('ROLLBACK').catch(() => undefined)
       result.rolledBack = result.applied
       result.applied = []
+      delete result.incomplete
     }
     // A RestoreAborted carries no message of its own: the statement that failed
     // has already been recorded, and adding a second entry for the same
@@ -812,7 +815,14 @@ export function tolerableFailure(
   // indexes, keys and rows. Each is left out and named, and the rest is
   // restored — one missing extension rolled back everything before.
   if (missing.size > 0) {
-    return `${errMsg(err)}, as this target lacks ${[...missing].join(', ')}`
+    // The ones the error is about, when it names any: every missing extension
+    // listed against every failure said nothing about which one was needed.
+    const message = errMsg(err)
+    const named = [...missing].filter(what => {
+      const name = /^the (.+) (?:extension|schema)$/.exec(what)?.[1]
+      return name !== undefined && new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(message)
+    })
+    return `${message}, as this target lacks ${(named.length > 0 ? named : [...missing]).join(', ')}`
   }
   return undefined
 }
@@ -843,7 +853,7 @@ async function applyStatement(
     // `CREATE EXTENSION ... WITH SCHEMA "extensions"` needs that schema to
     // exist, and on plain PostgreSQL it does not (issue #95).
     const needed = extensionTargetSchema(sql)
-    if (needed) await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteIdent(needed)}`)
+    if (needed) await client.query(`CREATE SCHEMA IF NOT EXISTS ${quoteName(needed)}`)
 
     // `GRANT … TO anon` and `CREATE POLICY … TO service_role` need the role to
     // exist, and on plain PostgreSQL none of Supabase's Data API roles do.
@@ -934,7 +944,7 @@ export function extensionTargetSchema(sql: string): string | undefined {
 export function createRoleIfMissing(role: string): string {
   return `DO $$ BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = ${quoteLiteral(role)}) THEN
-    CREATE ROLE ${quoteIdent(role)} NOLOGIN;
+    CREATE ROLE ${quoteName(role)} NOLOGIN;
   END IF;
 END $$;`
 }
@@ -967,7 +977,7 @@ export function conditionalPublicationMembership(sql: string): string {
       AND schemaname = ${quoteLiteral(schema)}
       AND tablename = ${quoteLiteral(name)}
   ) THEN
-    EXECUTE ${quoteLiteral(`ALTER PUBLICATION ${quoteIdent(publication.replace(/"/g, ''))} ADD TABLE ${quoteIdent(schema)}.${quoteIdent(name)}`)};
+    EXECUTE ${quoteLiteral(`ALTER PUBLICATION ${quoteIdent(publication.replace(/"/g, ''))} ADD TABLE ${quoteName(schema)}.${quoteName(name)}`)};
   END IF;
 END $$;`
 }

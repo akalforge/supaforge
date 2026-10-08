@@ -482,3 +482,60 @@ describe('captureSnapshot: a policy keeps its comment', () => {
     expect(sql.indexOf('COMMENT ON POLICY')).toBeGreaterThan(sql.indexOf('CREATE POLICY'))
   })
 })
+
+// One GRANT per privilege made a restore that skipped a relation list eight
+// lines per role for it.
+describe('captureSnapshot: grants are captured one statement per role and object', () => {
+  let dir: string
+  beforeEach(async () => { dir = await mkdtemp(join(tmpdir(), 'supaforge-snap-')) })
+  afterEach(async () => { await rm(dir, { recursive: true, force: true }) })
+
+  it('groups a role\'s privileges on a table, and keeps grant options and columns apart', async () => {
+    const g = (privilege_type: string, extra: Record<string, unknown> = {}) =>
+      ({ grantee: 'anon', table_schema: 'public', table_name: 'items', column_name: null, privilege_type, is_grantable: false, ...extra })
+    const rows = [
+      g('INSERT'), g('SELECT'), g('UPDATE'),
+      g('DELETE', { is_grantable: true }),
+      g('UPDATE', { column_name: 'name' }),
+      g('SELECT', { grantee: 'PUBLIC' }),
+    ]
+    const queryFn = (async (_url: string, sql: string) => sql.includes('aclexplode') ? rows : []) as unknown as QueryFn
+    const result = await captureSnapshot({
+      envName: 'prod',
+      env: { dbUrl: 'postgres://example' },
+      config: { environments: { prod: { dbUrl: 'postgres://example' } } } as never,
+      outputDir: dir,
+      queryFn,
+      fetchFn: (async () => new Response('[]', { status: 200 })) as never,
+    })
+    const grants = (await readFile(join(result.dir, 'roles.sql'), 'utf8')).split('\n').filter(l => l.startsWith('GRANT'))
+    expect(grants.sort()).toEqual([
+      'GRANT DELETE ON "public"."items" TO "anon" WITH GRANT OPTION;',
+      'GRANT INSERT, SELECT, UPDATE ON "public"."items" TO "anon";',
+      'GRANT SELECT ON "public"."items" TO PUBLIC;',
+      'GRANT UPDATE ("name") ON "public"."items" TO "anon";',
+    ])
+  })
+
+  // MAINTAIN is a PostgreSQL 17 privilege. Grouped with the others, a 15
+  // target rejected the whole GRANT and the restore rolled back; on its own,
+  // only it is skipped there.
+  it('keeps MAINTAIN in a GRANT of its own', async () => {
+    const rows = ['DELETE', 'MAINTAIN', 'SELECT'].map(privilege_type =>
+      ({ grantee: 'anon', table_schema: 'public', table_name: 'items', column_name: null, privilege_type, is_grantable: false }))
+    const queryFn = (async (_url: string, sql: string) => sql.includes('aclexplode') ? rows : []) as unknown as QueryFn
+    const result = await captureSnapshot({
+      envName: 'prod',
+      env: { dbUrl: 'postgres://example' },
+      config: { environments: { prod: { dbUrl: 'postgres://example' } } } as never,
+      outputDir: dir,
+      queryFn,
+      fetchFn: (async () => new Response('[]', { status: 200 })) as never,
+    })
+    const grants = (await readFile(join(result.dir, 'roles.sql'), 'utf8')).split('\n').filter(l => l.startsWith('GRANT'))
+    expect(grants.sort()).toEqual([
+      'GRANT DELETE, SELECT ON "public"."items" TO "anon";',
+      'GRANT MAINTAIN ON "public"."items" TO "anon";',
+    ])
+  })
+})

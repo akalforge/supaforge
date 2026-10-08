@@ -2,6 +2,7 @@ import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
 import { Check, type CheckContext } from './base'
+import { quoteLiteral, quoteName } from '../utils/sql.js'
 
 interface PgExtension {
   name: string
@@ -54,8 +55,8 @@ export function diffExtensions(source: PgExtension[], target: PgExtension[]): Dr
         description: `Extension "${name}" (v${ext.version}) is enabled in source (schema: ${ext.schema}) but not in target.`,
         sourceValue: ext,
         sql: {
-          up: `CREATE EXTENSION IF NOT EXISTS "${name}"${ext.schema !== 'public' ? ` SCHEMA "${ext.schema}"` : ''};`,
-          down: `DROP EXTENSION IF EXISTS "${name}";`,
+          up: `CREATE EXTENSION IF NOT EXISTS ${quoteName(name)}${ext.schema !== 'public' ? ` SCHEMA ${quoteName(ext.schema)}` : ''};`,
+          down: `DROP EXTENSION IF EXISTS ${quoteName(name)};`,
         },
       })
     }
@@ -90,8 +91,8 @@ export function diffExtensions(source: PgExtension[], target: PgExtension[]): Dr
         sourceValue: srcExt,
         targetValue: tgtExt,
         sql: {
-          up: `ALTER EXTENSION "${name}" UPDATE TO '${srcExt.version}';`,
-          down: `ALTER EXTENSION "${name}" UPDATE TO '${tgtExt.version}';`,
+          up: `ALTER EXTENSION ${quoteName(name)} UPDATE TO ${quoteLiteral(srcExt.version)};`,
+          down: `ALTER EXTENSION ${quoteName(name)} UPDATE TO ${quoteLiteral(tgtExt.version)};`,
         },
       })
     }

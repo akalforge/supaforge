@@ -66,14 +66,42 @@ export function matchesGlob(value: string, pattern: string): boolean {
 /**
  * Parse Postgres name[] which may arrive as a JS array or Postgres literal `{a,b}`.
  * Returns a sorted, deduplicated array of role names.
+ *
+ * An element with a space, comma or quote in it is double-quoted in the
+ * literal, with `\\` escaping a quote or backslash: `{"Admins \\"A\\"",anon}`.
+ * Split on commas, such a role kept its literal quoting and was then quoted
+ * again as a name, so the policy went to a role that did not exist.
  */
 export function normalizeRoles(roles: string[] | string): string[] {
   const arr = Array.isArray(roles) ? roles : [roles]
   return [...new Set(
     arr
-      .map(r => r.replace(/^\{|\}$/g, ''))
-      .flatMap(r => r.split(','))
+      .flatMap(r => /^\{.*\}$/s.test(r) ? arrayLiteralElements(r) : [r])
       .map(r => r.trim())
       .filter(Boolean),
   )].sort()
+}
+
+/** The elements of a one-dimensional PostgreSQL array literal. */
+function arrayLiteralElements(literal: string): string[] {
+  const inner = literal.slice(1, -1)
+  const out: string[] = []
+  let i = 0
+  while (i < inner.length) {
+    let value = ''
+    if (inner[i] === '"') {
+      for (i++; i < inner.length && inner[i] !== '"'; i++) {
+        if (inner[i] === '\\') i++
+        value += inner[i]
+      }
+      i++
+    } else {
+      const end = inner.indexOf(',', i)
+      value = inner.slice(i, end === -1 ? inner.length : end)
+      i = end === -1 ? inner.length : end
+    }
+    out.push(value)
+    if (inner[i] === ',') i++
+  }
+  return out
 }

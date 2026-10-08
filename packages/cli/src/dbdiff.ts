@@ -560,8 +560,13 @@ export function sqlToIssues(
 
 /** What a comment title names: `public.orders.total (column)` → the name and kind. */
 const COMMENT_TITLE = /^(?:Comment changed|Comment missing): (?:schema (.+)|(.+) \(([a-z ]+)\))$/
-/** A finding that creates an object: `Table missing: public.orders`. */
-const CREATE_TITLE = /^(Schema|Table|View|Function|Procedure|Type|Domain|Sequence|Index|Policy|Trigger|Extension) missing: (.+)$/
+/**
+ * A finding that creates an object, `Table missing: public.orders`, or
+ * recreates one, `View modified: public.v`: dbdiff sets a recreated object's
+ * comments again, and apart those read as "Comment changed" on a comment that
+ * had not.
+ */
+const CREATE_TITLE = /^(Schema|Table|View|Function|Procedure|Type|Domain|Sequence|Index|Policy|Trigger|Extension) (?:missing|modified): (.+)$/
 /** Kinds named after the table (or domain) they belong to. */
 const ON_A_TABLE = new Set(['column', 'constraint', 'trigger', 'policy', 'rule'])
 
@@ -577,26 +582,64 @@ const ON_A_TABLE = new Set(['column', 'constraint', 'trigger', 'policy', 'rule']
  */
 export function foldCommentsIntoCreates(issues: DriftIssue[]): DriftIssue[] {
   const creates = new Map<string, DriftIssue>()
+  /** New routines by name alone, for a comment whose signature is spelled differently. */
+  const routines = new Map<string, DriftIssue[]>()
   for (const issue of issues) {
     const m = CREATE_TITLE.exec(issue.title)
-    if (m) creates.set(`${m[1] === 'Schema' ? 'schema' : 'object'}:${m[2]}`, issue)
+    if (!m) continue
+    creates.set(`${m[1] === 'Schema' ? 'schema' : 'object'}:${m[2]}`, issue)
+    if (m[1] === 'Function' || m[1] === 'Procedure') {
+      const base = routineBaseName(m[2])
+      routines.set(base, [...(routines.get(base) ?? []), issue])
+    }
   }
 
   return issues.filter(issue => {
-    const m = COMMENT_TITLE.exec(issue.title)
     const up = issue.sql?.up
-    if (!m || !up || splitStatements(up).length !== 1) return true
-
-    const [, schema, name, kind] = m
-    const candidates = schema !== undefined
-      ? [`schema:${schema}`]
-      : [`object:${name}`, ...(ON_A_TABLE.has(kind) ? [`object:${name.slice(0, name.lastIndexOf('.'))}`] : [])]
-    const owner = candidates.map(c => creates.get(c)).find(Boolean)
+    if (!up) return true
+    const owner = commentOwner(issue, up, creates, routines) ?? rlsFlagsOwner(issue, up, creates)
     if (!owner?.sql) return true
 
     owner.sql = { ...owner.sql, up: `${owner.sql.up.trimEnd()}\n${up.trim()}` }
     return false
   })
+}
+
+/**
+ * The finding creating the object a comment is on. dbdiff names a routine by
+ * its argument types in a comment (`f2(integer,pg_catalog.text)`) and by its
+ * parameter list in the create (`f2(p_x integer, p_y text DEFAULT 'a')`), so a
+ * routine is matched by name when only one new routine has it.
+ */
+function commentOwner(
+  issue: DriftIssue, up: string, creates: Map<string, DriftIssue>, routines: Map<string, DriftIssue[]>,
+): DriftIssue | undefined {
+  const m = COMMENT_TITLE.exec(issue.title)
+  if (!m || splitStatements(up).length !== 1) return undefined
+  const [, schema, name, kind] = m
+  const candidates = schema !== undefined
+    ? [`schema:${schema}`]
+    : [`object:${name}`, ...(ON_A_TABLE.has(kind) ? [`object:${name.slice(0, name.lastIndexOf('.'))}`] : [])]
+  const exact = candidates.map(c => creates.get(c)).find(Boolean)
+  if (exact || (kind !== 'function' && kind !== 'procedure')) return exact
+  const sameName = routines.get(routineBaseName(name)) ?? []
+  return sameName.length === 1 ? sameName[0] : undefined
+}
+
+/** A routine's name without its argument list. */
+const routineBaseName = (name: string) => name.includes('(') ? name.slice(0, name.indexOf('(')) : name
+
+/** `ALTER TABLE t ENABLE ROW LEVEL SECURITY` and the like, the whole of a finding. */
+const RLS_FLAG = /^\s*ALTER\s+TABLE\s+(?:ONLY\s+)?\S+\s+(?:ENABLE|DISABLE|(?:NO\s+)?FORCE)\s+ROW\s+LEVEL\s+SECURITY\s*;?\s*$/i
+
+/**
+ * The finding creating a table whose RLS flags a finding sets: a table that
+ * does not exist yet had them as a separate "Table altered".
+ */
+function rlsFlagsOwner(issue: DriftIssue, up: string, creates: Map<string, DriftIssue>): DriftIssue | undefined {
+  const m = /^Table altered: (.+)$/.exec(issue.title)
+  if (!m || !splitStatements(up).every(sql => RLS_FLAG.test(sql))) return undefined
+  return creates.get(`object:${m[1]}`)
 }
 
 function unfoldedIssues(
@@ -924,7 +967,7 @@ interface MergedStatement {
  * same way — an enum whose values changed arrives as `DROP TYPE` + `CREATE
  * TYPE` — and needed the same treatment for the same two reasons (issue #81).
  */
-type ReplaceableKind = 'routine' | 'type' | 'sequence' | 'policy' | 'trigger'
+type ReplaceableKind = 'routine' | 'type' | 'sequence' | 'policy' | 'trigger' | 'view'
 
 /** How each kind's identifier is read out of a statement. */
 const REPLACEABLE_NAME: Record<ReplaceableKind, (sql: string) => string> = {
@@ -935,6 +978,7 @@ const REPLACEABLE_NAME: Record<ReplaceableKind, (sql: string) => string> = {
   policy: (sql) => policyLabel(sql),
   // `schema.table.trigger`, for the same reason.
   trigger: (sql) => triggerLabel(sql),
+  view: (sql) => extractQualifiedName(sql, AFTER.view),
 }
 
 /** How a merged pair of each kind is reported. */
@@ -944,6 +988,7 @@ const REPLACEABLE_REPORT: Record<ReplaceableKind, { idPart: string; label: strin
   sequence: { idPart: 'sequence', label: 'Sequence modified', what: 'Sequence definition' },
   policy:   { idPart: 'policy',   label: 'Policy modified',   what: 'Policy definition' },
   trigger:  { idPart: 'trigger',  label: 'Trigger modified',  what: 'Trigger definition' },
+  view:     { idPart: 'view',     label: 'View modified',     what: 'View definition' },
 }
 
 /** Whether a statement drops or creates a replaceable object, and of which kind. */
@@ -957,6 +1002,10 @@ function replaceablePart(sql: string): { kind: ReplaceableKind; drop: boolean } 
   // A changed trigger is dropped and recreated the same way, and read apart
   // was a critical "Extra trigger" for a trigger that is still wanted.
   if (/^\s*DROP\s+TRIGGER\b/i.test(sql)) return { kind: 'trigger', drop: true }
+  // A changed view too: dbdiff can only replace one, and a PostgreSQL 15
+  // and 16+ pair printed every view differently.
+  if (/^\s*DROP\s+(?:MATERIALIZED\s+)?VIEW\b/i.test(sql)) return { kind: 'view', drop: true }
+  if (/^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:MATERIALIZED\s+)?VIEW\b/i.test(sql)) return { kind: 'view', drop: false }
   if (/^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:CONSTRAINT\s+)?TRIGGER\b/i.test(sql)) return { kind: 'trigger', drop: false }
   switch (classifyStatement(sql)) {
     case CREATE_FUNCTION:   return { kind: 'routine',  drop: false }
@@ -1625,9 +1674,10 @@ export function extractQualifiedName(sql: string, head: RegExp): string {
   const parts: string[] = []
 
   for (let depth = 0; depth < 2; depth++) {
-    const ident = /^(?:"([^"]*)"|([\w$]+))/.exec(rest)
+    // A quoted name doubles any quote inside it: "say ""hi"" there".
+    const ident = /^(?:"((?:[^"]|"")*)"|([\w$]+))/.exec(rest)
     if (!ident) break
-    parts.push(ident[1] ?? ident[2])
+    parts.push(ident[1] !== undefined ? ident[1].replace(/""/g, '"') : ident[2])
     rest = rest.slice(ident[0].length)
 
     const dot = /^\s*\.\s*/.exec(rest)

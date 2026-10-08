@@ -94,7 +94,7 @@ export default class Snapshot extends BaseCommand {
         return
       }
       if (flags.json) {
-        this.log(JSON.stringify(snapshots.map(s => s.manifest), null, 2))
+        this.json(snapshots.map(s => s.manifest))
         return
       }
       this.log(`\n${bold(`${snapshots.length} snapshot(s):`)}\n`)
@@ -136,7 +136,7 @@ export default class Snapshot extends BaseCommand {
       const result = await pruneSnapshots(keepCount)
 
       if (flags.json) {
-        this.log(JSON.stringify(result, null, 2))
+        this.json(result)
         return
       }
 
@@ -164,7 +164,7 @@ export default class Snapshot extends BaseCommand {
     // Like clone / diff / restore, snapshot is a preview unless --apply is given.
     if (!flags.apply) {
       if (flags.json) {
-        this.log(JSON.stringify({ dryRun: true, environment: envName, migration: flags.migration }, null, 2))
+        this.json({ dryRun: true, environment: envName, migration: flags.migration })
         return
       }
       this.log(`\n  ${bold('Snapshot preview')} ${dim('(dry-run)')}\n`)
@@ -195,12 +195,12 @@ export default class Snapshot extends BaseCommand {
       })
 
       if (flags.json) {
-        this.log(JSON.stringify({
+        this.json({
           isBaseline: result.isBaseline,
           snapshot: result.snapshot.manifest,
           migration: result.migration,
           migrationFile: result.migrationFile,
-        }, null, 2))
+        })
         return
       }
 
@@ -233,7 +233,7 @@ export default class Snapshot extends BaseCommand {
     const snapshot = await captureSnapshot({ envName, env, config, outputDir: flags.output })
 
     if (flags.json) {
-      this.log(JSON.stringify(snapshot.manifest, null, 2))
+      this.json(snapshot.manifest)
       return
     }
 

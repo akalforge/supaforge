@@ -332,6 +332,13 @@ npm run lint             # type-check
 | Database e2e | `npm run test:e2e` | Docker or Podman |
 | Scenarios | `npx vitest run -c vitest.scenarios.config.ts` | Docker or Podman, `pg_dump` |
 | Supabase e2e | `npm run test:e2e:supabase` | Supabase CLI |
+| Release candidates | `scripts/test-release-candidates.sh --dbdiff ../DBDiff --pg-conformance ../pg-conformance` | Podman or Docker |
+
+The release-candidates script builds DBDiff's binary and the npm packages
+from local checkouts the way a release does, installs SupaForge against them
+as a user would, and runs every suite above against that install. It tests
+changes that span the three projects together, before any of them is
+released.
 
 The scenario suite migrates every case in the
 [`@akalforge/pg-conformance`](https://www.npmjs.com/package/@akalforge/pg-conformance) corpus in both

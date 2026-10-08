@@ -182,3 +182,21 @@ describe('destructiveReason: from the parse tree', () => {
     expect(destructiveReason('DROP TABLE x; THIS IS NOT SQL')).toMatch(/drops a table/)
   })
 })
+
+describe('tolerableFailure names what the failure needs', () => {
+  const plain = new Set(['public', 'pg_catalog', 'information_schema'])
+  // Every missing extension was listed against every failure.
+  it('names only the missing extension the error is about', () => {
+    const lacks = new Set(['the pg_cron extension', 'the pg_net extension', 'the vector extension'])
+    expect(tolerableFailure('CREATE TABLE public.docs (e extensions.vector(3));',
+      { code: '42704', message: 'type "extensions.vector" does not exist' }, plain, lacks))
+      .toBe('type "extensions.vector" does not exist, as this target lacks the vector extension')
+  })
+
+  it('names them all when the error names none of them', () => {
+    const lacks = new Set(['the pg_net extension', 'the vector extension'])
+    expect(tolerableFailure('CREATE VIEW public.v AS SELECT * FROM public.docs;',
+      { code: '42P01', message: 'relation "public.docs" does not exist' }, plain, lacks))
+      .toBe('relation "public.docs" does not exist, as this target lacks the pg_net extension, the vector extension')
+  })
+})

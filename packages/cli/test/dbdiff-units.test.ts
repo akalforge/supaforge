@@ -99,6 +99,22 @@ describe('sqlToIssues with units', () => {
 
   // A changed trigger is a DROP and a CREATE too. Read by its DROP, it was a
   // critical "Extra trigger" for a trigger both sides have.
+  // A changed view is a DROP and a CREATE: read by the DROP, a critical
+  // "Extra view" for a view both sides have.
+  it('names a replaced view or materialized view as modified', () => {
+    const issues = sqlToIssues({
+      up: units(
+        ['AlterView', 'vt_v', 'DROP VIEW IF EXISTS "vt_v";\nCREATE VIEW "vt_v" AS SELECT vt.id FROM vt;\nREVOKE ALL ON "vt_v" FROM anon;'],
+        ['AlterMatView', 'vt_m', 'DROP MATERIALIZED VIEW IF EXISTS "vt_m";\nCREATE MATERIALIZED VIEW "vt_m" AS SELECT 1;'],
+      ),
+      down: '',
+    }, 'schema')
+    expect(issues.map(i => [i.title, i.severity])).toEqual([
+      ['View modified: public.vt_v', 'warning'],
+      ['View modified: public.vt_m', 'warning'],
+    ])
+  })
+
   it('names a replaced trigger as modified, by its table', () => {
     const [issue] = sqlToIssues({
       up: units(['AlterTrigger', 'orders.note_changed', [

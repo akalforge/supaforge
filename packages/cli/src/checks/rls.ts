@@ -1,8 +1,9 @@
+import { createPolicySql, dropPolicySql } from '../utils/schema-policies.js'
+import { quoteName } from '../utils/sql.js'
 import { dropEquivalentPolicyChanges, defaultCanonicalizer } from '../utils/policy-equivalence.js'
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
-import { normalizeRoles } from '../utils/strings'
 import { Check, type CheckContext } from './base'
 
 interface RlsPolicy {
@@ -108,24 +109,9 @@ function policiesEqual(a: RlsPolicy, b: RlsPolicy): boolean {
 
 /** Parse pg name[] which may arrive as JS array or Postgres literal {a,b} */
 
-function generateCreatePolicySql(p: RlsPolicy): string {
-  const roles = normalizeRoles(p.roles).join(', ')
-  const lines = [
-    `CREATE POLICY "${p.policyname}"`,
-    `  ON "${p.schemaname}"."${p.tablename}"`,
-    `  AS ${p.permissive}`,
-    `  FOR ${p.cmd}`,
-    `  TO ${roles}`,
-  ]
-  if (p.qual) lines.push(`  USING (${p.qual})`)
-  if (p.with_check) lines.push(`  WITH CHECK (${p.with_check})`)
-  lines.push(';')
-  return lines.join('\n')
-}
-
-function generateDropPolicySql(p: RlsPolicy): string {
-  return `DROP POLICY IF EXISTS "${p.policyname}" ON "${p.schemaname}"."${p.tablename}";`
-}
+// The shared builders, so a name is quoted here as everywhere else.
+const generateCreatePolicySql = (p: RlsPolicy) => createPolicySql(p.schemaname, p)
+const generateDropPolicySql = (p: RlsPolicy) => dropPolicySql(p.schemaname, p)
 
 export function diffPolicies(source: RlsPolicy[], target: RlsPolicy[]): DriftIssue[] {
   const issues: DriftIssue[] = []
@@ -220,8 +206,8 @@ export function diffRlsStatus(
         sourceValue: src,
         targetValue: tgt,
         sql: {
-          up: `ALTER TABLE "${src.schemaname}"."${src.tablename}" ENABLE ROW LEVEL SECURITY;`,
-          down: `ALTER TABLE "${src.schemaname}"."${src.tablename}" DISABLE ROW LEVEL SECURITY;`,
+          up: `ALTER TABLE ${quoteName(src.schemaname)}.${quoteName(src.tablename)} ENABLE ROW LEVEL SECURITY;`,
+          down: `ALTER TABLE ${quoteName(src.schemaname)}.${quoteName(src.tablename)} DISABLE ROW LEVEL SECURITY;`,
         },
       })
     } else if (!src.rls_enabled && tgt.rls_enabled) {
@@ -234,8 +220,8 @@ export function diffRlsStatus(
         sourceValue: src,
         targetValue: tgt,
         sql: {
-          up: `ALTER TABLE "${src.schemaname}"."${src.tablename}" DISABLE ROW LEVEL SECURITY;`,
-          down: `ALTER TABLE "${src.schemaname}"."${src.tablename}" ENABLE ROW LEVEL SECURITY;`,
+          up: `ALTER TABLE ${quoteName(src.schemaname)}.${quoteName(src.tablename)} DISABLE ROW LEVEL SECURITY;`,
+          down: `ALTER TABLE ${quoteName(src.schemaname)}.${quoteName(src.tablename)} ENABLE ROW LEVEL SECURITY;`,
         },
       })
     }

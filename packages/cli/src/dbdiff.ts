@@ -560,8 +560,13 @@ export function sqlToIssues(
 
 /** What a comment title names: `public.orders.total (column)` → the name and kind. */
 const COMMENT_TITLE = /^(?:Comment changed|Comment missing): (?:schema (.+)|(.+) \(([a-z ]+)\))$/
-/** A finding that creates an object: `Table missing: public.orders`. */
-const CREATE_TITLE = /^(Schema|Table|View|Function|Procedure|Type|Domain|Sequence|Index|Policy|Trigger|Extension) missing: (.+)$/
+/**
+ * A finding that creates an object, `Table missing: public.orders`, or
+ * recreates one, `View modified: public.v`: dbdiff sets a recreated object's
+ * comments again, and apart those read as "Comment changed" on a comment that
+ * had not.
+ */
+const CREATE_TITLE = /^(Schema|Table|View|Function|Procedure|Type|Domain|Sequence|Index|Policy|Trigger|Extension) (?:missing|modified): (.+)$/
 /** Kinds named after the table (or domain) they belong to. */
 const ON_A_TABLE = new Set(['column', 'constraint', 'trigger', 'policy', 'rule'])
 

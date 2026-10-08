@@ -28,6 +28,9 @@ const SOURCE = `
   CREATE TABLE public.ro_items (id int PRIMARY KEY);
   REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON public.ro_items FROM anon;
   CREATE TABLE public.open_items (id int PRIMARY KEY);
+  -- Views are tables to privileges, and get the same defaults.
+  CREATE VIEW public.private_v AS SELECT id FROM public.private_notes;
+  REVOKE ALL ON public.private_v FROM anon, authenticated;
 `
 
 /** Each table's grants to the two API roles, as one comparable line per grant. */
@@ -35,7 +38,7 @@ const GRANTS = `
   SELECT coalesce(string_agg(format('%s %s %s', c.relname, a.grantee::regrole, a.privilege_type), E'\\n'
                              ORDER BY c.relname, a.grantee::regrole::text, a.privilege_type), '')
   FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
-  WHERE c.relnamespace = 'public'::regnamespace AND c.relname IN ('private_notes', 'ro_items', 'open_items')
+  WHERE c.relnamespace = 'public'::regnamespace AND c.relname IN ('private_notes', 'ro_items', 'open_items', 'private_v')
     AND a.grantee IN ('anon'::regrole, 'authenticated'::regrole)
 `
 
@@ -59,8 +62,10 @@ describeE2E('e2e: a new table keeps the source\'s grants', () => {
     const issues = scan.checks.flatMap(c => c.issues)
     expect(issues.map(i => i.id).sort()).toEqual([
       'roles-grant-default-anon.public.private_notes',
+      'roles-grant-default-anon.public.private_v',
       'roles-grant-default-anon.public.ro_items',
       'roles-grant-default-authenticated.public.private_notes',
+      'roles-grant-default-authenticated.public.private_v',
     ])
     expect(issues.every(i => i.severity === 'critical')).toBe(true)
   }, 120_000)

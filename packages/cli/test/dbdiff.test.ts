@@ -1556,3 +1556,23 @@ describe('folding into the finding that creates an object', () => {
     expect(issues[0].sql?.up).toBe('CREATE TABLE public.notes (id int);\nALTER TABLE "notes" ENABLE ROW LEVEL SECURITY;\nALTER TABLE "notes" NO FORCE ROW LEVEL SECURITY;')
   })
 })
+
+// A view, function, policy or trigger dbdiff recreates gets its comments set
+// again. Apart, those read as "Comment changed" on a comment that had not.
+describe('a recreated object\'s comments go with it', () => {
+  const units = (...parts: Array<[string, string, string]>) =>
+    parts.map(([kind, object, sql]) => `-- dbdiff:unit ${kind} ${object}\n${sql}\n-- dbdiff:end`).join('\n')
+
+  it('folds them into the modified finding', () => {
+    const issues = sqlToIssues({
+      up: units(
+        ['AlterView', 'vt_v', 'DROP VIEW IF EXISTS "vt_v";\nCREATE VIEW "vt_v" AS SELECT 1 AS id;'],
+        ['AlterComment', 'vt_v', `COMMENT ON VIEW public.vt_v IS 'v';`],
+        ['AlterComment', 'vt_v.id', `COMMENT ON COLUMN public.vt_v.id IS 'vn';`],
+      ),
+      down: '',
+    }, 'schema')
+    expect(issues.map(i => i.title)).toEqual(['View modified: public.vt_v'])
+    expect(issues[0].sql?.up).toMatch(/CREATE VIEW[\s\S]*COMMENT ON VIEW public\.vt_v IS 'v';\nCOMMENT ON COLUMN public\.vt_v\.id IS 'vn';$/)
+  })
+})

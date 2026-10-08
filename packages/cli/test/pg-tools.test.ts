@@ -73,3 +73,21 @@ describe('resolvePgRestorePath', () => {
       .toBe('/opt/homebrew/opt/postgresql@17/bin/pg_restore')
   })
 })
+
+describe('resolvePgDumpPath: SUPAFORGE_PG_BIN', () => {
+  it('uses the named directory when PATH has no pg_dump new enough', async () => {
+    const { mkdtemp, writeFile, chmod } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const { resolvePgDumpPath } = await import('../src/pg-tools.js')
+    const dir = await mkdtemp(join(tmpdir(), 'pgbin-'))
+    await writeFile(join(dir, 'pg_dump'), '#!/bin/sh\necho "pg_dump (PostgreSQL) 99.1"\n')
+    await chmod(join(dir, 'pg_dump'), 0o755)
+    process.env.SUPAFORGE_PG_BIN = dir
+    try {
+      expect(await resolvePgDumpPath(98)).toEqual({ path: join(dir, 'pg_dump'), major: 99 })
+    } finally {
+      delete process.env.SUPAFORGE_PG_BIN
+    }
+  })
+})

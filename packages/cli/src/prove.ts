@@ -207,9 +207,16 @@ export async function proveConvergence(opts: {
   let psql: string
   let serverMajor: number
   let clientMajor: number
+  let sourceMajor: number
   try {
     serverMajor = await getServerMajorVersion(opts.targetUrl)
-    const resolved = await resolvePgDumpPath(serverMajor)
+    sourceMajor = await getServerMajorVersion(opts.sourceUrl).catch(() => serverMajor)
+    // The proof dumps both servers: the target into the clone, and the source
+    // into a copy compared like with like. A pg_dump new enough for the target
+    // alone failed on a newer source, and the proof fell back to comparing a
+    // 17 source's rendering with a 15 clone's, refusing correct migrations.
+    const resolved = await resolvePgDumpPath(Math.max(serverMajor, sourceMajor))
+      ?? await resolvePgDumpPath(serverMajor)
     if (!resolved) {
       return { converged: false, residual: [], cloneName, skipped: 'pg_dump not available' }
     }
@@ -290,6 +297,16 @@ export async function proveConvergence(opts: {
       }
     }
 
+    // Without a copy of the source on the target's server, two major versions
+    // cannot be compared: each prints the same objects its own way. That is
+    // not proven rather than not converged.
+    if (sourceMajor !== serverMajor) {
+      return {
+        converged: false, residual: [], cloneName,
+        skipped: `no pg_dump ${sourceMajor} or later to copy the PostgreSQL ${sourceMajor} source onto the `
+          + `PostgreSQL ${serverMajor} target's server, which comparing across the two versions needs`,
+      }
+    }
     const residual = await describeDifference(opts.sourceUrl, cloneUrl, schemas, want, got)
     return withinScope(residual, before && diffState(await schemaState(opts.sourceUrl, schemas), before), opts.checks, cloneName)
   } finally {

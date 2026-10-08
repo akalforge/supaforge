@@ -52,12 +52,11 @@ describeE2E('e2e: names with double quotes in them', () => {
 
   afterAll(async () => { await h?.down() }, 120_000)
 
-  // The RLS check's own SQL. The schema check's comes from @dbdiff/cli, and
-  // the pg-conformance case quoted_identifiers covers it in the scenarios.
-  it('syncs the policy and its roles', async () => {
-    const sync = await h.cli(['diff', '--check', 'rls', '--apply'], { cwd: ws })
-    expect(sync.stdout + sync.stderr).not.toMatch(/Rolled back|syntax error/)
-    expect(await h.sql('target', POLICY)).toBe(EXPECTED.replace(/ \| [^|]*$/, ' |'))
+  // Every check: the RLS check's SQL and @dbdiff/cli's both write the name.
+  it('syncs the policy, its roles and its comment', async () => {
+    const sync = await h.cli(['diff', '--apply'], { cwd: ws })
+    expect(sync.stdout + sync.stderr).not.toMatch(/Rolled back|syntax error|already exists/)
+    expect(await h.sql('target', POLICY)).toBe(EXPECTED)
   }, 300_000)
 
   it('restores it from a snapshot', async () => {

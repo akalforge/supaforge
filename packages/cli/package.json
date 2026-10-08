@@ -1,13 +1,17 @@
 {
-  "name": "@akalforge/supaforge",
+  "name": "@akal/supaforge",
   "version": "0.0.30",
   "description": "Diff and sync your Supabase environments",
   "author": "Akal Software Ltd",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/akalforge/supaforge",
+    "url": "https://github.com/akalsoftware/supaforge",
     "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/akalsoftware/supaforge#readme",
+  "bugs": {
+    "url": "https://github.com/akalsoftware/supaforge/issues"
   },
   "type": "module",
   "bin": {
@@ -49,7 +53,7 @@
     "topicSeparator": " "
   },
   "dependencies": {
-    "@akalforge/pg-conformance": "~0.0.14",
+    "@akal/pg-conformance": "~0.0.15",
     "@dbdiff/cli": "3.0.0-rc.24",
     "@modelcontextprotocol/sdk": "^1.12.1",
     "@oclif/core": "^4",

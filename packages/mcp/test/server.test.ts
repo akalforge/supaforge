@@ -12,7 +12,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { clearLastScanResult, setLastScanResult } from '../src/state.js'
 import { createServer } from '../src/server.js'
-import type { ScanResult } from '@akalforge/supaforge'
+import type { ScanResult } from '@akal/supaforge'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 

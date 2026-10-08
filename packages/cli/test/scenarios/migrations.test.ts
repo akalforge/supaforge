@@ -1,5 +1,5 @@
 /**
- * Every schema change in @akalforge/pg-conformance's `migrations` corpus, in
+ * Every schema change in @akal/pg-conformance's `migrations` corpus, in
  * both directions, through the real CLI — see runner.ts for what is checked.
  *
  * The corpus is shared with DBDiff, so a scenario added there is exercised
@@ -8,7 +8,7 @@
  * Which servers it runs on, and the known gaps for them: see topology.ts.
  */
 import { it, expect, beforeAll, afterAll } from 'vitest'
-import { loadCorpus } from '@akalforge/pg-conformance'
+import { loadCorpus } from '@akal/pg-conformance'
 import { PgHarness } from '../harness/PgHarness.js'
 import { describeWithContainers } from '../harness/containers.js'
 import { runScenario, type Scenario } from './runner.js'

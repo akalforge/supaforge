@@ -24,7 +24,7 @@
 import { randomBytes } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
-import { fingerprintSql, stateSql, type SchemaState } from '@akalforge/pg-conformance'
+import { fingerprintSql, stateSql, type SchemaState } from '@akal/pg-conformance'
 import { pgQuery, type QueryFn } from './db'
 import { diffState } from './state-diff'
 import { resolvePgDumpPath, getServerMajorVersion } from './pg-tools'
@@ -91,7 +91,7 @@ function withDatabase(dbUrl: string, database: string): string {
 
 
 /**
- * The structural fingerprint comes from @akalforge/pg-conformance.
+ * The structural fingerprint comes from @akal/pg-conformance.
  *
  * It used to be defined here, and separately in the e2e harness, and again in
  * dbdiff's conformance runner. They drifted, and this copy was the one that

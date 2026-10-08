@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { diffState } from '../src/state-diff.js'
-import type { SchemaState } from '@akalforge/pg-conformance'
+import type { SchemaState } from '@akal/pg-conformance'
 
 const empty = (): SchemaState => ({
   meta: { server_version_num: 170000, schemas: ['public'] },

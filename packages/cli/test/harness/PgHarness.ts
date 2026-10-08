@@ -18,7 +18,7 @@
  *    connection string that isn't loopback, so a misconfigured test can't point
  *    destructive operations at a real Supabase project.
  */
-import { fingerprintSql, stateSql, type SchemaState } from '@akalforge/pg-conformance';
+import { fingerprintSql, stateSql, type SchemaState } from '@akal/pg-conformance';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { promisify } from 'node:util';
@@ -294,7 +294,7 @@ export class PgHarness {
   }
 
   /**
-   * A database's schemas as data, from @akalforge/pg-conformance's state query.
+   * A database's schemas as data, from @akal/pg-conformance's state query.
    *
    * The oracle the scenario suites judge convergence by. It is independent of
    * DBDiff: asking DBDiff whether its own migration worked can only ever agree
@@ -319,7 +319,7 @@ export class PgHarness {
 
   /** Structural fingerprint used to assert two databases match. */
   /**
-   * Structural fingerprint of a role's schemas, from @akalforge/pg-conformance.
+   * Structural fingerprint of a role's schemas, from @akal/pg-conformance.
    *
    * This used to be a local query that read columns from information_schema and
    * compared functions by signature. It could not see a partitioned table, a

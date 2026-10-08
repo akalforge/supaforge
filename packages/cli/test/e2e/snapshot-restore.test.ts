@@ -11,7 +11,7 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest'
 import { cp, readdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { fingerprintSql } from '@akalforge/pg-conformance'
+import { fingerprintSql } from '@akal/pg-conformance'
 import { PgHarness } from '../harness/PgHarness.js'
 import { describeWithContainers } from '../harness/containers.js'
 

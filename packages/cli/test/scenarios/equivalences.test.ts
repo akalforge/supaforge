@@ -1,5 +1,5 @@
 /**
- * @akalforge/pg-conformance's `equivalences` corpus: one schema written as a
+ * @akal/pg-conformance's `equivalences` corpus: one schema written as a
  * developer writes it and as PostgreSQL renders it. Compared either way round,
  * the pair is the same schema, so every comparison check must find nothing.
  *
@@ -7,7 +7,7 @@
  * environments that already match — and, applied, rewrites a correct object.
  */
 import { it, expect, beforeAll, afterAll } from 'vitest'
-import { loadCorpus } from '@akalforge/pg-conformance'
+import { loadCorpus } from '@akal/pg-conformance'
 import { PgHarness } from '../harness/PgHarness.js'
 import { describeWithContainers } from '../harness/containers.js'
 import { comparisonFindings } from './runner.js'

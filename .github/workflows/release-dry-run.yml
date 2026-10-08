@@ -78,7 +78,7 @@ jobs:
           npm pack --pack-destination "$RUNNER_TEMP"
           mkdir "$RUNNER_TEMP/user" && cd "$RUNNER_TEMP/user"
           npm init -y >/dev/null
-          npm install --no-audit --no-fund "$RUNNER_TEMP"/akalforge-supaforge-*.tgz
+          npm install --no-audit --no-fund "$RUNNER_TEMP"/akal-supaforge-*.tgz
           for env in production development test; do
             NODE_ENV=$env npx supaforge --version 2> stderr.txt
             NODE_ENV=$env npx supaforge diff --help > /dev/null 2>> stderr.txt

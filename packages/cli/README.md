@@ -19,12 +19,12 @@ anything changes. With a single project, it snapshots, restores and clones it.
 - **Anywhere.** It works with Supabase Cloud, self-hosted stacks, plain
   PostgreSQL targets, CI pipelines and AI agents (MCP).
 
-Built by [Akal](https://github.com/akalforge).
+Built by [Akal](https://github.com/akalsoftware).
 
 ## Quick start
 
 ```bash
-npm install -g @akalforge/supaforge
+npm install -g @akal/supaforge
 
 supaforge init              # create supaforge.config.json
 supaforge diff              # what has drifted?
@@ -308,7 +308,7 @@ client unless started with `--allow-config-path`.
 ## Hooks
 
 ```ts
-import { HookBus, scan, createDefaultRegistry, loadConfig } from '@akalforge/supaforge'
+import { HookBus, scan, createDefaultRegistry, loadConfig } from '@akal/supaforge'
 
 const bus = new HookBus()
 bus.on('supaforge.check.after', ({ check, result }) => {
@@ -342,7 +342,7 @@ changes that span the three projects together, before any of them is
 released.
 
 The scenario suite migrates every case in the
-[`@akalforge/pg-conformance`](https://www.npmjs.com/package/@akalforge/pg-conformance) corpus in both
+[`@akal/pg-conformance`](https://www.npmjs.com/package/@akal/pg-conformance) corpus in both
 directions. It checks the result against the corpus's own state oracle and
 against `--prove`.
 

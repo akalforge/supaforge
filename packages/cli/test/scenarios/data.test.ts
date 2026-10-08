@@ -1,5 +1,5 @@
 /**
- * @akalforge/pg-conformance's `data` corpus through the data check, which
+ * @akal/pg-conformance's `data` corpus through the data check, which
  * syncs a project's reference data — see runDataScenario() for what is
  * checked. The values are the ones found quoted wrongly, or not handled at
  * all: text needing quoting, JSON, bytea, a table with no key.
@@ -7,7 +7,7 @@
  * Which servers it runs on, and the known gaps for them: see topology.ts.
  */
 import { it, beforeAll, afterAll } from 'vitest'
-import { loadCorpus } from '@akalforge/pg-conformance'
+import { loadCorpus } from '@akal/pg-conformance'
 import { PgHarness } from '../harness/PgHarness.js'
 import { describeWithContainers } from '../harness/containers.js'
 import { runDataScenario } from './runner.js'

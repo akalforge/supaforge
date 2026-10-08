@@ -1,6 +1,6 @@
 name: Scenarios
 
-# Every schema change in @akalforge/pg-conformance's corpora, through the real
+# Every schema change in @akal/pg-conformance's corpora, through the real
 # CLI, judged by what any correct run must do: a dry run writes nothing, an
 # apply never rolls back, --allow-destructive converges (checked against the
 # servers' own catalogs, not by asking DBDiff), --prove agrees, rows survive,

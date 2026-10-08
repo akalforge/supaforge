@@ -83,7 +83,7 @@ pointing it at a real project.
 ### Scenario suites
 
 `test/scenarios/` runs every case in
-[`@akalforge/pg-conformance`](https://github.com/akalforge/pg-conformance)'s
+[`@akal/pg-conformance`](https://github.com/akalsoftware/pg-conformance)'s
 `migrations` and `equivalences` corpora through the real CLI, in both
 directions, and judges each by what any correct run must do rather than by
 findings listed for one fixture:
@@ -271,4 +271,4 @@ packages/cli/
 
 ## Questions?
 
-Open a [discussion](https://github.com/akalforge/supaforge/discussions) or file an issue. We're happy to help.
+Open a [discussion](https://github.com/akalsoftware/supaforge/discussions) or file an issue. We're happy to help.

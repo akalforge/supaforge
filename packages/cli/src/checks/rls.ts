@@ -1,4 +1,5 @@
 import { createPolicySql, dropPolicySql } from '../utils/schema-policies.js'
+import { quoteName } from '../utils/sql.js'
 import { dropEquivalentPolicyChanges, defaultCanonicalizer } from '../utils/policy-equivalence.js'
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
@@ -205,8 +206,8 @@ export function diffRlsStatus(
         sourceValue: src,
         targetValue: tgt,
         sql: {
-          up: `ALTER TABLE "${src.schemaname}"."${src.tablename}" ENABLE ROW LEVEL SECURITY;`,
-          down: `ALTER TABLE "${src.schemaname}"."${src.tablename}" DISABLE ROW LEVEL SECURITY;`,
+          up: `ALTER TABLE ${quoteName(src.schemaname)}.${quoteName(src.tablename)} ENABLE ROW LEVEL SECURITY;`,
+          down: `ALTER TABLE ${quoteName(src.schemaname)}.${quoteName(src.tablename)} DISABLE ROW LEVEL SECURITY;`,
         },
       })
     } else if (!src.rls_enabled && tgt.rls_enabled) {
@@ -219,8 +220,8 @@ export function diffRlsStatus(
         sourceValue: src,
         targetValue: tgt,
         sql: {
-          up: `ALTER TABLE "${src.schemaname}"."${src.tablename}" DISABLE ROW LEVEL SECURITY;`,
-          down: `ALTER TABLE "${src.schemaname}"."${src.tablename}" ENABLE ROW LEVEL SECURITY;`,
+          up: `ALTER TABLE ${quoteName(src.schemaname)}.${quoteName(src.tablename)} DISABLE ROW LEVEL SECURITY;`,
+          down: `ALTER TABLE ${quoteName(src.schemaname)}.${quoteName(src.tablename)} ENABLE ROW LEVEL SECURITY;`,
         },
       })
     }

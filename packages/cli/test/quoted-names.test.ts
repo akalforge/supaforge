@@ -13,7 +13,8 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { parseStatements } from '../src/sql-ast.js'
-import { diffPolicies } from '../src/checks/rls.js'
+import { diffPolicies, diffRlsStatus } from '../src/checks/rls.js'
+import { diffExtensions } from '../src/checks/extensions.js'
 import { createPolicySql, dropPolicySql, commentPolicySql, diffSchemaPolicies } from '../src/utils/schema-policies.js'
 import { captureSnapshot } from '../src/snapshot.js'
 import type { QueryFn } from '../src/db.js'
@@ -84,6 +85,25 @@ describe('snapshot files keep names intact', () => {
     for (const file of ['rls.sql', 'storage-policies.sql']) {
       const statements = read(await readFile(join(result.dir, file), 'utf8'))
       expect(statements.find(s => s.kind === 'CreatePolicyStmt'), file).toMatchObject({ name: NAME, table: TABLE })
+    }
+  })
+})
+
+describe('other SQL keeps names intact', () => {
+  it('turning row level security on and off', () => {
+    const t = (rls_enabled: boolean) => ({ schemaname: 'public', tablename: TABLE, rls_enabled }) as never
+    for (const [src, tgt] of [[true, false], [false, true]]) {
+      const [issue] = diffRlsStatus([t(src)], [t(tgt)])
+      expect(parseStatements(issue.sql!.up), issue.sql!.up).toBeDefined()
+      expect(parseStatements(issue.sql!.up)![0].node.relation.relname).toBe(TABLE)
+    }
+  })
+
+  it('creating and updating an extension', () => {
+    const ext = (version: string) => ({ name: 'odd "ext"', version, schema: 'ext "s"' }) as never
+    for (const issue of [...diffExtensions([ext("1.0")], []), ...diffExtensions([ext("2.0")], [ext("1'0")])]) {
+      expect(parseStatements(issue.sql!.up), issue.sql!.up).toBeDefined()
+      expect(parseStatements(issue.sql!.down!), issue.sql!.down).toBeDefined()
     }
   })
 })

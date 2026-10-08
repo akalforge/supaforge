@@ -1,5 +1,10 @@
 #!/usr/bin/env node
-import {execute} from '@oclif/core'
+import {execute, settings} from '@oclif/core'
+
+// The published package is compiled. Left on, oclif looks for TypeScript
+// whenever NODE_ENV is development or test — as in many projects running
+// npx supaforge — and warned on every command that it could not find it.
+settings.enableAutoTranspile = false
 
 await execute({dir: import.meta.url}).catch((err) => {
   // oclif handles CLIError internally — this catches truly unexpected errors.

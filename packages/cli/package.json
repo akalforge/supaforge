@@ -1,6 +1,6 @@
 {
   "name": "@akal/supaforge",
-  "version": "0.0.30",
+  "version": "0.0.31",
   "description": "Diff and sync your Supabase environments",
   "author": "Akal Software Ltd",
   "license": "MIT",

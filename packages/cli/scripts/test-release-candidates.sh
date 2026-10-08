@@ -129,6 +129,11 @@ rm -rf "$WORK/prefix" && mkdir -p "$WORK/prefix"
 (cd "$WORK/prefix" && npm init -y >/dev/null && npm install --silent --no-audit --no-fund "$WORK"/tgz/akalforge-supaforge-*.tgz "${DEPS[@]}")
 INSTALLED="$WORK/prefix/node_modules/@akalforge/supaforge"
 say "Installed: $(node "$INSTALLED/bin/run.js" --version) with $("$WORK/prefix/node_modules/.bin/dbdiff" --version)"
+for env in production development test; do
+  if NODE_ENV=$env node "$INSTALLED/bin/run.js" --version 2>&1 >/dev/null | grep -q .; then
+    record "FAIL  the installed CLI writes to stderr under NODE_ENV=$env"
+  fi
+done
 export SUPAFORGE_E2E_CLI="$INSTALLED/bin/run.js"
 cd "$SF"
 

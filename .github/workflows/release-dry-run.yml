@@ -68,3 +68,19 @@ jobs:
       - name: npm publish --dry-run
         working-directory: packages/cli
         run: npm publish --dry-run --tag next
+
+      # The package as a user gets it: packed, installed elsewhere, run. A
+      # warning here reaches every user — oclif warned on every command, under
+      # NODE_ENV=development or test, that it could not find TypeScript.
+      - name: Install the packed package and run it
+        working-directory: packages/cli
+        run: |
+          npm pack --pack-destination "$RUNNER_TEMP"
+          mkdir "$RUNNER_TEMP/user" && cd "$RUNNER_TEMP/user"
+          npm init -y >/dev/null
+          npm install --no-audit --no-fund "$RUNNER_TEMP"/akalforge-supaforge-*.tgz
+          for env in production development test; do
+            NODE_ENV=$env npx supaforge --version 2> stderr.txt
+            NODE_ENV=$env npx supaforge diff --help > /dev/null 2>> stderr.txt
+            if [ -s stderr.txt ]; then echo "::error::NODE_ENV=$env wrote to stderr:"; cat stderr.txt; exit 1; fi
+          done

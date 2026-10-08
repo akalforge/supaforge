@@ -685,10 +685,13 @@ async function captureRoleGrants(
 
     // One statement per role, object and grant option, listing the
     // privileges: one per privilege made a restore that skipped a relation
-    // list it once for every privilege of every role.
+    // list it once for every privilege of every role. MAINTAIN, a PostgreSQL
+    // 17 privilege, stays on its own, so an older server skips only it rather
+    // than rejecting every privilege granted alongside.
     const grouped = new Map<string, typeof rows>()
     for (const row of rows) {
-      const key = JSON.stringify([row.grantee, row.table_schema, row.table_name, row.column_name, Boolean(row.is_grantable)])
+      const key = JSON.stringify([row.grantee, row.table_schema, row.table_name, row.column_name, Boolean(row.is_grantable),
+        row.privilege_type === 'MAINTAIN'])
       grouped.set(key, [...(grouped.get(key) ?? []), row])
     }
     const statements = [...grouped.values()].map(([row, ...rest]) =>

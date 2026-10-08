@@ -516,4 +516,26 @@ describe('captureSnapshot: grants are captured one statement per role and object
       'GRANT UPDATE ("name") ON "public"."items" TO "anon";',
     ])
   })
+
+  // MAINTAIN is a PostgreSQL 17 privilege. Grouped with the others, a 15
+  // target rejected the whole GRANT and the restore rolled back; on its own,
+  // only it is skipped there.
+  it('keeps MAINTAIN in a GRANT of its own', async () => {
+    const rows = ['DELETE', 'MAINTAIN', 'SELECT'].map(privilege_type =>
+      ({ grantee: 'anon', table_schema: 'public', table_name: 'items', column_name: null, privilege_type, is_grantable: false }))
+    const queryFn = (async (_url: string, sql: string) => sql.includes('aclexplode') ? rows : []) as unknown as QueryFn
+    const result = await captureSnapshot({
+      envName: 'prod',
+      env: { dbUrl: 'postgres://example' },
+      config: { environments: { prod: { dbUrl: 'postgres://example' } } } as never,
+      outputDir: dir,
+      queryFn,
+      fetchFn: (async () => new Response('[]', { status: 200 })) as never,
+    })
+    const grants = (await readFile(join(result.dir, 'roles.sql'), 'utf8')).split('\n').filter(l => l.startsWith('GRANT'))
+    expect(grants.sort()).toEqual([
+      'GRANT DELETE, SELECT ON "public"."items" TO "anon";',
+      'GRANT MAINTAIN ON "public"."items" TO "anon";',
+    ])
+  })
 })

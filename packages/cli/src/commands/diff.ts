@@ -393,6 +393,7 @@ export default class Diff extends BaseCommand {
             sourceUrl: sourceEnv.dbUrl,
             targetUrl: targetEnv.dbUrl,
             migrationSql,
+            fixes: replay,
             // Every schema the schema diff compares, not `public` alone: a
             // migration dropping a schema the source lacks runs against it.
             schemas: await comparedSchemas(sourceEnv.dbUrl, targetEnv.dbUrl,
@@ -402,24 +403,30 @@ export default class Diff extends BaseCommand {
             checks: scanResult.checks.map(c => c.check),
           })
 
-        if (proof.skipped) {
-          // Could not prove is not the same as failed to converge; say which.
-          this.log(`  ${warn('Convergence not proven')}: ${proof.skipped}`)
-          this.log(`  ${dim('Continuing — re-run without --prove to silence this.')}\n`)
-        } else if (!proof.converged && residualHeldBack(proof.residual, heldBackSql(scanResult, planned)).unexplained.length === 0) {
+        // What the replay left out because this server can't hold it, as the
+        // apply will: expected to stay different, so it counts as held back.
+        const heldBack = [...heldBackSql(scanResult, planned), ...(proof.notApplied ?? []).map(n => n.sql)]
+        if (proof.notApplied?.length) {
+          this.log(`  ${dim(`Left out, as the apply will leave them — this server can't hold them: ${proof.notApplied.map(n => n.issueId).join(', ')}`)}`)
+        }
+
+        if (proof.skipped && replay.length === 0) {
+          // Nothing the proof could replay: every planned fix is listed above
+          // as not proved, and there is nothing a rehearsal would add.
+          this.log(`  ${dim(`Nothing to prove: ${proof.skipped}.`)}\n`)
+        } else if (proof.skipped) {
+          // Could not prove is not the same as failed to converge, so say which —
+          // but either way nothing is applied. --prove is asked for as a gate,
+          // and it used to apply anyway, exiting 0, when it could not run.
+          this.refuseUnproven(`Not proven: ${proof.skipped}`, [], flags.json)
+        } else if (!proof.converged && residualHeldBack(proof.residual, heldBack).unexplained.length === 0) {
           // Everything left over is what this run deliberately holds back.
           this.log(`  ${ok('Converged')}, apart from what is held back and stays on the target:`)
           for (const line of proof.residual.slice(0, 15)) this.log(`    ${dim(line)}`)
           this.log('')
         } else if (!proof.converged) {
-          this.log(`  ${warn('Migration does not reproduce the source.')} Nothing was applied.\n`)
-          const { unexplained } = residualHeldBack(proof.residual, heldBackSql(scanResult, planned))
-          for (const line of unexplained.slice(0, 15)) this.log(`    ${line}`)
-          if (unexplained.length > 15) {
-            this.log(`    ${dim(`…and ${unexplained.length - 15} more`)}`)
-          }
-          this.log(`\n  ${dim('These objects would still differ after applying.')}`)
-          this.exit(1)
+          const { unexplained } = residualHeldBack(proof.residual, heldBack)
+          this.refuseUnproven('Migration does not reproduce the source.', unexplained, flags.json)
         } else {
           if (proof.outOfScope?.length) {
             this.log(`  ${ok('Converged')} on what this run compares. Outside it, and already different before:`)
@@ -584,6 +591,25 @@ export default class Diff extends BaseCommand {
       this.exit(1)
     }
   }
+
+  /**
+   * Stop before applying anything: the proof could not run, or ran and found
+   * the migration would not reproduce the source. Under --json the reason is
+   * the output, rather than nothing at all.
+   */
+  private refuseUnproven(reason: string, residual: string[], json?: boolean): never {
+    if (json) {
+      this.json({ proved: false, reason, residual, applied: [], skipped: [], errors: [] })
+      this.exit(1)
+    }
+    this.log(`  ${warn(/[.!?]$/.test(reason) ? reason : `${reason}.`)} Nothing was applied.\n`)
+    for (const line of residual.slice(0, 15)) this.log(`    ${line}`)
+    if (residual.length > 15) this.log(`    ${dim(`…and ${residual.length - 15} more`)}`)
+    if (residual.length > 0) this.log(`\n  ${dim('These objects would still differ after applying.')}`)
+    else this.log(`  ${dim('Re-run without --prove to apply without the proof.')}`)
+    this.exit(1)
+  }
+
 }
 
 /** The SQL of the fixes this run plans to skip, which the proof did not replay. */

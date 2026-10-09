@@ -69,7 +69,7 @@ interface FixOrigin {
   issueId: string
 }
 
-type PlannedSql = FixOrigin & { sql: string }
+export type PlannedSql = FixOrigin & { sql: string }
 type PlannedAction = FixOrigin & { action: SyncAction }
 type PlannedSkip = FixOrigin & { reason: string }
 
@@ -429,6 +429,19 @@ async function executeSql(
   } finally {
     await client.end()
   }
+}
+
+/**
+ * Run fixes exactly as a transactional apply would — dependency-order input,
+ * one savepoint per fix, a fix whose extension or object is missing left out
+ * and the rest kept — against any database. The proof replays a migration
+ * this way, so it rehearses what the apply will do rather than a stricter
+ * script that stopped at the first fix the server could not hold.
+ */
+export async function runLikeApply(dbUrl: string, statements: PlannedSql[]): Promise<PromoteResult> {
+  const result: PromoteResult = { applied: [], skipped: [], errors: [] }
+  await executeSql(dbUrl, statements, result, true)
+  return result
 }
 
 /** One statement at a time: a failure is recorded and the rest still run. */

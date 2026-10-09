@@ -27,6 +27,10 @@ import type { PromoteResult } from '../../src/promote.js'
 import { isComparisonCheck, type ScanResult } from '../../src/types/drift.js'
 import type { PgHarness, CliResult } from '../harness/PgHarness.js'
 
+
+/** --prove's reason when no pg_dump would do. */
+const NO_PG_DUMP = /Not proven: (no pg_dump|could not resolve pg_dump)/
+
 export interface Scenario {
   /** Unique, and safe in a database name once lowercased. */
   id: string
@@ -168,7 +172,17 @@ export async function runScenario(h: PgHarness, key: string, s: Scenario): Promi
 
     // Then everything, proved first. The proof needs a pg_dump at least as
     // new as the server; where there is none it says so and steps aside.
-    const all = await cli('--apply', '--allow-destructive', '--prove')
+    let all = await cli('--apply', '--allow-destructive', '--prove')
+    // A proof that can't run refuses to apply. CI installs a pg_dump for every
+    // server, so there one that can't find it is a broken job; any other reason
+    // it can't run (a role the server lacks) says nothing about the migration,
+    // which is then applied without the proof so its result can be judged.
+    if (/Not proven: /.test(all.stdout + all.stderr)) {
+      if (process.env.SCENARIO_REQUIRE_PROOF && NO_PG_DUMP.test(all.stdout + all.stderr)) {
+        violations.push(`--prove did not run:\n${short(all)}`)
+      }
+      all = await cli('--apply', '--allow-destructive')
+    }
     const allOut = all.stdout + all.stderr
     if (/does not reproduce the source/.test(allOut)) violations.push(`--prove refused the migration:\n${short(all)}`)
     if (/Rolled back/.test(allOut)) violations.push(`the destructive apply rolled back:\n${short(all)}`)
@@ -176,11 +190,6 @@ export async function runScenario(h: PgHarness, key: string, s: Scenario): Promi
     // migration, a crash — shows only as the exit code.
     else if (all.code !== 0 && !/does not reproduce the source/.test(allOut)) {
       violations.push(`the destructive apply exited ${all.code}:\n${short(all)}`)
-    }
-    // CI installs a pg_dump for every server, so there a proof that cannot
-    // find one is a broken job, not a reason to pass having proved nothing.
-    if (process.env.SCENARIO_REQUIRE_PROOF && /Convergence not proven: (pg_dump|could not resolve pg_dump)/.test(allOut)) {
-      violations.push(`--prove did not run:\n${short(all)}`)
     }
 
     outcome.residual = diffState(await expectedState(h, key, s, src, schemas), await h.stateIn('target', tgt, schemas))
@@ -253,10 +262,9 @@ async function provedOnACopy(h: PgHarness, copy: string, s: Scenario, src: strin
     const r = await h.cli(['diff', '--apply', '--allow-destructive', '--prove'], { cwd: ws })
     const out = r.stdout + r.stderr
     if (/does not reproduce the source/.test(out)) violations.push(`--prove refused the whole migration:\n${short(r)}`)
-    else if (r.code !== 0) violations.push(`--prove on the whole migration exited ${r.code}:\n${short(r)}`)
-    else if (process.env.SCENARIO_REQUIRE_PROOF && /Convergence not proven: (pg_dump|could not resolve pg_dump)/.test(out)) {
-      violations.push(`--prove did not run:\n${short(r)}`)
-    }
+    else if (/Not proven: /.test(out)) {
+      if (process.env.SCENARIO_REQUIRE_PROOF && NO_PG_DUMP.test(out)) violations.push(`--prove did not run:\n${short(r)}`)
+    } else if (r.code !== 0) violations.push(`--prove on the whole migration exited ${r.code}:\n${short(r)}`)
   } finally {
     await h.dropDatabase('target', copy)
   }

@@ -26,8 +26,9 @@ import { execFile, spawn } from 'node:child_process'
 import { promisify } from 'node:util'
 import { fingerprintSql, stateSql, type SchemaState } from '@akal/pg-conformance'
 import { pgQuery, type QueryFn } from './db'
+import { runLikeApply, type PlannedSql } from './promote'
 import { diffState } from './state-diff'
-import { resolvePgDumpPath, getServerMajorVersion } from './pg-tools'
+import { resolvePgDumpPath, getServerMajorVersion, describeMissingPgDump } from './pg-tools'
 import { rolesNamedBy, sqlSkeleton } from './sql-deps'
 import { splitSqlStatements, isCommentOnly } from './utils/sql-split.js'
 import { quoteName } from './utils/sql.js'
@@ -74,6 +75,12 @@ export interface ProofResult {
   cloneName: string
   /** Set when the proof could not run at all (missing pg_dump, no CREATEDB). */
   skipped?: string
+  /**
+   * Fixes the replay left out because the server can't hold them — an
+   * extension it does not ship, and what needs it — as the apply will. Their
+   * absence is expected, not a failure to converge.
+   */
+  notApplied?: Array<{ issueId: string; sql: string; reason: string }>
   /**
    * For a run limited to some checks: differences the target already had,
    * still there, and of a kind none of those checks compares — see
@@ -189,6 +196,13 @@ export async function proveConvergence(opts: {
   sourceUrl: string
   targetUrl: string
   migrationSql: string
+  /**
+   * The fixes behind migrationSql. Given, they are replayed exactly as the
+   * apply will run them (see runLikeApply), so a fix the server can't hold is
+   * left out rather than stopping the proof. Without them the SQL runs as one
+   * script and any error ends the proof.
+   */
+  fixes?: PlannedSql[]
   schemas?: string[]
   /**
    * The checks the run compares. Without the schema check the migration only
@@ -218,7 +232,7 @@ export async function proveConvergence(opts: {
     const resolved = await resolvePgDumpPath(Math.max(serverMajor, sourceMajor))
       ?? await resolvePgDumpPath(serverMajor)
     if (!resolved) {
-      return { converged: false, residual: [], cloneName, skipped: 'pg_dump not available' }
+      return { converged: false, residual: [], cloneName, skipped: await describeMissingPgDump(serverMajor) }
     }
     pgDump = resolved.path
     clientMajor = resolved.major
@@ -265,7 +279,25 @@ export async function proveConvergence(opts: {
     const before = scoped ? await schemaState(cloneUrl, schemas) : undefined
 
     // The migration under test.
-    await runSql(psql, cloneUrl, opts.migrationSql)
+    let notApplied: ProofResult['notApplied']
+    if (opts.fixes) {
+      const replayed = await runLikeApply(cloneUrl, opts.fixes)
+      const unmet = replayed.errors.filter(e => / — not applied: /.test(e.error))
+      const failed = replayed.errors.filter(e => !unmet.includes(e))
+      if (failed.length > 0) {
+        // A fix the apply itself would fail on: the migration can't reproduce
+        // the source, and saying which fix and why is the useful answer.
+        return {
+          converged: false, cloneName,
+          residual: failed.map(e => `fix ${e.issueId} failed: ${e.error}`),
+        }
+      }
+      const byId = new Map(opts.fixes.map(f => [f.issueId, f.sql]))
+      notApplied = unmet.map(e => ({ issueId: e.issueId, sql: byId.get(e.issueId) ?? '', reason: e.error }))
+    } else {
+      await runSql(psql, cloneUrl, opts.migrationSql)
+    }
+    const reported = (r: ProofResult): ProofResult => (notApplied?.length ? { ...r, notApplied } : r)
 
     const [want, got] = await Promise.all([
       fingerprint(opts.sourceUrl, schemas),
@@ -275,7 +307,7 @@ export async function proveConvergence(opts: {
     // The verdict stays with the fingerprint. It is the comparison already
     // trusted, and keeping it means the structured diff below can only change
     // how a difference is *described*, never whether one is detected.
-    if (want === got) return { converged: true, residual: [], cloneName }
+    if (want === got) return reported({ converged: true, residual: [], cloneName })
 
     // The clone's objects have been through a dump and restore, or were
     // recreated from the SQL a rendering produced; the source's have not, and
@@ -291,9 +323,9 @@ export async function proveConvergence(opts: {
       sourceCopyCreated = true
       if (roundTrip.ok) {
         const wantRoundTripped = await fingerprint(roundTripUrl, schemas)
-        if (wantRoundTripped === got) return { converged: true, residual: [], cloneName }
+        if (wantRoundTripped === got) return reported({ converged: true, residual: [], cloneName })
         const residual = await describeDifference(roundTripUrl, cloneUrl, schemas, wantRoundTripped, got)
-        return withinScope(residual, before && diffState(await schemaState(roundTripUrl, schemas), before), opts.checks, cloneName)
+        return reported(withinScope(residual, before && diffState(await schemaState(roundTripUrl, schemas), before), opts.checks, cloneName))
       }
     }
 
@@ -308,7 +340,7 @@ export async function proveConvergence(opts: {
       }
     }
     const residual = await describeDifference(opts.sourceUrl, cloneUrl, schemas, want, got)
-    return withinScope(residual, before && diffState(await schemaState(opts.sourceUrl, schemas), before), opts.checks, cloneName)
+    return reported(withinScope(residual, before && diffState(await schemaState(opts.sourceUrl, schemas), before), opts.checks, cloneName))
   } finally {
     if (sourceCopyCreated && roundTripName) {
       await dropDatabase(adminUrl, roundTripName)
@@ -656,6 +688,9 @@ export function explainStructureFailure(
 /** `DROP <kind> [IF EXISTS] <name>` and `DROP COLUMN [IF EXISTS] <name>`, capturing the bare name. */
 const DROPPED_NAME = /\bDROP\s+(?:TABLE|VIEW|MATERIALIZED\s+VIEW|TYPE|DOMAIN|SEQUENCE|FUNCTION|PROCEDURE|INDEX|COLUMN|CONSTRAINT|POLICY|TRIGGER)\s+(?:IF\s+EXISTS\s+)?(?:(?:"[^"]+"|[\w$]+)\s*\.\s*)?("[^"]+"|[\w$]+)/gi
 
+/** `CREATE [OR REPLACE] <kind> [IF NOT EXISTS] <name>`, capturing the bare name. */
+const CREATED_NAME = /\bCREATE\s+(?:OR\s+REPLACE\s+)?(?:UNIQUE\s+)?(?:TABLE|VIEW|MATERIALIZED\s+VIEW|TYPE|DOMAIN|SEQUENCE|FUNCTION|PROCEDURE|INDEX|POLICY|TRIGGER|EXTENSION)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:(?:"[^"]+"|[\w$]+)\s*\.\s*)?("[^"]+"|[\w$]+)/gi
+
 /**
  * Split a proof's residual into what the held-back fixes account for and
  * what they do not.
@@ -675,12 +710,22 @@ export function residualHeldBack(
   for (const sql of heldBackSql) {
     for (const m of sql.matchAll(DROPPED_NAME)) dropped.add(m[1].replace(/^"|"$/g, '').toLowerCase())
   }
+  // And the creations a fix left out would have made: on a target that can't
+  // hold them (no supabase_functions for a webhook, no auth schema for a
+  // policy calling auth.uid()) the apply leaves them out, so the clone lacks
+  // them by design and the line reads `…: missing`.
+  const created: string[] = []
+  for (const sql of heldBackSql) {
+    for (const m of sql.matchAll(CREATED_NAME)) created.push(m[1].replace(/^"|"$/g, '').toLowerCase())
+  }
   const heldBack: string[] = []
   const unexplained: string[] = []
   for (const line of residual) {
     const subject = /^[a-z ]+?\s([^\s:]+(?:\s[^\s:]+)?):\s*unexpected$/i.exec(line)?.[1]
     const name = subject?.split(/[.\s]/).pop()?.replace(/^"|"$/g, '').toLowerCase()
+    const missing = /^(.*):\s*missing$/i.exec(line)?.[1].toLowerCase()
     if (name && dropped.has(name)) heldBack.push(line)
+    else if (missing && created.some(n => missing.endsWith(` ${n}`) || missing.endsWith(`.${n}`))) heldBack.push(line)
     else unexplained.push(line)
   }
   return { heldBack, unexplained }

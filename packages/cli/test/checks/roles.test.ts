@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { RolesCheck, diffRoles, diffGrants, comparablePrivileges, grantedByDefault } from '../../src/checks/roles.js'
+import { RolesCheck, diffRoles, diffGrants, comparablePrivileges, grantedByDefault, defaultGrantsToRevoke } from '../../src/checks/roles.js'
 import type { CheckContext } from '../../src/checks/base.js'
 import type { QueryFn } from '../../src/db.js'
 
@@ -136,7 +136,7 @@ describe('RolesCheck', () => {
     expect(grantIssue!.sql?.up).toContain('REVOKE INSERT')
   })
 
-  it('runs all 11 queries (roles, grants, column grants, version and tables per side; the target\'s default grants)', async () => {
+  it('runs all 15 queries (roles, grants, column grants, routine grants, version, tables and routines per side; the target\'s default grants)', async () => {
     const calls: string[] = []
     const queryFn: QueryFn = async (_dbUrl, sql) => {
       calls.push(sql)
@@ -144,7 +144,8 @@ describe('RolesCheck', () => {
     }
     const check = new RolesCheck(queryFn)
     await check.scan(mockContext())
-    expect(calls).toHaveLength(11)
+    expect(calls).toHaveLength(15)
+    expect(calls.filter(s => s.includes('proacl'))).toHaveLength(2)
     expect(calls.filter(s => s.includes('server_version_num'))).toHaveLength(2)
     const roleQueries  = calls.filter(s => s.includes('rolsuper'))
     const grantQueries = calls.filter(s => s.includes('c.relacl'))
@@ -403,7 +404,7 @@ describe('a new table keeps the source\'s grants, not the target\'s defaults', (
       return source ? [] : ['anon', 'authenticated'].flatMap(grantee =>
         ALL.map(privilege_type => ({ table_schema: 'public', grantee, privilege_type, is_grantable: false })))
     }
-    if (sql.includes('attacl') || sql.includes('rolsuper')) return []
+    if (sql.includes('attacl') || sql.includes('rolsuper') || sql.includes('pg_proc')) return []
     if (sql.includes('server_version_num')) return [{ v: '150008' }]
     if (sql.includes('relacl')) {
       return source ? [
@@ -452,5 +453,61 @@ describe('an extra grant to a Data API role is not a footnote', () => {
       expect(diffGrants([], [g(grantee)])[0].severity, grantee).toBe('critical')
     }
     expect(diffGrants([], [g('app_readonly')])[0].severity).toBe('warning')
+  })
+})
+
+describe('function and sequence grants', () => {
+  // Never compared: a SECURITY DEFINER function the source kept from the Data
+  // API arrived on the target callable with the anon key, and an existing
+  // function's grants could differ without a word.
+  const fn = (grantee: string, privilege_type = 'EXECUTE') => ({
+    grantee, table_schema: 'public', table_name: 'admin_reset', args: 'p integer',
+    object_kind: 'function' as const, privilege_type, is_grantable: false,
+  })
+  const seq = (grantee: string, privilege_type: string) => ({
+    grantee, table_schema: 'public', table_name: 'private_seq', object_kind: 'sequence' as const, privilege_type, is_grantable: false,
+  })
+
+  it('reports a function the target opens to anon as critical, revoked with ON FUNCTION and its arguments', () => {
+    const [issue] = diffGrants([], [fn('anon')])
+    expect(issue.severity).toBe('critical')
+    expect(issue.title).toBe('Extra grant: EXECUTE ON function public.admin_reset(p integer) TO anon')
+    expect(issue.sql?.up).toBe('REVOKE EXECUTE ON FUNCTION "public"."admin_reset"(p integer) FROM "anon";')
+  })
+
+  it('tells overloads apart', () => {
+    const one = fn('anon')
+    const other = { ...fn('anon'), args: 'p text' }
+    expect(diffGrants([one], [one, other]).map(i => i.sql?.up))
+      .toEqual(['REVOKE EXECUTE ON FUNCTION "public"."admin_reset"(p text) FROM "anon";'])
+  })
+
+  it('writes sequence grants with ON SEQUENCE', () => {
+    const [issue] = diffGrants([], [seq('anon', 'USAGE')])
+    expect(issue.sql?.up).toBe('REVOKE USAGE ON SEQUENCE "public"."private_seq" FROM "anon";')
+  })
+
+  it('takes back what a new function gets by default — PUBLIC included — when the source grants none of it', () => {
+    const defaults = [
+      { object_kind: 'function' as const, table_schema: null, grantee: 'PUBLIC', privilege_type: 'EXECUTE', is_grantable: false },
+      { object_kind: 'function' as const, table_schema: 'public', grantee: 'anon', privilege_type: 'EXECUTE', is_grantable: false },
+      { object_kind: 'table' as const, table_schema: 'public', grantee: 'anon', privilege_type: 'SELECT', is_grantable: false },
+    ]
+    const routine = { table_schema: 'public', table_name: 'admin_reset', args: 'p integer', object_kind: 'function' as const }
+    const issues = defaultGrantsToRevoke([routine], [], defaults, [])
+    expect(issues.map(i => i.sql?.up).sort()).toEqual([
+      'REVOKE EXECUTE ON FUNCTION "public"."admin_reset"(p integer) FROM "anon";',
+      'REVOKE EXECUTE ON FUNCTION "public"."admin_reset"(p integer) FROM PUBLIC;',
+    ])
+    expect(issues.every(i => i.severity === 'critical')).toBe(true)
+    // What the source does grant is left alone.
+    expect(defaultGrantsToRevoke([routine], [], defaults, [fn('anon')]).map(i => i.sql?.up))
+      .toEqual(['REVOKE EXECUTE ON FUNCTION "public"."admin_reset"(p integer) FROM PUBLIC;'])
+  })
+
+  it('does not report a function grant the target will make by default as missing', () => {
+    const covers = grantedByDefault([], [{ object_kind: 'function', table_schema: null, grantee: 'PUBLIC', privilege_type: 'EXECUTE', is_grantable: false }])
+    expect(covers(fn('PUBLIC'))).toBe(true)
+    expect(covers({ ...fn('PUBLIC'), object_kind: 'sequence' as never })).toBe(false)
   })
 })

@@ -655,11 +655,12 @@ async function captureRoleGrants(
       -- and it hides grants the connecting role takes no part in.
       SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END AS grantee,
              n.nspname AS table_schema, c.relname AS table_name, NULL::text AS column_name,
-             a.privilege_type, a.is_grantable
+             a.privilege_type, a.is_grantable,
+             CASE c.relkind WHEN 'S' THEN 'SEQUENCE' ELSE '' END AS keyword, NULL::text AS args
       FROM pg_class c
       JOIN pg_namespace n ON n.oid = c.relnamespace
       CROSS JOIN LATERAL aclexplode(c.relacl) a
-      WHERE c.relacl IS NOT NULL AND c.relkind IN ('r', 'p', 'v', 'm', 'f')
+      WHERE c.relacl IS NOT NULL AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
         AND a.grantee <> c.relowner
         AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) NOT IN (
           'postgres','supabase_admin','authenticator','supabase_auth_admin',
@@ -668,8 +669,26 @@ async function captureRoleGrants(
         AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) NOT LIKE 'pg\\_%')
         AND n.nspname NOT IN (${excluded})
       UNION ALL
+      -- Routines, through acldefault(): a NULL proacl is EXECUTE to PUBLIC,
+      -- and leaving routines out restored a SECURITY DEFINER function the
+      -- source kept from the API as callable by anyone.
       SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END,
-             n.nspname, c.relname, att.attname, a.privilege_type, a.is_grantable
+             n.nspname, p.proname, NULL::text, a.privilege_type, a.is_grantable,
+             CASE p.prokind WHEN 'p' THEN 'PROCEDURE' ELSE 'FUNCTION' END, pg_get_function_identity_arguments(p.oid)
+      FROM pg_proc p
+      JOIN pg_namespace n ON n.oid = p.pronamespace
+      CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+      WHERE a.grantee <> p.proowner
+        AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+        AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) NOT IN (
+          'postgres','supabase_admin','authenticator','supabase_auth_admin',
+          'supabase_storage_admin','dashboard_user','pgbouncer','supavisor'
+        ))
+        AND (a.grantee = 0 OR pg_get_userbyid(a.grantee) NOT LIKE 'pg\\_%')
+        AND n.nspname NOT IN (${excluded})
+      UNION ALL
+      SELECT CASE WHEN a.grantee = 0 THEN 'PUBLIC' ELSE pg_get_userbyid(a.grantee) END,
+             n.nspname, c.relname, att.attname, a.privilege_type, a.is_grantable, '', NULL::text
       FROM pg_attribute att
       JOIN pg_class c ON c.oid = att.attrelid
       JOIN pg_namespace n ON n.oid = c.relnamespace
@@ -677,10 +696,14 @@ async function captureRoleGrants(
       WHERE att.attacl IS NOT NULL AND att.attnum > 0 AND NOT att.attisdropped
         AND a.grantee <> c.relowner
         AND n.nspname NOT IN (${excluded})
-      ORDER BY 1, 2, 3, 4, 5
+      ORDER BY 1, 2, 3, 8, 4, 5
     `) as unknown as Array<{
       grantee: string; table_schema: string; table_name: string
       column_name: string | null; privilege_type: string; is_grantable: boolean
+      /** SEQUENCE, FUNCTION or PROCEDURE; empty for a table or view. */
+      keyword: string
+      /** A routine's identity arguments. */
+      args: string | null
     }>
 
     // One statement per role, object and grant option, listing the
@@ -690,13 +713,14 @@ async function captureRoleGrants(
     // than rejecting every privilege granted alongside.
     const grouped = new Map<string, typeof rows>()
     for (const row of rows) {
-      const key = JSON.stringify([row.grantee, row.table_schema, row.table_name, row.column_name, Boolean(row.is_grantable),
-        row.privilege_type === 'MAINTAIN'])
+      const key = JSON.stringify([row.grantee, row.keyword, row.table_schema, row.table_name, row.args, row.column_name,
+        Boolean(row.is_grantable), row.privilege_type === 'MAINTAIN'])
       grouped.set(key, [...(grouped.get(key) ?? []), row])
     }
     const statements = [...grouped.values()].map(([row, ...rest]) =>
       `GRANT ${[row, ...rest].map(r => r.privilege_type + (r.column_name ? ` (${quoteName(r.column_name)})` : '')).join(', ')}`
-      + ` ON ${quoteName(row.table_schema)}.${quoteName(row.table_name)}`
+      + ` ON ${row.keyword ? `${row.keyword} ` : ''}${quoteName(row.table_schema)}.${quoteName(row.table_name)}`
+      + (row.args !== null && row.keyword !== 'SEQUENCE' && row.keyword ? `(${row.args})` : '')
       // PUBLIC is a keyword; quoted, it names a role that does not exist.
       + ` TO ${row.grantee === 'PUBLIC' ? 'PUBLIC' : quoteName(row.grantee)}`
       + (row.is_grantable ? ' WITH GRANT OPTION' : '')

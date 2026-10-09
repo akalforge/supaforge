@@ -4,6 +4,7 @@ import type { ScanResult, SyncAction } from './types/drift'
 import { errMsg } from './utils/error'
 import { ABSENT_ON_TARGET, EXTENSION_UNAVAILABLE, UNDEFINED_COLUMN, sqlState } from './pg-errors.js'
 import { destructiveReason } from './dbdiff'
+import { parseStatements } from './sql-ast'
 import {
   orderStatements, referencedTables,
   createdPolicies, createsOnlyPolicies,
@@ -135,6 +136,43 @@ function isSelected(issueId: string, only: string[] | undefined): boolean {
 }
 
 /**
+ * `--only` plus the "default grants to take back" of every table or view the
+ * selection creates.
+ *
+ * A new table picks up the target's default privileges — on Supabase,
+ * everything to anon and authenticated — and the roles check's
+ * `roles-grant-default-<role>.<schema>.<table>` fixes take back what the
+ * source doesn't grant. Selecting the table without them left it open to the
+ * Data API, so they come along with it.
+ */
+function withDefaultGrantRevokes(scanResult: ScanResult, only: string[] | undefined): string[] | undefined {
+  if (!only?.length) return only
+  const issues = scanResult.checks.flatMap(c => c.issues)
+  const created = new Set(issues
+    .filter(i => i.sql?.up && isSelected(i.id, only))
+    .flatMap(i => relationsCreatedBy(i.sql!.up)))
+  if (created.size === 0) return only
+  const companions = issues
+    .filter(i => i.id.startsWith('roles-grant-default-')
+      && [...created].some(rel => i.id.toLowerCase().endsWith(`.${rel}`)))
+    .map(i => i.id)
+  return [...only, ...companions]
+}
+
+/** `schema.name` (lower case, `public` when unqualified) of each table and view the SQL creates. */
+function relationsCreatedBy(sql: string): string[] {
+  const statements = parseStatements(sql)
+  if (!statements) return []
+  return statements.flatMap(({ kind, node }) => {
+    const rel = kind === 'CreateStmt' ? node.relation
+      : kind === 'ViewStmt' ? node.view
+        : kind === 'CreateTableAsStmt' ? node.into?.rel
+          : undefined
+    return rel?.relname ? [`${(rel.schemaname || 'public').toLowerCase()}.${String(rel.relname).toLowerCase()}`] : []
+  })
+}
+
+/**
  * Decide what happens to one issue: run its SQL, call its API, or skip it.
  *
  * Split out of planWork so each reason a fix is withheld is one readable
@@ -218,6 +256,7 @@ function policiesCreatedBySelectedFixes(checks: ScanResult['checks'], options: P
  * reported it — see `orderStatements`.
  */
 export function planWork(scanResult: ScanResult, options: PlanOptions = {}): PlannedWork {
+  options = { ...options, only: withDefaultGrantRevokes(scanResult, options.only) }
   const plan: PlannedWork = { sqlStatements: [], apiActions: [], skipped: [] }
 
   const relevant = scanResult.checks.filter(

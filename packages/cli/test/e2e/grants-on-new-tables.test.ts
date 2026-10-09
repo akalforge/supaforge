@@ -80,3 +80,39 @@ describeE2E('e2e: a new table keeps the source\'s grants', () => {
     expect(scan.checks.flatMap(c => c.issues), r.stdout).toEqual([])
   }, 300_000)
 })
+
+describeE2E('e2e: --only a new table keeps the source\'s grants', () => {
+  // A selective transfer picking a table's creation (and a function using
+  // it) left out the table's "default grants to take back", and the table
+  // arrived open to anon.
+  let h: PgHarness
+
+  beforeAll(async () => {
+    h = new PgHarness({ verbose: !!process.env.E2E_VERBOSE, keep: !!process.env.E2E_KEEP })
+    await h.up()
+    await h.applySql('source', PLATFORM + `
+      CREATE TABLE public.t_a (id int PRIMARY KEY, secret text);
+      REVOKE ALL ON public.t_a FROM anon, authenticated;
+      CREATE FUNCTION public.f_a() RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM public.t_a';
+      CREATE TABLE public.t_other (id int PRIMARY KEY);
+      REVOKE ALL ON public.t_other FROM anon, authenticated;`)
+    await h.applySql('target', PLATFORM)
+  }, 300_000)
+
+  afterAll(async () => { await h?.down() }, 120_000)
+
+  it('takes back the defaults on the table it creates, and touches nothing else', async () => {
+    const ws = await h.workspace()
+    const scan = JSON.parse((await h.cli(['diff', '--json'], { cwd: ws })).stdout) as { checks: Array<{ issues: Array<{ id: string; title: string }> }> }
+    const ids = scan.checks.flatMap(c => c.issues)
+    const createA = ids.find(i => /Table missing: public\.t_a$/.test(i.title))!.id
+    const createF = ids.find(i => /f_a/.test(i.title) && i.id.startsWith('schema-create-function'))!.id
+
+    const r = await h.cli(['diff', '--apply', '--only', createA, '--only', createF], { cwd: ws })
+    expect(r.code, r.stdout + r.stderr).toBe(0)
+    const anonOnA = `SELECT count(*) FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
+      WHERE c.oid = 'public.t_a'::regclass AND a.grantee = 'anon'::regrole`
+    expect(await h.sql('target', anonOnA)).toBe('0')
+    expect(await h.sql('target', "SELECT count(*) FROM pg_class WHERE relname = 't_other'")).toBe('0')
+  }, 300_000)
+})

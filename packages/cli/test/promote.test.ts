@@ -797,3 +797,45 @@ describe('planWork and deletes made through an API', () => {
     expect(plan.apiActions.map(a => a.issueId).sort()).toEqual(['edge-extra-hello', 'storage-extra-avatars', 'storage-missing-docs'])
   })
 })
+
+describe('planWork --only and a new table\'s default grants', () => {
+  // Selecting a table's creation without its "default grants to take back"
+  // left the table with the target's default privileges: a table the source
+  // closed to anon arrived open to it.
+  const withNewTable = () => makeScanResult({
+    checks: [
+      { check: 'schema', status: 'drifted', durationMs: 0, issues: [
+        { id: 'schema-create-table-1', check: 'schema', severity: 'warning', title: 'Table missing: public.t_a', description: 'd',
+          sql: { up: 'CREATE TABLE public.t_a (id int PRIMARY KEY, secret text);', down: '' } },
+        { id: 'schema-create-table-2', check: 'schema', severity: 'warning', title: 'Table missing: public.t_b', description: 'd',
+          sql: { up: 'CREATE TABLE "public"."t_b" (id int);', down: '' } },
+        { id: 'schema-create-view-3', check: 'schema', severity: 'warning', title: 'View missing: public.v_a', description: 'd',
+          sql: { up: 'CREATE VIEW public.v_a AS SELECT id FROM public.t_a;', down: '' } },
+      ] },
+      { check: 'roles', status: 'drifted', durationMs: 0, issues: [
+        { id: 'roles-grant-default-anon.public.t_a', check: 'roles', severity: 'critical', title: 'Default grants to take back', description: 'd',
+          sql: { up: 'REVOKE ALL ON public.t_a FROM anon;', down: '' } },
+        { id: 'roles-grant-default-authenticated.public.t_a', check: 'roles', severity: 'critical', title: 'Default grants to take back', description: 'd',
+          sql: { up: 'REVOKE ALL ON public.t_a FROM authenticated;', down: '' } },
+        { id: 'roles-grant-default-anon.public.t_b', check: 'roles', severity: 'critical', title: 'Default grants to take back', description: 'd',
+          sql: { up: 'REVOKE ALL ON public.t_b FROM anon;', down: '' } },
+        { id: 'roles-grant-default-anon.public.v_a', check: 'roles', severity: 'critical', title: 'Default grants to take back', description: 'd',
+          sql: { up: 'REVOKE ALL ON public.v_a FROM anon;', down: '' } },
+      ] },
+    ],
+  })
+
+  it('brings the selected table\'s default grants along, and no other table\'s', () => {
+    const ids = planWork(withNewTable(), { only: ['schema-create-table-1'] }).sqlStatements.map(s => s.issueId)
+    expect(ids).toEqual(expect.arrayContaining([
+      'schema-create-table-1', 'roles-grant-default-anon.public.t_a', 'roles-grant-default-authenticated.public.t_a',
+    ]))
+    expect(ids).not.toContain('roles-grant-default-anon.public.t_b')
+    expect(ids).not.toContain('schema-create-table-2')
+  })
+
+  it('does the same for quoted names and for views', () => {
+    const ids = planWork(withNewTable(), { only: ['schema-create-table-2', 'schema-create-view-3'] }).sqlStatements.map(s => s.issueId)
+    expect(ids).toEqual(expect.arrayContaining(['roles-grant-default-anon.public.t_b', 'roles-grant-default-anon.public.v_a']))
+  })
+})

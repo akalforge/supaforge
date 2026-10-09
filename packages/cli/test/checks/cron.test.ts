@@ -102,7 +102,7 @@ describe('CronCheck', () => {
     // Was: returned [], reported as a clean pass. `snapshot` already says
     // "skipped — pg_cron extension not installed" for exactly this (issue #42).
     const queryFn: QueryFn = async () => {
-      throw new Error('relation "cron.job" does not exist')
+      throw Object.assign(new Error('relation "cron.job" does not exist'), { code: '42P01' })
     }
 
     const check = new CronCheck(queryFn)
@@ -115,7 +115,7 @@ describe('CronCheck', () => {
     // That is genuine drift and must not be swallowed by the skip above.
     const queryFn: QueryFn = async (dbUrl) => {
       if (dbUrl.includes('source')) return [makeJob({ jobname: 'nightly' })] as unknown as Record<string, unknown>[]
-      throw new Error('relation "cron.job" does not exist')
+      throw Object.assign(new Error('relation "cron.job" does not exist'), { code: '42P01' })
     }
 
     const check = new CronCheck(queryFn)

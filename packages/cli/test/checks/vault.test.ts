@@ -139,7 +139,7 @@ describe('VaultCheck', () => {
 
   it('handles vault extension not installed gracefully', async () => {
     const queryFn: QueryFn = async () => {
-      throw new Error('schema "vault" does not exist')
+      throw Object.assign(new Error('schema "vault" does not exist'), { code: '3F000' })
     }
 
     const check = new VaultCheck(queryFn)

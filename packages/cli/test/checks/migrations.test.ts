@@ -252,7 +252,7 @@ describe('MigrationsCheck', () => {
 
   it('handles DB query failure gracefully (table does not exist)', async () => {
     const readDirFn: ReadDirFn = async () => ['001_setup.sql']
-    const queryFn: QueryFn = async () => { throw new Error('relation does not exist') }
+    const queryFn: QueryFn = async () => { throw Object.assign(new Error('relation does not exist'), { code: '42P01' }) }
 
     const check = new MigrationsCheck(queryFn, readDirFn)
     const issues = await check.scan(mockContext())

@@ -113,12 +113,19 @@ const CONNECTION_ERROR_PATTERNS: Array<{ test: (msg: string) => boolean; build: 
     build: (host) => `Cannot resolve hostname ${host} — check the database URL in your config.`,
   },
   {
+    // Before the connection timeout: the server answered, and a query ran
+    // past its statement_timeout. Calling that a connection problem sent
+    // people to check a host and port that were fine.
+    test: (m) => /canceling statement due to statement timeout|57014/i.test(m),
+    build: (host) => `A query on ${host} was cancelled by statement_timeout — the server is reachable. Raise statement_timeout for this role or connection and try again.`,
+  },
+  {
     // Deliberately narrow. A bare /timeout/i also matches our own remediation
     // text — "set SUPAFORGE_DBDIFF_TIMEOUT=600" contains "TIMEOUT" — which is
     // how an accurate "Schema diff timed out after Ns" message was being
     // rewritten into a wrong "check the host and port" one (issue #29).
     // DiagnosticError below is the primary guard; this is defence in depth.
-    test: (m) => /ETIMEDOUT|connection timed out|timeout expired|statement timeout/i.test(m),
+    test: (m) => /ETIMEDOUT|connection timed out|timeout expired/i.test(m),
     build: (host) => `Connection to ${host} timed out — verify the host and port are correct and that the server is reachable.`,
   },
   {

@@ -17,6 +17,9 @@ import { isCloneDatabase, sourceLooksLikeCloneOf } from '../branch.js'
 import { proveConvergence, residualHeldBack, proofScope, comparedSchemas } from '../prove.js'
 import { summarizeByKind } from '../scoring.js'
 import { CLONE_SKIP_FLAGS, DEFAULT_IGNORE_SCHEMAS, schemaDiffIgnores } from '../defaults.js'
+import { Preflight } from '../preflight.js'
+import type { SupaForgeConfig } from '../types/config.js'
+import { redactUrls, describeFailure } from '../utils/error.js'
 
 /**
  * Glyph and text for a finished check, so the three outcomes are visually
@@ -283,14 +286,10 @@ export default class Diff extends BaseCommand {
     }
 
     // ── Preflight: verify both databases are reachable ────────────────────────
-    if (!flags.json && !flags.ci) {
-      const sourceEnv = config.environments[config.source!]
-      const targetEnv = config.environments[config.target!]
-      const pre = this.createPreflight('Diff preflight checks')
-        .addDatabase('Source', config.source!, sourceEnv.dbUrl)
-        .addDatabase('Target', config.target!, targetEnv.dbUrl)
-      await this.runPreflight(pre, 'Diff')
-    }
+    // In every mode. --json and --ci used to skip it, and with an unreadable
+    // source every check that read nothing reported the target's objects as
+    // extra — and --apply dropped them.
+    await this.preflightBothDatabases(config, flags)
 
     /** Build a progress callback for scan calls. Only active when not --json or --ci. */
     const makeProgress = (): ((event: ScanProgressEvent) => void) | undefined => {
@@ -344,14 +343,26 @@ export default class Diff extends BaseCommand {
         ...(c.error ? { error: sanitizeForReport(c.error) } : {}),
       })))
 
+      // A check that failed measured nothing, so whatever it would have found
+      // is not applied. The run says so and exits 1 rather than reporting a
+      // clean sync.
+      const unchecked = scanResult.checks
+        .filter(c => c.status === 'error')
+        .map(c => ({ check: c.check, error: sanitizeForReport(c.error ?? 'check failed') }))
+
       if (scanResult.summary.total === 0) {
         // --json promises JSON on stdout whatever the outcome. This branch used
         // to print the sentence below instead, so a script reading the result
         // of an apply failed on the one run where there was nothing to do.
         if (flags.json) {
           const empty: PromoteResult = { applied: [], skipped: [], errors: [] }
-          this.json(empty)
+          this.json(unchecked.length ? { ...empty, unchecked } : empty)
+          if (unchecked.length) this.exit(1)
           return
+        }
+        if (unchecked.length) {
+          this.reportUnchecked(unchecked)
+          this.exit(1)
         }
         this.log(`${ok('No drift detected.')} Nothing to apply. ✓`)
         this.log(renderTip({ command: 'diff', apply: true, driftTotal: 0 }))
@@ -445,13 +456,17 @@ export default class Diff extends BaseCommand {
       })
 
       if (flags.json) {
-        this.json(result)
+        this.json(unchecked.length ? { ...result, unchecked } : result)
+        // The same exit code as text mode: a failed fix, or a check that never
+        // ran, is not a successful apply.
+        if (result.errors.length > 0 || unchecked.length > 0) this.exit(1)
         return
       }
 
       this.renderApplyResult(result, dryRun)
 
-      if (result.errors.length > 0) {
+      if (unchecked.length > 0) this.reportUnchecked(unchecked)
+      if (result.errors.length > 0 || unchecked.length > 0) {
         this.exit(1)
       }
 
@@ -559,13 +574,12 @@ export default class Diff extends BaseCommand {
       }))
     }
 
-    // Exit code deliberately unchanged for an errored check: `--ci` is the
-    // documented contract for scripting and already exits 2 in that case
-    // (0=clean, 1=drift, 2=error). Making plain `diff` exit non-zero here
-    // would break every non-CI caller for a signal that already has a
-    // supported home. The misleading *output* is fixed above instead.
+    // A check that errored measured nothing, so the run can't vouch for the
+    // pair: exit 1, as the exit-code table says for "something failed". It
+    // exited 0, and with an unreadable source --json reported a score and
+    // succeeded. (--ci keeps its own contract and exits 2.)
     //
-    // Only drift decides the code. A critical posture finding — RLS disabled on
+    // Otherwise only drift decides the code. A critical posture finding — RLS disabled on
     // a table, a migration file with no tracking row — is true of the target
     // whichever pair you diff, so letting it exit 1 meant a perfectly
     // synchronised pair failed a sync check forever (issue #66).
@@ -580,9 +594,64 @@ export default class Diff extends BaseCommand {
       )
     }
 
-    if (drift.critical > 0 || (flags['fail-on-posture'] && posture.critical > 0)) {
+    if (drift.critical > 0 || (flags['fail-on-posture'] && posture.critical > 0) || erroredChecks.length > 0) {
       this.exit(1)
     }
+  }
+
+  /** Name the checks that failed, whose drift this run neither saw nor applied. */
+  private reportUnchecked(unchecked: Array<{ check: string; error: string }>): void {
+    this.log(`\n  ${warn(`${unchecked.length} check(s) could not run, so nothing of theirs was applied:`)}`)
+    for (const u of unchecked) this.log(`    ${u.check}: ${u.error}`)
+    this.log('')
+  }
+
+  /**
+   * Abort before scanning when either database can't be reached.
+   *
+   * Text mode prints the preflight as before. Under --json the report goes to
+   * stdout as JSON; under --ci it becomes an error annotation, with exit 2
+   * (couldn't run) as the CI contract says.
+   */
+  private async preflightBothDatabases(
+    config: SupaForgeConfig,
+    flags: { json?: boolean; ci?: boolean },
+  ): Promise<void> {
+    const quiet = Boolean(flags.json || flags.ci)
+    const pre = new Preflight('Diff preflight checks', quiet ? () => undefined : (m) => this.log(m))
+      .addDatabase('Source', config.source!, config.environments[config.source!].dbUrl)
+      .addDatabase('Target', config.target!, config.environments[config.target!].dbUrl)
+    const report = await pre.run()
+    if (report.passed) return
+
+    const failures = report.checks
+      .filter(c => !c.passed)
+      .map(c => `${c.label} not reachable: ${redactUrls(describeFailure(c.error))}`)
+    const message = `Diff aborted — ${failures.join('; ')}`
+    if (flags.ci) {
+      process.stderr.write(`::error title=Diff aborted::${failures.join('; ')}\n`)
+      // The summary's usual shape, so a workflow reading the artifact needs no
+      // special case: nothing compared, and the reason in `errors`.
+      process.stdout.write(JSON.stringify({
+        timestamp: new Date().toISOString(),
+        error: message,
+        score: null,
+        postureScore: null,
+        summary: { total: 0, critical: 0, warning: 0, info: 0 },
+        errors: failures.map(f => ({ check: 'preflight', message: f })),
+        skipped: [],
+        coverage: { compared: 0, total: 0 },
+        criticalIssues: [],
+        warningIssues: [],
+        preflight: report.checks.map(stripError),
+      }, null, 2) + '\n')
+      this.exit(2)
+    }
+    if (flags.json) {
+      this.json({ error: message, preflight: report.checks.map(stripError) })
+      this.exit(1)
+    }
+    this.error('Diff aborted — fix the issues above first.', { exit: 1 })
   }
 }
 
@@ -594,3 +663,9 @@ function heldBackSql(scanResult: ScanResult, planned: { skipped: Array<{ issueId
     .map(i => i.sql!.up)
 }
 
+
+/** A preflight entry without the raw error object, which may not serialise. */
+function stripError(c: { label: string; passed: boolean; detail?: string; error?: unknown }) {
+  return { label: c.label, passed: c.passed, ...(c.detail ? { detail: c.detail } : {}),
+    ...(c.error ? { error: redactUrls(describeFailure(c.error)) } : {}) }
+}

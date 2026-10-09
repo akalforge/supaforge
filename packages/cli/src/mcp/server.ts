@@ -8,6 +8,8 @@ import { resolveConfig, validateConfig } from '../config.js'
 import { createDefaultRegistry } from '../checks/index.js'
 import { scan } from '../scanner.js'
 import { promote } from '../promote.js'
+import { checkConnection } from '../preflight.js'
+import { redactUrls, describeFailure } from '../utils/error.js'
 import { captureSnapshot } from '../snapshot.js'
 import { backup } from '../migration.js'
 import { CHECK_NAMES } from '../types/drift.js'
@@ -237,6 +239,19 @@ export function createServer(cwd = process.cwd(), options: ServerOptions = {}): 
           return { content: [{ type: 'text' as const, text: `Config errors:\n${errors.join('\n')}` }], isError: true }
         }
 
+        // Both databases must answer before anything is compared. Without
+        // this, an unreadable source looked empty to the checks that treated a
+        // failed read as "nothing there", and the target's webhooks were
+        // dropped as extra.
+        const unreachable: string[] = []
+        for (const [label, name] of [['Source', config.source!], ['Target', config.target!]] as const) {
+          const conn = await checkConnection(config.environments[name].dbUrl)
+          if (!conn.reachable) unreachable.push(`${label} (${name}) not reachable: ${redactUrls(describeFailure(conn.error))}`)
+        }
+        if (unreachable.length > 0) {
+          return { content: [{ type: 'text' as const, text: `Nothing compared or applied.\n${unreachable.join('\n')}` }], isError: true }
+        }
+
         const registry = createDefaultRegistry()
         const scanResult: ScanResult = await scan(registry, {
           config,
@@ -252,7 +267,16 @@ export function createServer(cwd = process.cwd(), options: ServerOptions = {}): 
           dryRun,
         })
 
-        return { content: [{ type: 'text' as const, text: JSON.stringify(promoteResult, null, 2) }] }
+        // A check that failed measured nothing, so none of its drift was
+        // applied; the call is not a success.
+        const unchecked = scanResult.checks
+          .filter(c => c.status === 'error')
+          .map(c => ({ check: c.check, error: c.error ?? 'check failed' }))
+        const body = unchecked.length ? { ...promoteResult, unchecked } : promoteResult
+        return {
+          content: [{ type: 'text' as const, text: JSON.stringify(body, null, 2) }],
+          ...(unchecked.length || promoteResult.errors.length ? { isError: true } : {}),
+        }
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err)
         return { content: [{ type: 'text' as const, text: `Error: ${msg}` }], isError: true }

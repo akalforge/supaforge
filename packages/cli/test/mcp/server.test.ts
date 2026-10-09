@@ -217,6 +217,26 @@ describe('MCP tools', () => {
       const result = await client.callTool({ name: 'apply_fixes', arguments: { dryRun: true } })
       expect(result.isError).toBe(true)
     })
+
+    it('applies nothing, and says why, when a database cannot be reached', async () => {
+      // Without a reachability check, an unreadable source looked empty and
+      // the target's webhooks were dropped as extra.
+      await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify({
+        environments: {
+          dev: { dbUrl: 'postgresql://postgres:wrong@invalid:5432/dev' },
+          prod: { dbUrl: 'postgresql://postgres:prod@invalid:5432/prod' },
+        },
+        source: 'dev',
+        target: 'prod',
+      }))
+      ;({ client, cleanup } = await makeClient(tmpDir))
+      const result = await client.callTool({ name: 'apply_fixes', arguments: { dryRun: false, checks: ['webhooks'] } })
+      expect(result.isError).toBe(true)
+      const text = (result.content as Array<{ text: string }>)[0].text
+      expect(text).toMatch(/Nothing compared or applied/)
+      expect(text).toMatch(/Source \(dev\) not reachable/)
+      expect(text).not.toContain('wrong')
+    }, 60_000)
   })
 
   describe('take_snapshot', () => {

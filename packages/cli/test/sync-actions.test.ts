@@ -305,6 +305,7 @@ describe('promote: SyncAction support', () => {
       dbUrl: 'postgres://unused',
       scanResult,
       dryRun: false,
+      allowDestructive: true,
       fetchFn,
     })
 

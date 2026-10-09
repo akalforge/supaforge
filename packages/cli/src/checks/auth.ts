@@ -87,10 +87,9 @@ function stripTrailingSlashes(url: string): string {
  * Flatten GoTrue's `/auth/v1/settings` into the shape the Management API's
  * `/config/auth` returns, so the two can be compared key by key.
  *
- * GoTrue nests provider flags under `external` and uses lowercase names;
- * the Management API uses flat SCREAMING_SNAKE. Neither is a superset of the
- * other, which is why the comparison is only ever run between two
- * environments of the same kind.
+ * GoTrue nests provider flags under `external`; the Management API's keys are
+ * flat. Neither is a superset of the other, which is why the comparison is
+ * only ever run between two environments of the same kind.
  */
 export function normalizeGoTrueSettings(raw: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {}
@@ -110,14 +109,59 @@ export function normalizeGoTrueSettings(raw: Record<string, unknown>): Record<st
   return out
 }
 
-const CRITICAL_KEYS = [
-  'EXTERNAL_EMAIL_ENABLED',
-  'EXTERNAL_PHONE_ENABLED',
-  'JWT_EXP',
-  'SECURITY_CAPTCHA_ENABLED',
-  'MFA_ENABLED',
-  'SECURITY_UPDATE_PASSWORD_REQUIRE_REAUTHENTICATION',
+/**
+ * Settings whose drift is critical: how users sign in, how long a session
+ * lasts, and what stands between a request and an account.
+ *
+ * Matched in lower case. The Management API returns lower-case keys and
+ * normalised GoTrue settings are upper case; when these were listed in upper
+ * case only, nothing on a hosted project was ever critical.
+ */
+const CRITICAL_KEYS = new Set([
+  'external_email_enabled',
+  'external_phone_enabled',
+  'jwt_exp',
+  'security_captcha_enabled',
+  'security_update_password_require_reauthentication',
+  'disable_signup',
+])
+const CRITICAL_PATTERN = /^mfa_[a-z_]+_(enroll|verify)_enabled$/
+
+/** Credentials. Their values are never shown, and never copied to the target. */
+const SECRET_PATTERN = /(_secret|_secrets|_pass|_auth_token|_api_key|_access_key)$/
+
+/**
+ * Settings that name the environment itself or an account it uses: its URLs,
+ * its OAuth apps, its mail and SMS senders. They differ between staging and
+ * production by design, so copying the source's into the target would point
+ * production at staging. Reported, so a difference can be checked, but not
+ * applied.
+ */
+const ENVIRONMENT_PATTERNS = [
+  /^(site_url|uri_allow_list|saml_external_url)$/,
+  /^external_[a-z0-9_]+_(client_id|url)$/,
+  /^nimbus_oauth_client_id$/,
+  /^hook_[a-z_]+_uri$/,
+  /^smtp_(host|port|user|admin_email|sender_name)$/,
+  /^sms_[a-z]+_(account_sid|message_service_sid|content_sid|originator|sender|from)$/,
+  /^sms_twilio_verify_(account_sid|message_service_sid)$/,
+  /^sms_test_otp(_valid_until)?$/,
+  /^webauthn_rp_(id|origins|display_name)$/,
 ]
+
+type AuthKeyKind = 'secret' | 'environment' | 'shared'
+
+function classifyAuthKey(key: string): AuthKeyKind {
+  const k = key.toLowerCase()
+  if (SECRET_PATTERN.test(k)) return 'secret'
+  if (ENVIRONMENT_PATTERNS.some(p => p.test(k))) return 'environment'
+  return 'shared'
+}
+
+function isCriticalAuthKey(key: string): boolean {
+  const k = key.toLowerCase()
+  return CRITICAL_KEYS.has(k) || CRITICAL_PATTERN.test(k)
+}
 
 export class AuthCheck extends Check {
   readonly name = 'auth' as const
@@ -198,38 +242,54 @@ function diffAuthConfig(
     const sv = source[key]
     const tv = target[key]
 
-    if (JSON.stringify(sv) !== JSON.stringify(tv)) {
-      const isCritical = CRITICAL_KEYS.includes(key)
+    if (JSON.stringify(sv) === JSON.stringify(tv)) continue
 
-      // Only the hosted Management API can be written to. Self-hosted GoTrue
-      // takes its configuration from the environment it was started with and
-      // exposes no write endpoint, so attaching a PATCH action there would
-      // hand --apply a request that cannot succeed (issue #41).
-      const action: SyncAction | undefined = targetSrc.kind === 'hosted'
-        ? {
-            method: 'PATCH',
-            url: `${SUPABASE_MGMT_API}/${encodeURIComponent(targetSrc.ref)}/config/auth`,
-            headers: { Authorization: `Bearer ${targetSrc.token}` },
-            body: { [key]: sv },
-            label: `Set auth config "${key}" to ${JSON.stringify(sv)} in target`,
-          }
-        : undefined
-
-      const remediation = action
-        ? ''
-        : ' Self-hosted GoTrue is configured through its environment — update the target deployment and restart it.'
-
-      issues.push({
-        id: `auth-${key.toLowerCase()}`,
-        check: 'auth',
-        severity: isCritical ? 'critical' : 'info',
-        title: `Auth config mismatch: ${key}`,
-        description: `"${key}" differs between source (${JSON.stringify(sv)}) and target (${JSON.stringify(tv)}).${remediation}`,
-        sourceValue: sv,
-        targetValue: tv,
-        ...(action ? { action } : {}),
-      })
+    const kind = classifyAuthKey(key)
+    const base = {
+      id: `auth-${key.toLowerCase()}`,
+      check: 'auth' as const,
+      severity: isCriticalAuthKey(key) ? 'critical' as const : 'info' as const,
+      title: `Auth config mismatch: ${key}`,
     }
+
+    if (kind === 'secret') {
+      issues.push({
+        ...base,
+        description: `"${key}" differs between source and target. It is a secret: set it on the target directly.`,
+        manualOnly: `"${key}" is a secret and is never copied. Set it on the target directly.`,
+      })
+      continue
+    }
+
+    // Only the hosted Management API can be written to. Self-hosted GoTrue
+    // takes its configuration from the environment it was started with and
+    // exposes no write endpoint, so attaching a PATCH action there would
+    // hand --apply a request that cannot succeed (issue #41).
+    const action: SyncAction | undefined = targetSrc.kind === 'hosted' && kind === 'shared'
+      ? {
+          method: 'PATCH',
+          url: `${SUPABASE_MGMT_API}/${encodeURIComponent(targetSrc.ref)}/config/auth`,
+          headers: { Authorization: `Bearer ${targetSrc.token}` },
+          body: { [key]: sv },
+          label: `Set auth config "${key}" to ${JSON.stringify(sv)} in target`,
+        }
+      : undefined
+
+    const manualOnly = kind === 'environment'
+      ? `"${key}" belongs to each environment and is not copied. Change it on the target if it is wrong there.`
+      : action
+        ? undefined
+        : 'Self-hosted GoTrue is configured through its environment — update the target deployment and restart it.'
+
+    issues.push({
+      ...base,
+      description: `"${key}" differs between source (${JSON.stringify(sv)}) and target (${JSON.stringify(tv)}).`
+        + (manualOnly ? ` ${manualOnly}` : ''),
+      sourceValue: sv,
+      targetValue: tv,
+      ...(action ? { action } : {}),
+      ...(manualOnly ? { manualOnly } : {}),
+    })
   }
 
   return issues

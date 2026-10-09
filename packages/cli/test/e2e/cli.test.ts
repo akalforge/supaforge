@@ -4,7 +4,7 @@
  * These validate the CLI surface without needing real database containers.
  * They test --help output, config loading errors, flag parsing, etc.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { execFile } from 'node:child_process'
 import { writeFile, unlink, mkdir, rm, access } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -15,6 +15,11 @@ import pg from 'pg'
 const exec = promisify(execFile)
 // test/e2e/ → packages/cli/
 const CLI_DIR = join(import.meta.dirname, '..', '..')
+
+// Every test here spawns the CLI through tsx, which takes one to three seconds
+// on a CI runner, and several spawn it more than once. Vitest's default of 5s
+// failed them at random on the slower runners.
+vi.setConfig({ testTimeout: 30_000 })
 const DEV_BIN = join(CLI_DIR, 'bin', 'dev.js')
 const TSX_BIN = join(CLI_DIR, 'node_modules', '.bin', 'tsx')
 

@@ -28,7 +28,7 @@ npm install
 npm test        # Run tests (vitest)
 npm run lint    # Type-check (tsc --noEmit)
 npm run build   # Production build (tsup)
-./bin/dev.js scan   # Run in dev mode
+./bin/dev.js diff   # Run in dev mode
 ```
 
 ## How to Contribute
@@ -210,24 +210,6 @@ done
 Some of that corpus expects Supabase's roles (`authenticated`, `anon`,
 `service_role`); the script creates them up front, and skips any file that
 fails to load rather than aborting the run.
-
-### What this found
-
-Running the Supabase corpus through this harness surfaced four defects in
-DBDiff's PostgreSQL adapter, none of which any existing test could catch,
-because DBDiff's suite compares generated SQL to recorded `expected/` files and
-never replays it:
-
-| Symptom | Cause |
-|---|---|
-| `multiple primary keys for table "t" are not allowed` | the primary key was emitted bare *and* as a named constraint |
-| `relation "t_id_seq" does not exist` | `serial` written back as a raw `nextval()` default, with no sequence |
-| `syntax error at or near "USER"` | enums emitted as the literal `USER-DEFINED` placeholder |
-| no error at all | partitioned tables silently rebuilt as ordinary tables |
-
-The first three broke the migration outright. The fourth is the one worth
-remembering: it produced valid SQL that ran cleanly and quietly changed the
-data model.
 
 ### Ports
 

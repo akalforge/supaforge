@@ -218,7 +218,7 @@ function formatCheckLine(lr: CheckResult): string {
   const count = lr.issues.length
   const noun = count === 1 ? 'issue' : 'issues'
   const severity = highestSeverity(lr)
-  const sevLabel = severity ? colorSeverity(severity) : ''
+  const sevLabel = severity ? ` ${colorSeverity(severity)}` : ''
   const errText = lr.error || (lr.status === 'error' ? 'check failed' : '')
   const errLabel = errText ? `  ${warn(`(error: ${errText})`)}` : ''
   // The live progress line counted these before they were folded; saying so

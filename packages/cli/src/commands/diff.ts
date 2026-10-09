@@ -31,7 +31,7 @@ function describeCheckOutcome(
   if (status === 'skipped') {
     return { glyph: dim('○'), text: dim(`skipped — ${skipReason ?? 'no reason given'}`) }
   }
-  return { glyph: ok('✓'), text: `${issueCount} issues` }
+  return { glyph: ok('✓'), text: `${issueCount} ${issueCount === 1 ? 'issue' : 'issues'}` }
 }
 
 /**

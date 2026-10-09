@@ -105,10 +105,6 @@ Useful `diff` flags:
   column, deleting or truncating rows, and removing an RLS policy are reported
   but skipped until you add `--allow-destructive`. `migrate run` uses the same
   gate.
-- **Each environment keeps its own identity.** Auth settings that belong to an
-  environment (its site URL and redirect allow-list, OAuth client ids, SMTP
-  and SMS senders, hook URLs) are reported but never copied, and secrets are
-  neither shown nor copied.
 - **Dependency order.** Fixes run in dependency order: functions before the
   triggers that call them, columns before their indexes, drops last. A changed
   object that has to be dropped and recreated is a single fix.

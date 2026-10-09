@@ -153,6 +153,11 @@ function classifyIssue(
   if (issue.manualOnly) return { kind: 'skip', reason: issue.manualOnly }
 
   if (!issue.sql?.up) {
+    // A DELETE removes a bucket or an Edge Function as surely as DROP TABLE
+    // removes a table, so it waits for the same flag.
+    if (issue.action?.method === 'DELETE' && !options.allowDestructive) {
+      return { kind: 'skip', reason: `Destructive — ${issue.action.label}; re-run with --allow-destructive to apply` }
+    }
     if (issue.action) return { kind: 'api', action: issue.action }
     // A check that knows why it cannot offer a fix says so; "nothing
     // available" on its own leaves the user with no next step.

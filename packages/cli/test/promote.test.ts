@@ -764,3 +764,36 @@ describe('planWork and drops something held back still uses', () => {
     expect(plan.sqlStatements.map(s => s.issueId).sort()).toEqual(['schema-drop-1', 'schema-drop-type-2', 'schema-drop-type-3'])
   })
 })
+
+describe('planWork and deletes made through an API', () => {
+  // A DELETE request removes a bucket or an Edge Function as surely as
+  // DROP TABLE removes a table, but only SQL went through the destructive gate:
+  // with an apiUrl, `diff --apply` deleted the target's extra bucket, and an
+  // extra Edge Function, without --allow-destructive.
+  const withDeletes = () => makeScanResult({
+    checks: [
+      { check: 'storage', status: 'drifted', durationMs: 0, issues: [
+        { id: 'storage-extra-avatars', check: 'storage', severity: 'info', title: 'Extra bucket: avatars', description: 'd',
+          action: { method: 'DELETE', url: 'https://api.example.com/storage/v1/bucket/avatars', headers: {}, label: 'Delete bucket "avatars"' } },
+        { id: 'storage-missing-docs', check: 'storage', severity: 'warning', title: 'Missing bucket: docs', description: 'd',
+          action: { method: 'POST', url: 'https://api.example.com/storage/v1/bucket', headers: {}, label: 'Create bucket "docs"', body: { id: 'docs' } } },
+      ] },
+      { check: 'edge-functions', status: 'drifted', durationMs: 0, issues: [
+        { id: 'edge-extra-hello', check: 'edge-functions', severity: 'info', title: 'Extra Edge Function: hello', description: 'd',
+          action: { method: 'DELETE', url: 'https://api.supabase.com/v1/projects/ref/functions/hello', headers: {}, label: 'Delete Edge Function "hello"' } },
+      ] },
+    ],
+  })
+
+  it('holds them back without --allow-destructive, and says why', () => {
+    const plan = planWork(withDeletes())
+    expect(plan.apiActions.map(a => a.issueId)).toEqual(['storage-missing-docs'])
+    expect(plan.skipped.map(s => s.issueId).sort()).toEqual(['edge-extra-hello', 'storage-extra-avatars'])
+    for (const s of plan.skipped) expect(s.reason).toMatch(/--allow-destructive/)
+  })
+
+  it('runs them with --allow-destructive', () => {
+    const plan = planWork(withDeletes(), { allowDestructive: true })
+    expect(plan.apiActions.map(a => a.issueId).sort()).toEqual(['edge-extra-hello', 'storage-extra-avatars', 'storage-missing-docs'])
+  })
+})

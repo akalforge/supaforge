@@ -587,3 +587,22 @@ describe('renderSummary separates posture from drift (issue #40)', () => {
     expect(out).toMatch(/drift issue/)
   })
 })
+
+describe('renderSummary layer lines', () => {
+  const issue = (id: string, severity: 'critical' | 'warning') =>
+    ({ id, check: 'rls' as const, severity, title: id, description: id })
+
+  it('counts in the singular and plural, with a space before the severity', () => {
+    const out = renderSummary({
+      timestamp: '', source: 'dev', target: 'prod', score: 50, postureScore: null,
+      summary: { total: 3, critical: 1, warning: 2, info: 0 },
+      checks: [
+        { check: 'rls', status: 'drifted', durationMs: 0, issues: [issue('a', 'critical')] },
+        { check: 'cron', status: 'drifted', durationMs: 0, issues: [issue('b', 'warning'), issue('c', 'warning')] },
+      ],
+    } as ScanResult).replace(/\x1b\[[0-9;]*m/g, '')
+    expect(out).toMatch(/1 issue \[CRITICAL\]/)
+    expect(out).toMatch(/2 issues \[WARNING\]/)
+    expect(out).not.toMatch(/issues?\[/)
+  })
+})

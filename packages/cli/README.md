@@ -271,7 +271,7 @@ would push the clone's shape, absences included, onto the target.
 ## CI and exit codes
 
 ```yaml
-- run: npx supaforge diff --ci
+- run: npx @akal/supaforge diff --ci
   env:
     DEV_DATABASE_URL: ${{ secrets.DEV_DATABASE_URL }}
     PROD_DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}

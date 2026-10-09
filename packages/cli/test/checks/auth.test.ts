@@ -35,24 +35,24 @@ describe('AuthCheck', () => {
     expect(issues).toHaveLength(0)
   })
 
-  it('detects critical auth config mismatch (MFA_ENABLED)', async () => {
+  it('detects critical auth config mismatch (MFA_TOTP_ENROLL_ENABLED)', async () => {
     const check = new AuthCheck(makeFetchFn(
-      { MFA_ENABLED: true },
-      { MFA_ENABLED: false },
+      { MFA_TOTP_ENROLL_ENABLED: true },
+      { MFA_TOTP_ENROLL_ENABLED: false },
     ))
     const issues = await check.scan(mockContext())
 
     expect(issues).toHaveLength(1)
     expect(issues[0].severity).toBe('critical')
-    expect(issues[0].id).toBe('auth-mfa_enabled')
-    expect(issues[0].title).toContain('MFA_ENABLED')
+    expect(issues[0].id).toBe('auth-mfa_totp_enroll_enabled')
+    expect(issues[0].title).toContain('MFA_TOTP_ENROLL_ENABLED')
     expect(issues[0].sourceValue).toBe(true)
     expect(issues[0].targetValue).toBe(false)
     // Auth issues have PATCH action
     expect(issues[0].action).toBeDefined()
     expect(issues[0].action!.method).toBe('PATCH')
     expect(issues[0].action!.url).toContain('/v1/projects/tgt-ref/config/auth')
-    expect(issues[0].action!.body).toEqual({ MFA_ENABLED: true })
+    expect(issues[0].action!.body).toEqual({ MFA_TOTP_ENROLL_ENABLED: true })
   })
 
   it('detects critical auth config mismatch (JWT_EXP)', async () => {

@@ -1,7 +1,7 @@
 import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
-import { Check, CheckSkipped, type CheckContext } from './base'
+import { Check, CheckSkipped, readOrAbsent, type CheckContext } from './base'
 
 interface CronJob {
   jobid: number
@@ -43,13 +43,11 @@ export class CronCheck extends Check {
   }
 
   private async fetchCronJobs(dbUrl: string): Promise<{ jobs: CronJob[]; available: boolean }> {
-    try {
-      const jobs = await this.queryFn(dbUrl, CRON_SQL) as unknown as CronJob[]
-      return { jobs, available: true }
-    } catch {
-      // pg_cron extension may not be installed
-      return { jobs: [], available: false }
-    }
+    // pg_cron may not be installed; any other failure is an error.
+    return readOrAbsent<{ jobs: CronJob[]; available: boolean }>(
+      async () => ({ jobs: await this.queryFn(dbUrl, CRON_SQL) as unknown as CronJob[], available: true }),
+      { jobs: [], available: false },
+    )
   }
 }
 

@@ -1,3 +1,4 @@
+import { redactUrls, describeFailure } from './utils/error.js'
 import { formatWithOptions } from 'node:util'
 import { Command } from '@oclif/core'
 import { loadConfig, validateConfig, validateSingleEnvConfig } from './config.js'
@@ -30,8 +31,11 @@ export abstract class BaseCommand extends Command {
     super.log(message, ...args)
   }
 
+  private _jsonWritten = false
+
   /** The command's result as JSON, on stdout. */
   protected json(value: unknown): void {
+    this._jsonWritten = true
     process.stdout.write(JSON.stringify(value, null, 2) + '\n')
   }
 
@@ -48,6 +52,13 @@ export abstract class BaseCommand extends Command {
   override async catch(err: Error): Promise<void> {
     this._logWritten = true
     await this._writeRunLog('error', err.message)
+    // --json promises JSON on stdout. A connection error that ended the
+    // command before it produced any reached stderr only, and a script reading
+    // stdout got nothing to parse. A deliberate exit (this.exit) is not an
+    // error to report: its JSON, if any, is already written.
+    if (this.argv?.includes('--json') && !this._jsonWritten && !isExitRequest(err)) {
+      this.json({ error: redactUrls(describeFailure(err)) })
+    }
     return super.catch(err)
   }
 
@@ -153,8 +164,19 @@ export abstract class BaseCommand extends Command {
   protected async runPreflight(preflight: Preflight, commandName: string): Promise<PreflightReport> {
     const report = await preflight.run()
     if (!report.passed) {
-      this.error(`${commandName} aborted — fix the issues above first.`, { exit: 1 })
+      // Under --json the checks above went to stderr, so the JSON error names
+      // what failed rather than pointing at lines a script never sees.
+      const reasons = report.checks.filter(c => !c.passed).map(c => `${c.label}: ${redactUrls(c.error ?? 'failed')}`)
+      this.error(this.argv.includes('--json')
+        ? `${commandName} aborted — ${reasons.join('; ')}`
+        : `${commandName} aborted — fix the issues above first.`, { exit: 1 })
     }
     return report
   }
+}
+
+/** oclif's this.exit() throws an ExitError; it carries `oclif.exit`. */
+function isExitRequest(err: unknown): boolean {
+  const oclif = (err as { oclif?: { exit?: unknown } } | null)?.oclif
+  return typeof oclif?.exit === 'number' && (err as Error).message?.startsWith('EEXIT')
 }

@@ -205,10 +205,15 @@ const COMPARED_BUCKET_COLUMNS = [
 ] as const
 
 /** Which of those this particular Supabase version actually has. */
+// pg_catalog rather than information_schema throughout: information_schema
+// lists only what the connecting role holds a privilege on, so a role that
+// could not read storage saw "not a Supabase project" instead of an error.
 const BUCKET_COLUMNS_SQL = `
-  SELECT column_name
-  FROM information_schema.columns
-  WHERE table_schema = 'storage' AND table_name = 'buckets'
+  SELECT a.attname AS column_name
+  FROM pg_attribute a
+  JOIN pg_class c ON c.oid = a.attrelid
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+  WHERE n.nspname = 'storage' AND c.relname = 'buckets' AND a.attnum > 0 AND NOT a.attisdropped
 `
 
 /**
@@ -256,8 +261,8 @@ const TYPED_BUCKET_TABLES: TypedBucketSpec[] = [
 function tableExistsSql(table: string): string {
   return `
     SELECT EXISTS (
-      SELECT 1 FROM information_schema.tables
-      WHERE table_schema = 'storage' AND table_name = '${table}'
+      SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'storage' AND c.relname = '${table}'
     ) AS present
   `
 }
@@ -318,8 +323,8 @@ function diffTypedBuckets(
 /** Whether this database is a Supabase project at all. */
 const STORAGE_PRESENT_SQL = `
   SELECT EXISTS (
-    SELECT 1 FROM information_schema.tables
-    WHERE table_schema = 'storage' AND table_name = 'buckets'
+    SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'storage' AND c.relname = 'buckets'
   ) AS present
 `
 

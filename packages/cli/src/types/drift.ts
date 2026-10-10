@@ -102,6 +102,11 @@ export interface DriftIssue {
    * instead of being told there is nothing to be done.
    */
   manualOnly?: string
+  /**
+   * Why this fix waits for --allow-destructive, when that isn't visible from
+   * its SQL: a webhook is a trigger, and dropping a trigger usually isn't.
+   */
+  destructive?: string
 }
 
 export interface CheckResult {

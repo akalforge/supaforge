@@ -73,12 +73,11 @@ export default class Restore extends BaseCommand {
     const envName = flags.env
     const { env } = this.resolveEnv(config, envName)
 
-    // Preflight: verify database is reachable
-    if (!flags.json) {
-      const pre = this.createPreflight('Restore preflight checks')
-        .addDatabase('Target', envName, env.dbUrl)
-      await this.runPreflight(pre, 'Restore')
-    }
+    // Preflight: verify database is reachable. Under --json too, where its
+    // lines go to stderr and a failure is reported as JSON.
+    const pre = this.createPreflight('Restore preflight checks')
+      .addDatabase('Target', envName, env.dbUrl)
+    await this.runPreflight(pre, 'Restore')
 
     // Safety: check if target DB has existing tables before destructive restore
     if (flags.apply) {

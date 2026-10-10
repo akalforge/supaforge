@@ -797,3 +797,25 @@ describe('planWork and deletes made through an API', () => {
     expect(plan.apiActions.map(a => a.issueId).sort()).toEqual(['edge-extra-hello', 'storage-extra-avatars', 'storage-missing-docs'])
   })
 })
+
+describe('planWork and a fix whose finding says it is destructive', () => {
+  // A webhook is a trigger, and dropping a trigger is usually routine; dropping
+  // a webhook stops the target calling out. With the source unreadable, every
+  // target webhook looked extra and --apply dropped them all without asking.
+  const extraWebhook = () => makeScanResult({
+    checks: [{ check: 'webhooks', status: 'drifted', durationMs: 0, issues: [
+      { id: 'webhooks-extra-public.orders.orders_webhook', check: 'webhooks', severity: 'info', title: 'Extra webhook', description: 'd',
+        destructive: 'removes a webhook', sql: { up: 'DROP TRIGGER IF EXISTS "orders_webhook" ON "public"."orders";', down: '' } },
+    ] }],
+  })
+
+  it('holds it back without --allow-destructive, with the finding\'s reason', () => {
+    const plan = planWork(extraWebhook())
+    expect(plan.sqlStatements).toEqual([])
+    expect(plan.skipped[0].reason).toMatch(/Destructive — removes a webhook; re-run with --allow-destructive/)
+  })
+
+  it('runs it with --allow-destructive', () => {
+    expect(planWork(extraWebhook(), { allowDestructive: true }).sqlStatements).toHaveLength(1)
+  })
+})

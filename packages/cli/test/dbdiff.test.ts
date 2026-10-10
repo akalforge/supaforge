@@ -17,6 +17,7 @@ import {
   mergeReplacements,
   parseDbDiffProgress,
   extractQualifiedName,
+  dbdiffNotInstalled,
 } from '../src/dbdiff.js'
 import { DBDIFF_EXEC_TIMEOUT_MS } from '../src/constants.js'
 
@@ -1574,5 +1575,23 @@ describe('a recreated object\'s comments go with it', () => {
     }, 'schema')
     expect(issues.map(i => i.title)).toEqual(['View modified: public.vt_v'])
     expect(issues[0].sql?.up).toMatch(/CREATE VIEW[\s\S]*COMMENT ON VIEW public\.vt_v IS 'v';\nCOMMENT ON COLUMN public\.vt_v\.id IS 'vn';$/)
+  })
+})
+
+describe('dbdiffNotInstalled', () => {
+  // The error message begins with the full command line, connection URLs and
+  // all; matching a bare "404" there called a real DBDiff failure "not
+  // installed" whenever a port contained 404, and the schema check was skipped.
+  it('is not fooled by a 404 in a port or a "not found" in the diff output', () => {
+    expect(dbdiffNotInstalled(1, 'ERROR: relation "public.t" not found in source')).toBe(false)
+    expect(dbdiffNotInstalled(3, 'boom')).toBe(false)
+  })
+
+  it('recognises a missing binary, module or package', () => {
+    expect(dbdiffNotInstalled('ENOENT', '')).toBe(true)
+    expect(dbdiffNotInstalled(1, 'Error [ERR_MODULE_NOT_FOUND]: Cannot find package')).toBe(true)
+    expect(dbdiffNotInstalled(1, 'npm error 404 Not Found - GET https://registry.npmjs.org/@dbdiff%2fcli')).toBe(true)
+    expect(dbdiffNotInstalled(1, 'npm ERR! code E404')).toBe(true)
+    expect(dbdiffNotInstalled(127, 'sh: 1: dbdiff: not found')).toBe(true)
   })
 })

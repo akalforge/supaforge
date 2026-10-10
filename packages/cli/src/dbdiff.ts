@@ -47,6 +47,20 @@ export interface DbDiffResult {
 }
 
 /**
+ * Whether a failed run means @dbdiff/cli is missing, rather than that it ran
+ * and failed.
+ *
+ * Read from the spawn's error code and the process's stderr only. The error
+ * message starts with the whole command line, connection URLs included, so a
+ * bare `404` matched a port like 40425: a real DBDiff failure was reported as
+ * "not installed" and the schema check skipped.
+ */
+export function dbdiffNotInstalled(code: unknown, stderr: string): boolean {
+  if (code === 'ENOENT') return true
+  return /ERR_MODULE_NOT_FOUND|could not determine executable|npm (?:ERR!|error) (?:code E404|404)|\bE404\b|command not found|: not found\s*$/m.test(stderr)
+}
+
+/**
  * Resolve the @dbdiff/cli binary path from node_modules.
  *
  * Uses createRequire to locate the installed package, then returns
@@ -293,13 +307,7 @@ export async function runDbDiff(options: DbDiffOptions): Promise<DbDiffResult> {
       return runDbDiff({ ...options, units: false })
     }
 
-    if (
-      combined.includes('ENOENT') ||
-      combined.includes('not found') ||
-      combined.includes('ERR_MODULE_NOT_FOUND') ||
-      combined.includes('could not determine executable') ||
-      combined.includes('404')
-    ) {
+    if (dbdiffNotInstalled(errObj.code, stderr)) {
       throw new DiagnosticError(
         '@dbdiff/cli is not installed. Install it with: npm install @dbdiff/cli',
       )

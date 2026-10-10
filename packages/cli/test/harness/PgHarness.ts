@@ -191,7 +191,7 @@ export class PgHarness {
 
   private async startOne(role: Role): Promise<void> {
     const name = this.name(role);
-    await this.rt(['rm', '-f', name]).catch(() => undefined);
+    await this.rt(['rm', '-f', '-v', name]).catch(() => undefined);
     this.log(`starting ${name} on :${this.port(role)} (${this.runtime})`);
     await this.rt([
       'run', '-d', '--name', name,
@@ -228,7 +228,7 @@ export class PgHarness {
   async down(): Promise<void> {
     if (this.keep) { this.log(`keep=true, leaving containers and workspaces (${this.workspaces.join(', ')})`); return; }
     for (const role of this.started) {
-      await this.rt(['rm', '-f', this.name(role)]).catch(() => undefined);
+      await this.rt(['rm', '-f', '-v', this.name(role)]).catch(() => undefined);
     }
     this.started = [];
     for (const dir of this.workspaces) {

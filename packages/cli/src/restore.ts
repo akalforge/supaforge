@@ -136,6 +136,8 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
 
   /** What the target turned out to lack — see tolerableFailure. */
   const missing = new Set<string>()
+  // Objects a skipped statement would have created, with why it was skipped.
+  const leftOut = new Map<string, string>()
 
   /** Webhook triggers the schema dump creates, so the webhooks layer can skip them. */
   const createdBySchemaLayer = new Set<string>()
@@ -258,7 +260,7 @@ export async function restoreFromSnapshot(options: RestoreOptions): Promise<Rest
         }
 
         for (const sql of statements) {
-          await applyStatement(client, sql, transactional, result, missing)
+          await applyStatement(client, sql, transactional, result, missing, leftOut)
         }
       } catch (err) {
         if (err instanceof RestoreAborted) throw err
@@ -789,6 +791,7 @@ export function tolerableFailure(
   err: unknown,
   targetSchemas: ReadonlySet<string>,
   missing: ReadonlySet<string> = new Set(),
+  leftOut: ReadonlyMap<string, string> = new Map(),
 ): string | undefined {
   const code = (err as { code?: string } | null)?.code
   if (!code) return undefined
@@ -815,12 +818,23 @@ export function tolerableFailure(
   // indexes, keys and rows. Each is left out and named, and the rest is
   // restored — one missing extension rolled back everything before.
   if (missing.size > 0) {
+    const message = errMsg(err)
+    // An object that was itself left out, named by the error: its own cause,
+    // not every extension the target lacks. An index on a table typed by
+    // pgvector listed pg_cron and pg_net too.
+    const absent = /^(?:relation|type|function) "([^"]+)" does not exist/i.exec(message)?.[1]
+    const key = absent && (absent.includes('.') ? absent : `public.${absent}`)
+    const cause = key ? leftOut.get(key) ?? leftOut.get(key.toLowerCase()) : undefined
+    if (cause) return `${message}, as ${key} was left out: ${cause}`
+
     // The ones the error is about, when it names any: every missing extension
     // listed against every failure said nothing about which one was needed.
-    const message = errMsg(err)
+    // The statement counts as well as the error: `CREATE TABLE … extensions.vector(3)`
+    // fails on the schema, but it is pgvector that it needs.
     const named = [...missing].filter(what => {
       const name = /^the (.+) (?:extension|schema)$/.exec(what)?.[1]
-      return name !== undefined && new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i').test(message)
+      const word = name !== undefined && new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+      return word !== false && (word.test(message) || word.test(sqlSkeleton(sql)))
     })
     return `${message}, as this target lacks ${(named.length > 0 ? named : [...missing]).join(', ')}`
   }
@@ -833,6 +847,17 @@ export function tolerableFailure(
  * check_function_bodies off.
  */
 const ROUTINE = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:FUNCTION|PROCEDURE)\b/i
+
+/** `CREATE … TABLE|VIEW|TYPE|DOMAIN|SEQUENCE|FUNCTION|PROCEDURE [schema.]name`. */
+const CREATED = /^\s*CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:UNLOGGED|TEMP|TEMPORARY)\s+)?(?:TABLE|VIEW|MATERIALIZED\s+VIEW|TYPE|DOMAIN|SEQUENCE|FUNCTION|PROCEDURE)\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:("[^"]+"|[\w$]+)\s*\.\s*)?("[^"]+"|[\w$]+)/i
+
+/** The objects a statement creates, as `schema.name` (`public` when unqualified). */
+export function createdObjects(sql: string): string[] {
+  const m = CREATED.exec(sqlSkeleton(sql))
+  if (!m) return []
+  const bare = (n: string) => n.replace(/^"|"$/g, '')
+  return [`${m[1] ? bare(m[1]) : 'public'}.${bare(m[2])}`]
+}
 
 /**
  * Run one restore statement, with what it needs prepared first.
@@ -847,6 +872,7 @@ async function applyStatement(
   transactional: boolean,
   result: RestoreResult,
   missing: Set<string>,
+  leftOut: Map<string, string> = new Map(),
 ): Promise<void> {
   if (transactional) await client.query('SAVEPOINT sf_restore_statement')
   try {
@@ -868,9 +894,13 @@ async function applyStatement(
     if (transactional) await client.query('ROLLBACK TO SAVEPOINT sf_restore_statement')
     const { rows } = await client.query<{ nspname: string }>('SELECT nspname FROM pg_namespace')
     const targetSchemas = new Set(rows.map(r => r.nspname))
-    const tolerated = tolerableFailure(sql, err, targetSchemas, missing)
+    const tolerated = tolerableFailure(sql, err, targetSchemas, missing, leftOut)
     if (tolerated) {
       result.skipped.push({ type: 'sql', label: summarizeStatement(sql), reason: tolerated })
+      // What this would have created, and why it is not there, for whatever
+      // fails on its absence later.
+      const cause = /(this target lacks .+)$/.exec(tolerated)?.[1] ?? tolerated
+      for (const name of createdObjects(sql)) leftOut.set(name, cause)
       // What the target lacks, for what fails after it; and whether this was
       // one of the snapshot's own objects rather than something the platform
       // or the server is missing.

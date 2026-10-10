@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import { statementSubject } from '../src/sql-deps.js'
-import { platformOwnedObject, tolerableFailure } from '../src/restore.js'
+import { platformOwnedObject, tolerableFailure, createdObjects } from '../src/restore.js'
 import { replaceableSchemas } from '../src/restore-replace.js'
 import { destructiveReason } from '../src/dbdiff.js'
 import { isEnumValueAddition } from '../src/promote.js'
@@ -198,5 +198,47 @@ describe('tolerableFailure names what the failure needs', () => {
     expect(tolerableFailure('CREATE VIEW public.v AS SELECT * FROM public.docs;',
       { code: '42P01', message: 'relation "public.docs" does not exist' }, plain, lacks))
       .toBe('relation "public.docs" does not exist, as this target lacks the pg_net extension, the vector extension')
+  })
+})
+
+describe('tolerableFailure names the extension an object was left out for', () => {
+  // An index or key on a table that was itself left out failed with
+  // `relation "public.docs" does not exist`, and the reason listed every
+  // extension the target lacked — pg_cron, pg_net, … — rather than the one
+  // the table needed.
+  const plain = new Set(['public', 'pg_catalog', 'information_schema'])
+  const missing = new Set(['the pg_cron extension', 'the pg_net extension', 'the vector extension'])
+
+  it('cites the left-out table and its own cause', () => {
+    const leftOut = new Map([['public.docs', 'this target lacks the vector extension']])
+    const reason = tolerableFailure('CREATE INDEX docs_embedding_idx ON public.docs USING btree (id);',
+      { code: '42P01', message: 'relation "public.docs" does not exist' }, plain, missing, leftOut)
+    expect(reason).toBe('relation "public.docs" does not exist, as public.docs was left out: this target lacks the vector extension')
+  })
+
+  it('matches an unqualified name against public', () => {
+    const leftOut = new Map([['public.docs', 'this target lacks the vector extension']])
+    expect(tolerableFailure('ALTER TABLE docs ADD CONSTRAINT k UNIQUE (id);',
+      { code: '42P01', message: 'relation "docs" does not exist' }, plain, missing, leftOut)).toMatch(/docs was left out: this target lacks the vector extension$/)
+  })
+})
+
+describe('createdObjects', () => {
+  it('names what a statement creates, schema-qualified', () => {
+    expect(createdObjects('CREATE TABLE public.docs (id int, e extensions.vector(3));')).toEqual(['public.docs'])
+    expect(createdObjects('CREATE TABLE "App"."Docs" (id int);')).toEqual(['App.Docs'])
+    expect(createdObjects('CREATE VIEW v AS SELECT 1;')).toEqual(['public.v'])
+    expect(createdObjects('CREATE TYPE public.mood AS ENUM (\'a\');')).toEqual(['public.mood'])
+    expect(createdObjects('GRANT SELECT ON public.docs TO anon;')).toEqual([])
+  })
+})
+
+describe('tolerableFailure reads the statement for the extension it needs', () => {
+  it('names pgvector for a table typed by it, though the error names only the schema', () => {
+    const plain = new Set(['public', 'pg_catalog', 'information_schema'])
+    const missing = new Set(['the pg_net extension', 'the vector extension'])
+    expect(tolerableFailure('CREATE TABLE public.docs (id int, embedding extensions.vector(3));',
+      { code: '3F000', message: 'schema "extensions" does not exist' }, plain, missing))
+      .toBe('schema "extensions" does not exist, as this target lacks the vector extension')
   })
 })

@@ -861,3 +861,35 @@ describe('planWork and a fix whose finding says it is destructive', () => {
     expect(planWork(extraWebhook(), { allowDestructive: true }).sqlStatements).toHaveLength(1)
   })
 })
+
+describe('planWork --only and a new function\'s default grants', () => {
+  // A function is executable by PUBLIC, and on Supabase by the API roles, the
+  // moment it is created. Selecting its creation alone left a SECURITY DEFINER
+  // function the source keeps closed open to the anon key.
+  const withNewFunction = () => makeScanResult({
+    checks: [
+      { check: 'schema', status: 'drifted', durationMs: 0, issues: [
+        { id: 'schema-create-function-1', check: 'schema', severity: 'warning', title: 'Function missing: public.admin_reset', description: 'd',
+          sql: { up: 'CREATE OR REPLACE FUNCTION public.admin_reset(p integer)\n RETURNS integer\n LANGUAGE sql\n SECURITY DEFINER\nAS $function$SELECT p$function$;', down: '' } },
+      ] },
+      { check: 'roles', status: 'drifted', durationMs: 0, issues: [
+        { id: 'roles-grant-default-PUBLIC.public.admin_reset(p integer)', check: 'roles', severity: 'critical', title: 'Default grants to take back', description: 'd',
+          sql: { up: 'REVOKE EXECUTE ON FUNCTION "public"."admin_reset"(p integer) FROM PUBLIC;', down: '' } },
+        { id: 'roles-grant-default-anon.public.admin_reset(p integer)', check: 'roles', severity: 'critical', title: 'Default grants to take back', description: 'd',
+          sql: { up: 'REVOKE EXECUTE ON FUNCTION "public"."admin_reset"(p integer) FROM "anon";', down: '' } },
+        { id: 'roles-grant-default-anon.public.other_fn()', check: 'roles', severity: 'critical', title: 'Default grants to take back', description: 'd',
+          sql: { up: 'REVOKE EXECUTE ON FUNCTION "public"."other_fn"() FROM "anon";', down: '' } },
+      ] },
+    ],
+  })
+
+  it('brings the selected function\'s revokes along, and no other function\'s', () => {
+    const ids = planWork(withNewFunction(), { only: ['schema-create-function-1'] }).sqlStatements.map(s => s.issueId)
+    expect(ids).toEqual(expect.arrayContaining([
+      'schema-create-function-1',
+      'roles-grant-default-PUBLIC.public.admin_reset(p integer)',
+      'roles-grant-default-anon.public.admin_reset(p integer)',
+    ]))
+    expect(ids).not.toContain('roles-grant-default-anon.public.other_fn()')
+  })
+})

@@ -100,7 +100,7 @@ cleanup() {
   if [ "$KEEP" = true ]; then
     echo "--keep: leaving $SRC_C (:$SRC_PORT) and $TGT_C (:$TGT_PORT) running"
   else
-    $RT rm -f "$SRC_C" "$TGT_C" >/dev/null 2>&1 || true
+    $RT rm -f -v "$SRC_C" "$TGT_C" >/dev/null 2>&1 || true
   fi
   exit $code
 }

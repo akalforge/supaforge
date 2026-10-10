@@ -164,7 +164,7 @@ if wants unit; then
 fi
 
 if wants integration || wants e2e; then
-  trap '$RT rm -f sf-rc-source sf-rc-target >/dev/null 2>&1 || true' EXIT
+  trap '$RT rm -f -v sf-rc-source sf-rc-target >/dev/null 2>&1 || true' EXIT
   for p in 15432:source 15433:target; do
     $RT rm -f "sf-rc-${p##*:}" >/dev/null 2>&1 || true
     $RT run -d --rm --name "sf-rc-${p##*:}" --network=host -e POSTGRES_PASSWORD="${p##*:}-test-pass" \

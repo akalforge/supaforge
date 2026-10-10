@@ -215,3 +215,16 @@ describe('describeFailure', () => {
     expect(errMsg(err)).not.toContain('hunter2')
   })
 })
+
+describe('friendlyDbError and statement timeouts', () => {
+  it('calls a cancelled statement a statement timeout, not a connection problem', () => {
+    const msg = friendlyDbError(new Error('canceling statement due to statement timeout'), 'postgresql://u:p@db.example.com:5432/postgres')
+    expect(msg).toMatch(/cancelled by statement_timeout/)
+    expect(msg).not.toMatch(/verify the host and port/)
+  })
+
+  it('still calls a connection timeout one', () => {
+    expect(friendlyDbError(new Error('connect ETIMEDOUT 10.0.0.1:5432'), 'postgresql://u:p@db.example.com:5432/postgres'))
+      .toMatch(/timed out — verify the host and port/)
+  })
+})

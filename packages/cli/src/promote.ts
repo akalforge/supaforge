@@ -179,7 +179,7 @@ function relationsCreatedBy(sql: string): string[] {
  * branch, and so the decision can be asserted directly in tests.
  */
 function classifyIssue(
-  issue: { id: string; sql?: { up: string }; action?: SyncAction; manualOnly?: string },
+  issue: { id: string; sql?: { up: string }; action?: SyncAction; manualOnly?: string; destructive?: string },
   options: PlanOptions,
   recreatedPolicies: ReadonlySet<string> = new Set(),
 ): { kind: 'sql'; sql: string } | { kind: 'api'; action: SyncAction } | { kind: 'skip'; reason: string } {
@@ -203,7 +203,7 @@ function classifyIssue(
   }
 
   if (!options.allowDestructive) {
-    const why = destructiveReason(issue.sql.up, recreatedPolicies)
+    const why = issue.destructive ?? destructiveReason(issue.sql.up, recreatedPolicies)
     if (why) {
       return { kind: 'skip', reason: `Destructive — ${why}; re-run with --allow-destructive to apply` }
     }

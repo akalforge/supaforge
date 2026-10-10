@@ -4,7 +4,7 @@
  * These validate the CLI surface without needing real database containers.
  * They test --help output, config loading errors, flag parsing, etc.
  */
-import { describe, it, expect, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest'
 import { execFile } from 'node:child_process'
 import { writeFile, unlink, mkdir, rm, access } from 'node:fs/promises'
 import { join } from 'node:path'
@@ -15,6 +15,11 @@ import pg from 'pg'
 const exec = promisify(execFile)
 // test/e2e/ → packages/cli/
 const CLI_DIR = join(import.meta.dirname, '..', '..')
+
+// Every test here spawns the CLI through tsx, which takes one to three seconds
+// on a CI runner, and several spawn it more than once. Vitest's default of 5s
+// failed them at random on the slower runners.
+vi.setConfig({ testTimeout: 30_000 })
 const DEV_BIN = join(CLI_DIR, 'bin', 'dev.js')
 const TSX_BIN = join(CLI_DIR, 'node_modules', '.bin', 'tsx')
 
@@ -58,26 +63,6 @@ describe('CLI e2e: diff', () => {
     }
   })
 
-  it('should accept --check=rls-coverage', async () => {
-    const tmpDir = join(tmpdir(), `supaforge-e2e-rls-coverage-${Date.now()}`)
-    await mkdir(tmpDir, { recursive: true })
-    const config = {
-      environments: {
-        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
-        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
-      },
-      source: 'dev',
-      target: 'prod',
-    }
-    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
-
-    const { stdout } = await run(['diff', '--json', '--check=rls-coverage'], { cwd: tmpDir })
-    const parsed = JSON.parse(stdout)
-    expect(parsed).toHaveProperty('checks')
-    const rlsCoverage = parsed.checks.find((c: any) => c.check === 'rls-coverage')
-    expect(rlsCoverage).toBeDefined()
-  })
-
   it('should show --source, --target, and --skip flags in help', async () => {
     const { stdout } = await run(['diff', '--help'])
     expect(stdout).toContain('--source')
@@ -96,72 +81,10 @@ describe('CLI e2e: diff', () => {
     }
   })
 
-  it('should exclude a skipped check from JSON output', async () => {
-    const tmpDir = join(tmpdir(), `supaforge-e2e-diff-skip-${Date.now()}`)
-    await mkdir(tmpDir, { recursive: true })
-    const config = {
-      environments: {
-        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
-        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
-      },
-      source: 'dev',
-      target: 'prod',
-    }
-    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
-
-    const { stdout } = await run(['diff', '--json', '--skip=storage', '--skip=vault'], { cwd: tmpDir })
-    const parsed = JSON.parse(stdout)
-    const checkNames: string[] = parsed.checks.map((c: any) => c.check)
-    expect(checkNames).not.toContain('storage')
-    expect(checkNames).not.toContain('vault')
-    expect(checkNames).toContain('rls')
-  })
-
-  it('should exclude checks listed in config checks.exclude', async () => {
-    const tmpDir = join(tmpdir(), `supaforge-e2e-diff-config-exclude-${Date.now()}`)
-    await mkdir(tmpDir, { recursive: true })
-    const config = {
-      environments: {
-        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
-        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
-      },
-      source: 'dev',
-      target: 'prod',
-      checks: { exclude: ['auth', 'edge-functions', 'realtime'] },
-    }
-    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
-
-    const { stdout } = await run(['diff', '--json'], { cwd: tmpDir })
-    const parsed = JSON.parse(stdout)
-    const checkNames: string[] = parsed.checks.map((c: any) => c.check)
-    expect(checkNames).not.toContain('auth')
-    expect(checkNames).not.toContain('edge-functions')
-    expect(checkNames).not.toContain('realtime')
-  })
-
-  it('should merge CLI --skip with config checks.exclude', async () => {
-    const tmpDir = join(tmpdir(), `supaforge-e2e-diff-skip-merge-${Date.now()}`)
-    await mkdir(tmpDir, { recursive: true })
-    const config = {
-      environments: {
-        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
-        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
-      },
-      source: 'dev',
-      target: 'prod',
-      checks: { exclude: ['vault'] },
-    }
-    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
-
-    const { stdout } = await run(['diff', '--json', '--skip=storage'], { cwd: tmpDir })
-    const parsed = JSON.parse(stdout)
-    const checkNames: string[] = parsed.checks.map((c: any) => c.check)
-    expect(checkNames).not.toContain('vault')    // from config
-    expect(checkNames).not.toContain('storage')  // from --skip
-    expect(checkNames).toContain('rls')
-  })
-
-  it('should output valid JSON with --json flag', async () => {
+  it('--json aborts with JSON, and exit 1, when a database is unreachable', async () => {
+    // It used to skip the reachability check and scan anyway: every check that
+    // read nothing from the source reported the target's objects as extra, and
+    // --apply dropped them.
     const tmpDir = join(tmpdir(), `supaforge-e2e-diff-json-${Date.now()}`)
     await mkdir(tmpDir, { recursive: true })
     const config = {
@@ -174,41 +97,19 @@ describe('CLI e2e: diff', () => {
     }
     await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
 
-    // diff will error connecting to DB but still produces JSON output
-    const { stdout } = await run(['diff', '--json', '--check=rls'], { cwd: tmpDir })
-    const parsed = JSON.parse(stdout)
-    expect(parsed).toHaveProperty('timestamp')
-    expect(parsed).toHaveProperty('source', 'dev')
-    expect(parsed).toHaveProperty('target', 'prod')
-    expect(parsed).toHaveProperty('checks')
-    expect(Array.isArray(parsed.checks)).toBe(true)
-    expect(parsed).toHaveProperty('score')
-    expect(parsed).toHaveProperty('summary')
-  })
-
-  it('should include a tip line in non-JSON output', async () => {
-    const tmpDir = join(tmpdir(), `supaforge-e2e-diff-tip-${Date.now()}`)
-    await mkdir(tmpDir, { recursive: true })
-    const config = {
-      environments: {
-        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
-        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
-      },
-      source: 'dev',
-      target: 'prod',
+    for (const args of [['diff', '--json'], ['diff', '--json', '--apply']]) {
+      try {
+        await run(args, { cwd: tmpDir })
+        expect.unreachable(`${args.join(' ')} should exit non-zero`)
+      } catch (err: any) {
+        expect(err.code).toBe(1)
+        const parsed = JSON.parse(err.stdout)
+        expect(parsed.error).toMatch(/Diff aborted — Source not reachable/)
+        expect(parsed.preflight.map((c: any) => c.passed)).toEqual([false, false])
+        expect(err.stdout).not.toContain('tip:')
+      }
     }
-    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
-
-    // diff --json mode should NOT contain a tip line
-    const { stdout: jsonOut } = await run(['diff', '--json', '--check=rls'], { cwd: tmpDir })
-    expect(jsonOut).not.toContain('tip:')
-
-    // Non-JSON mode (errors on unreachable DBs at preflight, not at the tip stage,
-    // so we can't observe the tip directly) — but verify the flag roundtrip is clean.
-    // The important guarantee is that --json output is parseable and tip-free.
-    expect(() => JSON.parse(jsonOut)).not.toThrow()
   })
-
   it('should output detailed format with --detail flag', async () => {
     const tmpDir = join(tmpdir(), `supaforge-e2e-diff-detail-${Date.now()}`)
     await mkdir(tmpDir, { recursive: true })
@@ -589,32 +490,7 @@ describe('CLI e2e: mcp', () => {
   })
 })
 
-// ─── diff: schema error message ───────────────────────────────────────────────
 
-describe('CLI e2e: diff schema error', () => {
-  it('schema error message does not expose raw "Command failed:" string', async () => {
-    const tmpDir = join(tmpdir(), `supaforge-e2e-diff-schema-error-${Date.now()}`)
-    await mkdir(tmpDir, { recursive: true })
-    const config = {
-      environments: {
-        dev: { dbUrl: 'postgresql://invalid:5432/dev' },
-        prod: { dbUrl: 'postgresql://invalid:5432/prod' },
-      },
-      source: 'dev',
-      target: 'prod',
-    }
-    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify(config))
-    const { stdout } = await run(['diff', '--json', '--check=schema'], { cwd: tmpDir })
-    const parsed = JSON.parse(stdout)
-    const schemaCheck = parsed.checks.find((c: any) => c.check === 'schema')
-    expect(schemaCheck).toBeDefined()
-    if (schemaCheck.error) {
-      expect(schemaCheck.error).not.toContain('Command failed:')
-      expect(schemaCheck.error).not.toContain('/bin/node')
-      expect(schemaCheck.error).not.toContain('dbdiff.js diff')
-    }
-  })
-})
 
 // ─── clone --list ─────────────────────────────────────────────────────────────
 
@@ -911,5 +787,33 @@ describe('CLI e2e: help', () => {
 
     expect(positions.every(p => p > -1), stdout).toBe(true)
     expect([...positions].sort((a, b) => a - b)).toEqual(positions)
+  })
+})
+
+describe('CLI e2e: --json when the database cannot be reached', () => {
+  // The error went to stderr only, and a script reading stdout had nothing to
+  // parse.
+  it('prints the error as JSON for migrate list, restore and snapshot', async () => {
+    const tmpDir = join(tmpdir(), `supaforge-e2e-json-errors-${Date.now()}`)
+    await mkdir(join(tmpDir, 'supabase', 'migrations'), { recursive: true })
+    await writeFile(join(tmpDir, 'supabase', 'migrations', '20261001000000_init.sql'), 'SELECT 1;\n')
+    await writeFile(join(tmpDir, 'supaforge.config.json'), JSON.stringify({
+      environments: { bad: { dbUrl: 'postgresql://u:secret@invalid:5432/db' } },
+    }))
+    for (const args of [
+      ['migrate', 'list', '--env', 'bad', '--json'],
+      ['restore', '--env', 'bad', '--from-migrations', '--apply', '--json'],
+      ['snapshot', '--env', 'bad', '--apply', '--json'],
+    ]) {
+      try {
+        await run(args, { cwd: tmpDir })
+        expect.unreachable(`${args.join(' ')} should exit non-zero`)
+      } catch (err: any) {
+        expect(err.code, args.join(' ')).not.toBe(0)
+        const parsed = JSON.parse(err.stdout)
+        expect(parsed.error, args.join(' ')).toMatch(/aborted — .*ENOTFOUND invalid/)
+        expect(err.stdout).not.toContain('secret')
+      }
+    }
   })
 })

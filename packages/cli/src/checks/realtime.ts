@@ -3,7 +3,7 @@ import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
 import { quoteName } from '../utils/sql'
-import { Check, type CheckContext } from './base'
+import { Check, readOrAbsent, type CheckContext } from './base'
 import { DEFAULT_IGNORE_SCHEMAS } from '../defaults'
 import {
   diffSchemaPolicies, schemaPolicySql, type SchemaPolicy,
@@ -54,21 +54,12 @@ export class RealtimeCheck extends Check {
   }
 
   private async fetchPolicies(dbUrl: string): Promise<SchemaPolicy[]> {
-    try {
-      return await this.queryFn(dbUrl, schemaPolicySql('realtime')) as unknown as SchemaPolicy[]
-    } catch {
-      // No realtime schema at all — nothing to compare.
-      return []
-    }
+    // No realtime schema at all — nothing to compare.
+    return readOrAbsent(async () => await this.queryFn(dbUrl, schemaPolicySql('realtime')) as unknown as SchemaPolicy[], [])
   }
 
   private async fetchPublications(dbUrl: string): Promise<RealtimePublication[]> {
-    try {
-      return await this.queryFn(dbUrl, PUBLICATION_SQL) as unknown as RealtimePublication[]
-    } catch {
-      // pg_publication may not be accessible
-      return []
-    }
+    return readOrAbsent(async () => await this.queryFn(dbUrl, PUBLICATION_SQL) as unknown as RealtimePublication[], [])
   }
 }
 

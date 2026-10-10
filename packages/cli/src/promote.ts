@@ -136,8 +136,8 @@ function isSelected(issueId: string, only: string[] | undefined): boolean {
 }
 
 /**
- * `--only` plus the "default grants to take back" of every table or view the
- * selection creates.
+ * `--only` plus the "default grants to take back" of every table, view or
+ * routine the selection creates.
  *
  * A new table picks up the target's default privileges — on Supabase,
  * everything to anon and authenticated — and the roles check's
@@ -154,16 +154,27 @@ function withDefaultGrantRevokes(scanResult: ScanResult, only: string[] | undefi
   if (created.size === 0) return only
   const companions = issues
     .filter(i => i.id.startsWith('roles-grant-default-')
-      && [...created].some(rel => i.id.toLowerCase().endsWith(`.${rel}`)))
+      && [...created].some(rel => rel.endsWith('(')
+        // A routine, by schema and name: the fix spells its arguments as
+        // written (`p integer DEFAULT 1`), the finding as PostgreSQL
+        // identifies them (`p integer`).
+        ? i.id.toLowerCase().includes(`.${rel}`)
+        : i.id.toLowerCase().endsWith(`.${rel}`)))
     .map(i => i.id)
   return [...only, ...companions]
 }
 
-/** `schema.name` (lower case, `public` when unqualified) of each table and view the SQL creates. */
+/** `schema.name` (lower case, `public` when unqualified) of each table and view the SQL creates, and `schema.name(` of each routine. */
 function relationsCreatedBy(sql: string): string[] {
   const statements = parseStatements(sql)
   if (!statements) return []
   return statements.flatMap(({ kind, node }) => {
+    if (kind === 'CreateFunctionStmt') {
+      // `schema.name(`, matched against routine ids by prefix.
+      const parts = (node.funcname as Array<{ String?: { sval: string } }> ?? []).map(n => n.String?.sval ?? '')
+      const name = parts.at(-1)
+      return name ? [`${(parts.length > 1 ? parts.at(-2)! : 'public').toLowerCase()}.${name.toLowerCase()}(`] : []
+    }
     const rel = kind === 'CreateStmt' ? node.relation
       : kind === 'ViewStmt' ? node.view
         : kind === 'CreateTableAsStmt' ? node.into?.rel

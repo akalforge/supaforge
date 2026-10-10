@@ -93,7 +93,8 @@ describeE2E('e2e: --only a new table keeps the source\'s grants', () => {
     await h.applySql('source', PLATFORM + `
       CREATE TABLE public.t_a (id int PRIMARY KEY, secret text);
       REVOKE ALL ON public.t_a FROM anon, authenticated;
-      CREATE FUNCTION public.f_a() RETURNS bigint LANGUAGE sql AS 'SELECT count(*) FROM public.t_a';
+      CREATE FUNCTION public.f_a() RETURNS bigint LANGUAGE sql SECURITY DEFINER AS 'SELECT count(*) FROM public.t_a';
+      REVOKE EXECUTE ON FUNCTION public.f_a() FROM PUBLIC, anon, authenticated;
       CREATE TABLE public.t_other (id int PRIMARY KEY);
       REVOKE ALL ON public.t_other FROM anon, authenticated;`)
     await h.applySql('target', PLATFORM)
@@ -101,7 +102,7 @@ describeE2E('e2e: --only a new table keeps the source\'s grants', () => {
 
   afterAll(async () => { await h?.down() }, 120_000)
 
-  it('takes back the defaults on the table it creates, and touches nothing else', async () => {
+  it('takes back the defaults on the table and function it creates, and touches nothing else', async () => {
     const ws = await h.workspace()
     const scan = JSON.parse((await h.cli(['diff', '--json'], { cwd: ws })).stdout) as { checks: Array<{ issues: Array<{ id: string; title: string }> }> }
     const ids = scan.checks.flatMap(c => c.issues)
@@ -113,6 +114,9 @@ describeE2E('e2e: --only a new table keeps the source\'s grants', () => {
     const anonOnA = `SELECT count(*) FROM pg_class c CROSS JOIN LATERAL aclexplode(c.relacl) a
       WHERE c.oid = 'public.t_a'::regclass AND a.grantee = 'anon'::regrole`
     expect(await h.sql('target', anonOnA)).toBe('0')
+    // The function the source keeps closed arrives closed: a routine is
+    // executable by PUBLIC the moment it is created.
+    expect(await h.sql('target', "SELECT has_function_privilege('anon', 'public.f_a()', 'EXECUTE')")).toBe('f')
     expect(await h.sql('target', "SELECT count(*) FROM pg_class WHERE relname = 't_other'")).toBe('0')
   }, 300_000)
 })

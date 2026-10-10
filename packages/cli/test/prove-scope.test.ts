@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { proofScope, outsideTheRun } from '../src/prove.js'
+import { proofScope, outsideTheRun, residualHeldBack } from '../src/prove.js'
 
 const fix = (check: string, sql: string) => ({ check, issueId: `${check}-x`, sql })
 const ids = (xs: Array<{ sql: string }>) => xs.map(x => x.sql)
@@ -81,5 +81,27 @@ describe('outsideTheRun', () => {
     expect(outsideTheRun('table public.t: RLS enabled no → yes', ['rls-coverage'])).toBe(false)
     expect(outsideTheRun('extension pg_trgm: missing', ['extensions'])).toBe(false)
     expect(outsideTheRun('trigger on public.t tr: missing', ['webhooks'])).toBe(false)
+  })
+})
+
+describe('residualHeldBack and fixes the server cannot hold', () => {
+  // On a plain PostgreSQL target the apply leaves out a webhook trigger (no
+  // supabase_functions) and a policy calling auth.uid() (no auth schema). The
+  // proof replays the fixes the same way, so those objects are missing from
+  // the clone by design — and must not refuse the rest of the migration.
+  it('accounts for objects a left-out fix would have created', () => {
+    const { heldBack, unexplained } = residualHeldBack([
+      'trigger on public.hook_t hook_t_webhook: missing',
+      'policy on public.orders Users can read own orders: missing',
+      'table public.other: missing',
+    ], [
+      `CREATE TRIGGER hook_t_webhook AFTER INSERT ON public.hook_t FOR EACH ROW EXECUTE FUNCTION supabase_functions.http_request('x');`,
+      `CREATE POLICY "Users can read own orders" ON "public"."orders" AS PERMISSIVE FOR SELECT TO "authenticated" USING ((auth.uid() = user_id));`,
+    ])
+    expect(heldBack).toEqual([
+      'trigger on public.hook_t hook_t_webhook: missing',
+      'policy on public.orders Users can read own orders: missing',
+    ])
+    expect(unexplained).toEqual(['table public.other: missing'])
   })
 })

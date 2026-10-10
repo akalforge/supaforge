@@ -78,27 +78,30 @@ const VERSIONED_PG_DIRS: readonly string[] = [
 /**
  * Resolve a compatible pg_dump binary path for the given server major version.
  *
- * 1. Checks the default `pg_dump` on PATH.
- * 2. Then the directory SUPAFORGE_PG_BIN names, if set.
- * 3. Falls back to well-known versioned directories.
+ * 1. The directory SUPAFORGE_PG_BIN names, if set. It comes first so it can
+ *    pin the tools; one that holds no pg_dump is a mistake worth reporting,
+ *    not something to ignore silently. One too old for this server falls
+ *    through to the rest.
+ * 2. The default `pg_dump` on PATH.
+ * 3. Well-known versioned directories.
  *
  * Returns `{ path, major }` or `null` if no compatible binary is found.
  */
 export async function resolvePgDumpPath(
   serverMajor: number,
 ): Promise<{ path: string; major: number } | null> {
-  // Check the default PATH binary first
+  const named = process.env.SUPAFORGE_PG_BIN?.trim()
+  if (named) {
+    if (!existsSync(`${named}/pg_dump`)) {
+      throw new Error(`SUPAFORGE_PG_BIN is set to "${named}", which has no pg_dump`)
+    }
+    const major = await getPgDumpVersionAt(`${named}/pg_dump`)
+    if (major !== null && major >= serverMajor) return { path: `${named}/pg_dump`, major }
+  }
+
   const defaultMajor = await getLocalPgDumpVersion()
   if (defaultMajor !== null && defaultMajor >= serverMajor) {
     return { path: 'pg_dump', major: defaultMajor }
-  }
-
-  // A directory of client tools named explicitly, for an install none of the
-  // well-known locations below covers.
-  const named = process.env.SUPAFORGE_PG_BIN?.trim()
-  if (named && existsSync(`${named}/pg_dump`)) {
-    const major = await getPgDumpVersionAt(`${named}/pg_dump`)
-    if (major !== null && major >= serverMajor) return { path: `${named}/pg_dump`, major }
   }
 
   // Search versioned directories (highest version first)
@@ -115,6 +118,22 @@ export async function resolvePgDumpPath(
   }
 
   return null
+}
+
+/**
+ * Why no pg_dump would do, for a message that says what to change: the
+ * version needed, what PATH and SUPAFORGE_PG_BIN offered, and the variable.
+ */
+export async function describeMissingPgDump(neededMajor: number): Promise<string> {
+  const onPath = await getLocalPgDumpVersion()
+  const named = process.env.SUPAFORGE_PG_BIN?.trim()
+  const namedMajor = named ? await getPgDumpVersionAt(`${named}/pg_dump`) : null
+  const found = [
+    onPath === null ? 'none on PATH' : `${onPath} on PATH`,
+    ...(named ? [`${namedMajor ?? 'none'} in SUPAFORGE_PG_BIN`] : []),
+  ].join(', ')
+  return `no pg_dump ${neededMajor} or newer (found: ${found}); `
+    + `set SUPAFORGE_PG_BIN to a directory of PostgreSQL ${neededMajor}+ client tools`
 }
 
 /**

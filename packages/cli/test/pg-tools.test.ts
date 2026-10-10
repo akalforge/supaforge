@@ -91,3 +91,39 @@ describe('resolvePgDumpPath: SUPAFORGE_PG_BIN', () => {
     }
   })
 })
+
+describe('resolvePgDumpPath: SUPAFORGE_PG_BIN pins the tools', () => {
+  // It was consulted only after the pg_dump on PATH failed, so it could not
+  // pin a version, and a directory without pg_dump was silently ignored.
+  async function fakeBin(version: string): Promise<string> {
+    const { mkdtemp, writeFile, chmod } = await import('node:fs/promises')
+    const { tmpdir } = await import('node:os')
+    const { join } = await import('node:path')
+    const dir = await mkdtemp(join(tmpdir(), 'pgbin-'))
+    await writeFile(join(dir, 'pg_dump'), `#!/bin/sh\necho "pg_dump (PostgreSQL) ${version}"\n`)
+    await chmod(join(dir, 'pg_dump'), 0o755)
+    return dir
+  }
+
+  it('is used ahead of a pg_dump on PATH that would also do', async () => {
+    const { resolvePgDumpPath } = await import('../src/pg-tools.js')
+    const dir = await fakeBin('15.4')
+    process.env.SUPAFORGE_PG_BIN = dir
+    try {
+      // Any PATH pg_dump is at least 1; the named one must still win.
+      expect(await resolvePgDumpPath(1)).toEqual({ path: `${dir}/pg_dump`, major: 15 })
+    } finally {
+      delete process.env.SUPAFORGE_PG_BIN
+    }
+  })
+
+  it('is an error when it holds no pg_dump', async () => {
+    const { resolvePgDumpPath } = await import('../src/pg-tools.js')
+    process.env.SUPAFORGE_PG_BIN = '/nonexistent/pg/bin'
+    try {
+      await expect(resolvePgDumpPath(1)).rejects.toThrow(/SUPAFORGE_PG_BIN.*\/nonexistent\/pg\/bin.*no pg_dump/)
+    } finally {
+      delete process.env.SUPAFORGE_PG_BIN
+    }
+  })
+})

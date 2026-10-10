@@ -277,3 +277,70 @@ describeE2E('convergence proof', () => {
     expect(proof.residual.some(l => l.startsWith('policy on'))).toBe(true)
   }, 300_000)
 })
+
+describeE2E('e2e: --prove that cannot run applies nothing', () => {
+  // It printed "Convergence not proven … Continuing", applied, and exited 0 —
+  // while --prove is what someone adds as the gate before production.
+  let h: PgHarness
+
+  beforeAll(async () => {
+    h = new PgHarness({ verbose: !!process.env.E2E_VERBOSE, keep: !!process.env.E2E_KEEP })
+    await h.up()
+    await h.applySql('source', 'CREATE TABLE public.gate (id int PRIMARY KEY, note text);')
+  }, 300_000)
+
+  afterAll(async () => { await h?.down() }, 120_000)
+
+  const tableOnTarget = () => h.sql('target', "SELECT count(*) FROM pg_class WHERE relname = 'gate'")
+
+  it('refuses, in text and in JSON, when no pg_dump can be used', async () => {
+    const ws = await h.workspace()
+    const env = { SUPAFORGE_PG_BIN: '/nonexistent/pg/bin' }
+
+    const text = await h.cli(['diff', '--apply', '--prove'], { cwd: ws, env })
+    expect(text.code).toBe(1)
+    expect(text.stdout).toMatch(/Not proven: .*SUPAFORGE_PG_BIN.*no pg_dump.*Nothing was applied/s)
+    expect(await tableOnTarget()).toBe('0')
+
+    const json = await h.cli(['diff', '--apply', '--prove', '--json'], { cwd: ws, env })
+    expect(json.code).toBe(1)
+    expect(JSON.parse(json.stdout)).toMatchObject({ proved: false, applied: [] })
+    expect(await tableOnTarget()).toBe('0')
+
+    // Without --prove it applies, so the refusal above was the proof's doing.
+    expect((await h.cli(['diff', '--apply'], { cwd: ws, env })).code).toBe(0)
+    expect(await tableOnTarget()).toBe('1')
+  }, 300_000)
+})
+
+describeE2E('e2e: --prove leaves out what the target cannot hold, as the apply does', () => {
+  // A Supabase source and a plain PostgreSQL target: a webhook trigger needs
+  // supabase_functions, which the target lacks. The apply leaves that fix out
+  // and applies the rest. The proof replayed the migration as one script, so
+  // it stopped at that statement — with a stack trace — and nothing applied.
+  let h: PgHarness
+
+  beforeAll(async () => {
+    h = new PgHarness({ verbose: !!process.env.E2E_VERBOSE, keep: !!process.env.E2E_KEEP })
+    await h.up()
+    await h.applySql('source', `
+      CREATE SCHEMA supabase_functions;
+      CREATE FUNCTION supabase_functions.http_request() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$;
+      CREATE TABLE public.orders (id int PRIMARY KEY, total numeric);
+      CREATE TRIGGER orders_webhook AFTER INSERT ON public.orders FOR EACH ROW
+        EXECUTE FUNCTION supabase_functions.http_request('http://example.com/orders', 'POST', '{}', '{}', '1000');`)
+  }, 300_000)
+
+  afterAll(async () => { await h?.down() }, 120_000)
+
+  it('proves the rest, applies it, and names what was left out', async () => {
+    const ws = await h.workspace()
+    const r = await h.cli(['diff', '--apply', '--prove', '--check=schema'], { cwd: ws })
+    expect(r.stdout).toMatch(/Left out, as the apply will leave them/)
+    expect(r.stdout).toMatch(/Converged, apart from what is held back/)
+    expect(r.stdout).not.toMatch(/at ChildProcess|does not reproduce the source/)
+    // The table arrives; the webhook can't, and the run says so with exit 1.
+    expect(await h.sql('target', "SELECT count(*) FROM pg_class WHERE relname = 'orders'")).toBe('1')
+    expect(r.code).toBe(1)
+  }, 300_000)
+})

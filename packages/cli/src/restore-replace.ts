@@ -1,4 +1,5 @@
 import type pg from 'pg'
+import { PLATFORM_ROLES } from './checks/roles.js'
 import { SUPABASE_PLATFORM_SCHEMAS } from './defaults'
 
 /**
@@ -286,37 +287,54 @@ export async function recreateExternalDependents(
 }
 
 /**
- * Strip every grant but the owner's from the tables and views in `schemas`,
- * so the roles layer that follows leaves exactly the grants it captured.
+ * Strip every grant but the owner's from the objects in `schemas` whose
+ * grants the roles layer captures — tables, views, materialized views,
+ * foreign tables, sequences and routines — so the layer that follows leaves
+ * exactly the grants it captured.
  *
  * The schema layer is a dump taken with --no-privileges, so each object it
  * creates starts with whatever the target's default privileges give — on
  * Supabase, everything to `anon` and `authenticated` — and the roles layer
  * only ever *adds* grants. A view whose grants had been narrowed (`REVOKE ALL
  * ON v FROM anon`, the usual way to keep a view off the public API) came back
- * wide open, and nothing reported it.
+ * wide open, and so did a SECURITY DEFINER function the source kept from the
+ * API: a routine is executable by PUBLIC unless that is revoked.
  *
- * Only the kinds the roles layer captures — tables, views, foreign tables.
- * Materialized views and sequences are not in information_schema's grant
- * view, so their default grants are left as they are rather than stripped
- * with nothing to put back.
+ * Grants to the platform's roles are left alone, since the roles layer does
+ * not capture them and could not put them back; so are objects an extension
+ * owns, whose grants are the extension's.
  *
- * @returns how many relations were reset
+ * @returns how many objects were reset
  */
 export async function resetRelationGrants(client: pg.Client, schemas: string[]): Promise<number> {
   if (schemas.length === 0) return 0
   const { rows } = await client.query<{ statement: string }>(`
-    SELECT format('REVOKE ALL ON %s FROM %s', c.oid::regclass,
-             string_agg(DISTINCT CASE WHEN a.grantee = 0 THEN 'PUBLIC'
-                                      ELSE quote_ident(pg_get_userbyid(a.grantee)) END, ', ')) AS statement
-      FROM pg_class c
-      JOIN pg_namespace n ON n.oid = c.relnamespace
-      CROSS JOIN LATERAL aclexplode(c.relacl) a
-     WHERE n.nspname = ANY($1)
-       AND c.relkind IN ('r', 'p', 'v', 'f')
-       AND a.grantee <> c.relowner
-     GROUP BY c.oid
-  `, [schemas])
+    WITH acl AS (
+      SELECT CASE c.relkind WHEN 'S' THEN 'SEQUENCE ' ELSE '' END || c.oid::regclass::text AS object, a.grantee
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        CROSS JOIN LATERAL aclexplode(c.relacl) a
+       WHERE n.nspname = ANY($1)
+         AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+         AND a.grantee <> c.relowner
+         AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_class'::regclass AND d.objid = c.oid AND d.deptype = 'e')
+      UNION ALL
+      SELECT CASE p.prokind WHEN 'p' THEN 'PROCEDURE ' ELSE 'FUNCTION ' END || p.oid::regprocedure::text, a.grantee
+        FROM pg_proc p
+        JOIN pg_namespace n ON n.oid = p.pronamespace
+        CROSS JOIN LATERAL aclexplode(coalesce(p.proacl, acldefault('f', p.proowner))) a
+       WHERE n.nspname = ANY($1)
+         AND a.grantee <> p.proowner
+         AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.classid = 'pg_proc'::regclass AND d.objid = p.oid AND d.deptype = 'e')
+    )
+    SELECT format('REVOKE ALL ON %s FROM %s', object,
+             string_agg(DISTINCT CASE WHEN grantee = 0 THEN 'PUBLIC'
+                                      ELSE quote_ident(pg_get_userbyid(grantee)) END, ', ')) AS statement
+      FROM acl
+     WHERE grantee = 0
+        OR (pg_get_userbyid(grantee) <> ALL ($2::text[]) AND pg_get_userbyid(grantee) NOT LIKE 'pg\\_%')
+     GROUP BY object
+  `, [schemas, PLATFORM_ROLES])
   for (const { statement } of rows) await client.query(statement)
   return rows.length
 }

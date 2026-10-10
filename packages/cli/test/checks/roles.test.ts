@@ -511,3 +511,20 @@ describe('function and sequence grants', () => {
     expect(covers({ ...fn('PUBLIC'), object_kind: 'sequence' as never })).toBe(false)
   })
 })
+
+describe('grants on a routine only the target has', () => {
+  it('are not reported: the routine itself is the finding', async () => {
+    const queryFn = (async (dbUrl: string, sql: string) => {
+      if (dbUrl.includes('target') && sql.includes('proacl')) {
+        return [{ grantee: 'PUBLIC', table_schema: 'public', table_name: 'example_fn', args: 'a uuid', object_kind: 'function', privilege_type: 'EXECUTE', is_grantable: false }]
+      }
+      if (dbUrl.includes('target') && sql.includes('pg_get_function_identity_arguments') && !sql.includes('proacl')) {
+        return [{ table_schema: 'public', table_name: 'example_fn', args: 'a uuid', object_kind: 'function' }]
+      }
+      if (sql.includes('server_version_num')) return [{ v: '150008' }]
+      return []
+    }) as unknown as QueryFn
+    const issues = await new RolesCheck(queryFn).scan(mockContext())
+    expect(issues).toEqual([])
+  })
+})

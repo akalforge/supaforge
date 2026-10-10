@@ -371,7 +371,13 @@ export class RolesCheck extends Check {
     const sourceObjects = [...(sourceRelations ?? []), ...(sourceRoutines ?? [])]
     const targetObjects = [...(targetRelations ?? []), ...(targetRoutines ?? [])]
     const sourceAll = [...(sourceGrants ?? []), ...(sourceRoutineGrants ?? [])]
+    // A routine or sequence only the target has is the schema check's finding,
+    // and its grants go with it. Every routine grants EXECUTE to PUBLIC unless
+    // told otherwise, so each one present on the target alone was reported
+    // again as an extra grant.
+    const inSource = new Set(sourceObjects.map(objectKey))
     const targetAll = [...(targetGrants ?? []), ...(targetRoutineGrants ?? [])]
+      .filter(g => !g.object_kind || g.object_kind === 'table' || inSource.has(objectKey(g)))
     const comparable = comparablePrivileges(sourceVersion, targetVersion)
     const byDefault = grantedByDefault(targetObjects, targetDefaults ?? [])
 

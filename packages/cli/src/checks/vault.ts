@@ -2,7 +2,7 @@ import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import type { DriftIssue } from '../types/drift'
 import { quoteLiteral } from '../utils/sql'
-import { Check, type CheckContext } from './base'
+import { Check, readOrAbsent, type CheckContext } from './base'
 
 /**
  * Vault secret metadata from vault.decrypted_secrets.
@@ -50,18 +50,17 @@ export class VaultCheck extends Check {
   }
 
   private async fetchSecrets(dbUrl: string): Promise<VaultSecret[]> {
-    try {
-      return await this.queryFn(dbUrl, VAULT_SQL) as unknown as VaultSecret[]
-    } catch {
-      // unique_name column may not exist in older supabase_vault versions
+    // supabase_vault may not be installed; any other failure is an error.
+    return readOrAbsent(async () => {
       try {
+        return await this.queryFn(dbUrl, VAULT_SQL) as unknown as VaultSecret[]
+      } catch (err) {
+        // unique_name does not exist in older supabase_vault versions (42703).
+        if ((err as { code?: string }).code !== '42703') throw err
         const rows = await this.queryFn(dbUrl, VAULT_SQL_FALLBACK) as unknown as VaultSecret[]
         return rows.map(r => ({ ...r, unique_name: null }))
-      } catch {
-        // supabase_vault extension may not be installed
-        return []
       }
-    }
+    }, [])
   }
 }
 

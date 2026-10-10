@@ -44,12 +44,12 @@ function makeQueryFn(
     const isSource = dbUrl.includes('source')
     // The check now probes for the storage schema and for which bucket columns
     // this Supabase version has, before selecting them.
-    if (sql.includes("table_name = 'buckets_analytics'")
-        || sql.includes("table_name = 'buckets_vectors'")) {
+    if (sql.includes("c.relname = 'buckets_analytics'")
+        || sql.includes("c.relname = 'buckets_vectors'")) {
       return [{ present: false }] as never
     }
     if (sql.includes('AS present')) return [{ present: true }] as never
-    if (sql.includes('information_schema.columns')) {
+    if (sql.includes('pg_attribute')) {
       return DEFAULT_BUCKET_COLUMNS.map(column_name => ({ column_name })) as never
     }
     if (sql.includes('storage.buckets')) {
@@ -77,12 +77,12 @@ const makePolicy = (overrides: Record<string, unknown> = {}) => ({
 function makePolicyQueryFn(sourcePolicies: unknown[], targetPolicies: unknown[]): QueryFn {
   return async (dbUrl: string, sql: string) => {
     const isSource = dbUrl.includes('source')
-    if (sql.includes("table_name = 'buckets_analytics'")
-        || sql.includes("table_name = 'buckets_vectors'")) {
+    if (sql.includes("c.relname = 'buckets_analytics'")
+        || sql.includes("c.relname = 'buckets_vectors'")) {
       return [{ present: false }] as never
     }
     if (sql.includes('AS present')) return [{ present: true }] as never
-    if (sql.includes('information_schema.columns')) {
+    if (sql.includes('pg_attribute')) {
       return DEFAULT_BUCKET_COLUMNS.map(column_name => ({ column_name })) as never
     }
     if (sql.includes('storage.buckets')) return [] as never
@@ -95,11 +95,11 @@ describe('StorageCheck', () => {
   const typedBucketQueryFn = (
     table: string, src: unknown[], tgt: unknown[],
   ): QueryFn => async (dbUrl: string, sql: string) => {
-    if (sql.includes(`table_name = '${table}'`)) return [{ present: true }] as never
-    if (sql.includes("table_name = 'buckets_analytics'")
-        || sql.includes("table_name = 'buckets_vectors'")) return [{ present: false }] as never
+    if (sql.includes(`c.relname = '${table}'`)) return [{ present: true }] as never
+    if (sql.includes("c.relname = 'buckets_analytics'")
+        || sql.includes("c.relname = 'buckets_vectors'")) return [{ present: false }] as never
     if (sql.includes('AS present')) return [{ present: true }] as never
-    if (sql.includes('information_schema.columns')) {
+    if (sql.includes('pg_attribute')) {
       return DEFAULT_BUCKET_COLUMNS.map(column_name => ({ column_name })) as never
     }
     if (sql.includes(`storage.${table}`)) {
@@ -194,12 +194,12 @@ describe('StorageCheck', () => {
     // would fail the query outright, so they must simply not be compared.
     const oldColumns = ['id', 'name', 'public', 'file_size_limit', 'allowed_mime_types']
     const queryFn: QueryFn = async (dbUrl: string, sql: string) => {
-      if (sql.includes("table_name = 'buckets_analytics'")
-        || sql.includes("table_name = 'buckets_vectors'")) {
+      if (sql.includes("c.relname = 'buckets_analytics'")
+        || sql.includes("c.relname = 'buckets_vectors'")) {
       return [{ present: false }] as never
     }
     if (sql.includes('AS present')) return [{ present: true }] as never
-      if (sql.includes('information_schema.columns')) {
+      if (sql.includes('pg_attribute')) {
         return oldColumns.map(column_name => ({ column_name })) as never
       }
       if (sql.includes('storage.buckets')) {

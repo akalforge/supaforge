@@ -42,7 +42,10 @@ export default class MigrateList extends BaseCommand {
 
     const migrations = await readLocalMigrations(dir).catch(() => [])
 
-    if (flags.offline || !config.source) {
+    // Offline when asked, or when there is nothing to connect to. Naming an
+    // environment is asking for its status: it used to be ignored whenever the
+    // config had no `source`, and the files were listed as if offline.
+    if (flags.offline || (!config.source && !flags.env)) {
       // Offline: list files only
       if (flags.json) {
         this.json(migrations)

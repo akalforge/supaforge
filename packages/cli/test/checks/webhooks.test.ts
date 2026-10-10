@@ -205,6 +205,13 @@ describe('WebhooksCheck', () => {
     expect(issues[0].sql?.down).toContain('CREATE TRIGGER legacy_webhook')
   })
 
+  it('marks removing an extra webhook as destructive', async () => {
+    const [issue] = await new WebhooksCheck(
+      queryFor([], [hook('public.legacy', 'legacy_webhook')]),
+    ).scan(mockContext())
+    expect(issue.destructive).toBe('removes a webhook')
+  })
+
   it('names the table in the issue, so two of one name are distinguishable', async () => {
     const issues = await new WebhooksCheck(
       queryFor([hook('public.a_items', 'notify_webhook')], []),
@@ -237,7 +244,7 @@ describe('WebhooksCheck', () => {
   it('survives a database with no supabase_functions schema', async () => {
     const queryFn = (async (_url: string, sql: string) => {
       if (sql.includes('pg_extension')) return []
-      throw new Error('relation "supabase_functions.hooks" does not exist')
+      throw Object.assign(new Error('relation "supabase_functions.hooks" does not exist'), { code: '42P01' })
     }) as unknown as QueryFn
 
     await expect(new WebhooksCheck(queryFn).scan(mockContext())).resolves.toEqual([])

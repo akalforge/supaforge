@@ -2,7 +2,7 @@ import type { QueryFn } from '../db'
 import { pgQuery } from '../db'
 import { quoteName } from '../utils/sql'
 import type { DriftIssue } from '../types/drift'
-import { Check, type CheckContext } from './base'
+import { Check, readOrAbsent, type CheckContext } from './base'
 
 /**
  * A database webhook, as the catalog holds it.
@@ -77,20 +77,11 @@ export class WebhooksCheck extends Check {
   }
 
   private async fetchHooks(dbUrl: string): Promise<WebhookEntry[]> {
-    try {
-      return await this.queryFn(dbUrl, HOOKS_SQL) as unknown as WebhookEntry[]
-    } catch {
-      return []
-    }
+    return readOrAbsent(async () => await this.queryFn(dbUrl, HOOKS_SQL) as unknown as WebhookEntry[], [])
   }
 
   private async checkPgNet(dbUrl: string): Promise<boolean> {
-    try {
-      const rows = await this.queryFn(dbUrl, PG_NET_CHECK_SQL)
-      return rows.length > 0
-    } catch {
-      return false
-    }
+    return readOrAbsent(async () => (await this.queryFn(dbUrl, PG_NET_CHECK_SQL)).length > 0, false)
   }
 }
 
@@ -173,6 +164,9 @@ function diffHooks(source: WebhookEntry[], target: WebhookEntry[]): DriftIssue[]
       title: `Extra webhook: ${h.name} on ${h.table_name}`,
       description: `Webhook "${h.name}" on ${h.table_name} exists in target but not in source.`,
       targetValue: h,
+      // Removing one stops the target calling out, which nobody may notice
+      // until something downstream goes quiet.
+      destructive: 'removes a webhook',
       sql: {
         up: dropStatement(h),
         // Recoverable, unlike before: the target's own definition is the way back.

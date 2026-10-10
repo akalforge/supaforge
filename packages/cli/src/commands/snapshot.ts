@@ -153,12 +153,11 @@ export default class Snapshot extends BaseCommand {
     // ── Capture snapshot (with optional migration) ───────────────────────────
     const { envName, env } = this.resolveEnv(config, flags.env)
 
-    // Preflight: verify database is reachable
-    if (!flags.json) {
-      const pre = this.createPreflight('Snapshot preflight checks')
-        .addDatabase('Database', envName, env.dbUrl)
-      await this.runPreflight(pre, 'Snapshot')
-    }
+    // Preflight: verify database is reachable. Under --json too, where its
+    // lines go to stderr and a failure is reported as JSON.
+    const pre = this.createPreflight('Snapshot preflight checks')
+      .addDatabase('Database', envName, env.dbUrl)
+    await this.runPreflight(pre, 'Snapshot')
 
     // ── Dry-run gate ─────────────────────────────────────────────────────────
     // Like clone / diff / restore, snapshot is a preview unless --apply is given.

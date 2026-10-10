@@ -4,7 +4,7 @@ import { pgQuery } from '../db.js'
 import type { DriftIssue } from '../types/drift.js'
 import { MIGRATIONS_TABLE } from '../constants.js'
 import { quoteLiteral } from '../utils/sql.js'
-import { Check, CheckSkipped, type CheckContext } from './base.js'
+import { Check, CheckSkipped, readOrAbsent, type CheckContext } from './base.js'
 import type { MigrationsMode } from '../types/config.js'
 
 export const DEFAULT_MIGRATIONS_DIR = 'supabase/migrations'
@@ -61,12 +61,8 @@ export class MigrationsCheck extends Check {
   }
 
   private async fetchDbMigrations(dbUrl: string): Promise<MigrationRecord[]> {
-    try {
-      return await this.queryFn(dbUrl, MIGRATIONS_SQL) as unknown as MigrationRecord[]
-    } catch {
-      // schema_migrations table doesn't exist — no records to compare
-      return []
-    }
+    // No schema_migrations table means no records; any other failure is an error.
+    return readOrAbsent(async () => await this.queryFn(dbUrl, MIGRATIONS_SQL) as unknown as MigrationRecord[], [])
   }
 }
 

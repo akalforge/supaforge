@@ -54,6 +54,33 @@ export function isCheckSkipped(err: unknown): err is CheckSkipped {
   return err instanceof Error && err.name === 'CheckSkipped'
 }
 
+/**
+ * SQLSTATEs that mean the thing queried isn't there: no such table or view
+ * (42P01), schema (3F000) or function (42883). A project without pg_cron or
+ * Realtime answers with one of these, and that is a genuine "nothing to
+ * compare".
+ *
+ * Nothing else is. A wrong password, a dropped connection or a permission
+ * error read as "nothing there" made the source look empty — and the target's
+ * webhooks, cron jobs and publications then looked extra and were dropped.
+ */
+const MISSING_OBJECT_CODES = new Set(['42P01', '3F000', '42883'])
+
+export function isMissingObject(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code
+  return typeof code === 'string' && MISSING_OBJECT_CODES.has(code)
+}
+
+/** Run a read that may legitimately find nothing, returning `absent` only then. */
+export async function readOrAbsent<T>(read: () => Promise<T>, absent: T): Promise<T> {
+  try {
+    return await read()
+  } catch (err) {
+    if (isMissingObject(err)) return absent
+    throw err
+  }
+}
+
 export abstract class Check {
   abstract readonly name: CheckName
   abstract scan(ctx: CheckContext): Promise<DriftIssue[]>
